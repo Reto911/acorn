@@ -193,6 +193,8 @@ Scheduler 保存 FIFO 待接纳队列、按 Submission ID 去重的记录、当�
 
 队列上限包含创建中的预留、排队任务和等待 `SubmitJob` 接纳确认的任务。Worker 明确接纳后归还该名额；明确忙而退回队列时继续占用原名额，避免重入队时挤占已经释放的空间。
 
+实现使用 `Arc<tokio::sync::Semaphore>`，初始许可数等于待接纳上限。创建前通过 `try_acquire_owned()` 取得许可，无许可时立即返回 QueueFull；`OwnedSemaphorePermit` 随创建操作、排队任务和等待接纳的任务转移。明确接纳、本地失败、事务回滚或重复投递合并时释放相应许可，忙时重新排队继续持有。信号量作为唯一名额计数，启动装入的每条 queued 记录也持有一个许可，见 [Tokio 信号量](https://docs.rs/tokio/latest/tokio/sync/struct.Semaphore.html)。
+
 每个 Worker 缓存以下本地状态：
 
 | 状态 | 含义与变化 |

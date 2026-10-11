@@ -4,6 +4,8 @@
 
 初始建表语句见 [001-initial-schema.sql](../sql/001-initial-schema.sql)，执行说明见 [SQL 使用说明](../sql/README.md)。
 
+[002-example-problem.sql](../sql/002-example-problem.sql) 提供随正式发布保留的两数求和题及 C/Python 限额、用例，在新库建表后装入；它不改变结构版本或创建用户。
+
 ## 1. 范围与职责
 
 使用一个 SQLite 数据库 `acorn.db`，保存用户、题库、提交历史、业务状态和有界结果。[Worker 设计](01-worker-design.md)规定执行与结果契约。
