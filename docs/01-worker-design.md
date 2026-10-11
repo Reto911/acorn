@@ -1,6 +1,6 @@
 # Worker 设计
 
-状态：设计稿，尚未实现。
+状态：实现中；P01 工程骨架与 P02 配置、日志、语言计划已落地，执行器和 RPC 尚未实现。
 
 ## 1. 目标与范围
 
@@ -414,6 +414,7 @@ artifact_max_bytes = 16_777_216
 
 [sandbox]
 backend = "isolate"
+executable = "/usr/bin/isolate"
 box_id = 0
 fd_max_count = 64
 file_size_max_bytes = 16_777_216
@@ -433,6 +434,8 @@ level = "info"
 ```
 
 Isolate box ID 由部署配置；同一宿主上不同 Worker 使用不同 ID。一个 Worker 内串行沿用这个数字，但每个阶段都重新初始化和清理沙箱，不沿用任何已执行环境。文件系统映射和权限由沙箱部署配置提供，不来自任务请求。
+
+`sandbox.executable`、C 编译器和 Python 解释器使用绝对路径，启动时以当前用户执行各工具的 `--version` 检查可调用性；这不等同于真实沙箱权限、控制组或配额验收。配置示例见 [worker.example.toml](../config/worker.example.toml)。启动检查正值预算、CPU 不超过墙钟、运行单进程、产物大小不超过单文件和磁盘配额，以及停机预算覆盖停止与清理。传输预算为原始载荷另留协议空间：请求按用例各预留 32 字节，并加 Job ID 上限与 1 KiB；响应按编译诊断或失败 stdout/stderr 的较大载荷，加 Job ID 上限与 1 KiB。
 
 请求合计大小按源码与全部输入、答案的字节数计算；gRPC 消息还有单独的传输上限。结果体积由编译诊断及失败用例的输出上限约束，启动时应确保响应上限能容纳这些结果。未确认结果数量有上限，已确认队列长度固定，因此内存记录不会因未获取结果持续增长。
 

@@ -1,0 +1,57 @@
+[server]
+listen = "127.0.0.1:50051"
+max_request_bytes = 16_777_216
+max_response_bytes = 1_048_576
+
+[request]
+job_id_max_bytes = 128
+source_max_bytes = 65_536
+case_max_count = 128
+input_max_bytes = 65_536
+expected_output_max_bytes = 65_536
+payload_max_bytes = 8_388_608
+
+[execution]
+job_wall_time_ms = 120_000
+max_run_cpu_time_ms = 10_000
+max_run_wall_time_ms = 15_000
+max_run_memory_bytes = 536_870_912
+run_process_max_count = 1
+stdout_max_bytes = 65_536
+stderr_max_bytes = 65_536
+
+[languages.c]
+compiler = "/usr/bin/gcc"
+compile_arguments = ["main.c", "-std=c17", "-O2", "-o", "program"]
+
+[languages.python]
+interpreter = "/usr/bin/python3"
+run_arguments = ["-I", "-B", "-S", "main.py"]
+
+[compile]
+cpu_time_ms = 10_000
+wall_time_ms = 20_000
+memory_bytes = 536_870_912
+process_max_count = 32
+diagnostic_max_bytes = 65_536
+artifact_max_bytes = 16_777_216
+
+[sandbox]
+backend = "isolate"
+executable = "/usr/bin/isolate"
+box_id = 0
+fd_max_count = 64
+file_size_max_bytes = 16_777_216
+disk_quota_kib = 65_536
+disk_quota_inodes = 4_096
+stop_timeout_ms = 2_000
+cleanup_timeout_ms = 3_000
+shutdown_timeout_ms = 8_000
+environment = { PATH = "/usr/bin:/bin", LANG = "C.UTF-8", HOME = "/box", TMPDIR = "/tmp" }
+
+[results]
+max_unacknowledged_results = 128
+acknowledged_queue_length = 128
+
+[logging]
+level = "info"

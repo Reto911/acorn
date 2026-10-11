@@ -1,6 +1,6 @@
 # Worker 与后端开发计划
 
-状态：实施中；P01 已完成，下一步 P02。
+状态：实施中；P01、P02 已完成，下一步 P03。
 
 ## 1. 目标与依据
 
@@ -8,7 +8,7 @@
 
 首版交付两个程序：独立 Worker，以及内含 Scheduler 的后端。完成后，可以使用 HTTP 提交 C 或 Python 单文件源码，经 gRPC 判题后查询持久化结果。每个 Worker 同时执行一个 Job，Job 内编译、运行和各用例始终串行；不同 Worker 可以处理不同 Submission。
 
-当前已有设计、建表 SQL、Cargo workspace、共享 Proto 和两个程序入口。以下工程目录是首版目标结构，配置解析、沙箱执行及后端业务仍待开发。先打通真实沙箱的 Worker，再接入后端；每个阶段完成自己的验收后进入下一阶段。
+当前已有设计、建表 SQL、Cargo workspace、共享 Proto、两个程序入口及 Worker 配置、日志和语言计划。以下工程目录是首版目标结构，沙箱执行及后端业务仍待开发。先打通真实沙箱的 Worker，再接入后端；每个阶段完成自己的验收后进入下一阶段。
 
 运行时检查限于已约定的请求、资源、并发接纳和业务状态要求。实现依赖组件的正常返回与错误报告，不增加跨域检查、Worker 身份核验或额外清理审计。
 
@@ -246,3 +246,9 @@ cargo test -p acorn-backend --locked
 workspace 已启用 `missing_docs = "deny"` 和 `clippy::missing_docs_in_private_items = "deny"`，三个 crate 均继承规则。补齐现有自写源码的模块、结构体及入口文档；Tonic/Prost 输出仅在 `worker::v1` 模块局部豁免，未修改生成文件。项目说明、本计划及 `AGENTS.md` 均将 Clippy 列为 Rust 代码变更的必备检查。
 
 已用临时缺文档代码验证公共模块、结构体、字段、方法、函数，以及私有模块、结构体、字段和方法都会使 Clippy 失败，随后恢复原源码。最终 `cargo fmt --all -- --check`、`cargo check --workspace --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings` 和 `cargo test --workspace --locked` 均通过，两个协议测试通过。此变更不扩展 P01 的运行能力，下一开发步骤仍为 P02。
+
+### 7.3 P02：已完成
+
+已提供 Worker TOML 配置类型与 [worker.example.toml](../config/worker.example.toml)，校验门限和预算关系，并以启动用户检查 Isolate、GCC、Python 的 `--version`。日志使用 tracing 单行英文文本、时间戳和配置级别，输出到 stderr，不继承环境日志级别。C/Python 适配器只生成命令数组、有限环境、编译预算和文件规则；C 编译一次得到固定 `program`，Python 无预编译，使用 `-I -B -S main.py`。
+
+已运行 `cargo fmt --all -- --check`、`cargo check --workspace --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo test -p acorn-worker --locked`。三个 Worker 测试通过，覆盖示例语言计划、代表性的无效预算和缺失工具。有效配置的入口检查确认英文日志写入 stderr；入口随后明确提示 RPC 尚未实现并返回 1，未宣称服务启动。下一步 P03 验证真实沙箱接口。

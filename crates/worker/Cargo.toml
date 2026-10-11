@@ -10,4 +10,9 @@ workspace = true
 
 [dependencies]
 acorn-protocol.workspace = true
+anyhow.workspace = true
 clap.workspace = true
+serde.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

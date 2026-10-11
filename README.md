@@ -2,7 +2,7 @@
 
 C 与 Python 3 的单文件源码判题系统。后端包含 HTTP API、Scheduler 和 SQLite 访问模块，通过 gRPC 调用独立 Worker。
 
-当前已建立 P01 工程骨架与共享协议。开发范围、执行契约和后续步骤见[文档索引](docs/README.md)与[开发计划](docs/04-development-plan.md)。
+当前已完成 P01 工程骨架与共享协议，以及 P02 Worker 配置、日志和语言计划。开发范围、执行契约和后续步骤见[文档索引](docs/README.md)与[开发计划](docs/04-development-plan.md)。
 
 ## 构建与检查
 
@@ -40,6 +40,12 @@ cargo run --locked -p acorn-worker -- --help
 cargo run --locked -p acorn-backend -- --help
 ```
 
-两个入口均要求 `--config <PATH>`，并支持 `--version`。P01 只解析配置路径；传入路径后会输出英文的服务尚未实现提示并以状态码 1 退出，不读取 TOML 或启动监听。Worker 配置解析在 P02 实现，后端配置解析在 P06 实现，配置示例随对应步骤提供。
+两个入口均要求 `--config <PATH>`，并支持 `--version`。Worker 读取并校验 [worker.example.toml](config/worker.example.toml) 同形的 TOML 配置，初始化英文 stderr 日志，检查 Isolate/GCC/Python 的可调用性并生成语言计划：
+
+```sh
+cargo run --locked -p acorn-worker -- --config config/worker.example.toml
+```
+
+当前有效 Worker 配置会输出验证完成日志，随后提示 RPC 服务尚未实现并以状态码 1 退出；无效配置或不可调用的工具明确报错，不启动监听。后端仍只解析路径，配置解析和示例在 P06 提供。工具的 `--version` 检查不能替代真实沙箱验收。
 
 真实判题需要 Linux、Isolate、C/Python 工具链，以及设计规定的控制组、用户配额和权限配置；这些前提在 P03 验证。
