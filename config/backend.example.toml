@@ -1,0 +1,44 @@
+[http]
+listen = "127.0.0.1:8080"
+max_request_bytes = 524_288
+default_page_size = 20
+max_page_size = 100
+
+[database]
+path = "acorn.db"
+busy_timeout_ms = 3_000
+
+[test_user]
+user_id = 1
+
+[scheduler]
+pending_max_count = 128
+workers = ["http://127.0.0.1:50051"]
+poll_interval_ms = 100
+retry_interval_ms = 1_000
+
+[grpc]
+submit_timeout_ms = 1_000
+get_timeout_ms = 1_000
+ack_timeout_ms = 1_000
+max_request_bytes = 16_777_216
+max_response_bytes = 1_048_576
+
+[request]
+source_max_bytes = 65_536
+case_max_count = 128
+input_max_bytes = 65_536
+expected_output_max_bytes = 65_536
+payload_max_bytes = 8_388_608
+max_run_cpu_time_ms = 10_000
+max_run_wall_time_ms = 15_000
+max_run_memory_bytes = 536_870_912
+
+[results]
+compile_diagnostic_max_bytes = 65_536
+stdout_max_bytes = 65_536
+stderr_max_bytes = 65_536
+failure_diagnostic_max_bytes = 512
+
+[logging]
+level = "info"

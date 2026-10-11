@@ -1,0 +1,622 @@
+//! P06 acceptance using the shipped schema, seed user and example problem in real SQLite.
+
+use acorn_backend::{
+    config::Config,
+    database::{Database, Error},
+    submissions::{
+        CreateSubmission, SubmissionFilter, SubmissionState, TerminalDetails, TerminalOutcome,
+        Verdict,
+    },
+};
+use acorn_protocol::worker::v1::{self as proto, failed_case::Exit};
+use base64::{Engine, prelude::BASE64_STANDARD};
+use sqlx::{Connection, Row, SqliteConnection, sqlite::SqliteConnectOptions};
+use uuid::Uuid;
+
+/// An independently initialized temporary database and application handle.
+struct Fixture {
+    /// Keeps all SQLite files alive until pool shutdown.
+    directory: tempfile::TempDir,
+    /// Validated settings aligned with the Worker sample.
+    config: Config,
+    /// Actual single-connection application database.
+    database: Database,
+}
+
+impl Fixture {
+    /// Initialize with exactly the deployment scripts before opening the application.
+    async fn new() -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config =
+            Config::parse(include_str!("../../../config/backend.example.toml")).unwrap();
+        config.database.path = directory.path().join("acorn.db");
+        let mut connection = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(&config.database.path)
+                .create_if_missing(true)
+                .foreign_keys(true),
+        )
+        .await
+        .unwrap();
+        for script in [
+            include_str!("../../../sql/001-initial-schema.sql"),
+            include_str!("../../../examples/seed-user.sql"),
+            include_str!("../../../sql/002-example-problem.sql"),
+        ] {
+            sqlx::raw_sql(script)
+                .execute(&mut connection)
+                .await
+                .unwrap();
+        }
+        connection.close().await.unwrap();
+        let database = Database::open(&config).await.unwrap();
+        Self {
+            directory,
+            config,
+            database,
+        }
+    }
+
+    /// External deployment connection for publishing fixtures and acquiring a SQLite lock.
+    async fn connection(&self) -> SqliteConnection {
+        SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(&self.config.database.path)
+                .foreign_keys(true),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// Finish database work before removing the temporary files.
+    async fn close(self) {
+        self.database.close().await;
+        drop(self.directory);
+    }
+}
+
+/// Create raw source without trimming or newline normalization.
+fn request(language: &str) -> CreateSubmission {
+    CreateSubmission {
+        problem_id: 1,
+        language_id: language.into(),
+        source: b"// source\r\n\t\n".to_vec(),
+        request_key: Uuid::new_v4(),
+    }
+}
+
+/// Valid AC terminal with no duplicate payload.
+fn accepted(config: &Config) -> TerminalOutcome {
+    TerminalOutcome::judged(
+        &proto::JudgeResult {
+            verdict: proto::Verdict::Accepted as i32,
+            ..Default::default()
+        },
+        4,
+        &config.results,
+    )
+    .unwrap()
+}
+
+/// Current queries move forward while old submissions and duplicate keys stay on their fixed version.
+#[tokio::test]
+async fn published_queries_and_fixed_version_creation() {
+    let fixture = Fixture::new().await;
+    let database = &fixture.database;
+    let list = database.list_problems(20, 0).await.unwrap();
+    assert_eq!(list.len(), 1);
+    let original = database.problem(1).await.unwrap().unwrap();
+    assert_eq!(original.summary.version_no, 1);
+    assert_eq!(
+        original
+            .languages
+            .iter()
+            .map(|language| language.language_id.as_str())
+            .collect::<Vec<_>>(),
+        ["c", "python"]
+    );
+    assert_eq!(original.languages[0].limits.cpu_time_ms, 1000);
+    assert!(database.problem_version(2, 1).await.unwrap().is_none());
+    let submission_request = request("c");
+    let created = database
+        .create_submission(submission_request.clone())
+        .await
+        .unwrap();
+    let task = created.task.unwrap();
+    assert_eq!(task.request.job_id, created.info.id);
+    assert_eq!(task.request.source, submission_request.source);
+    assert_eq!(task.request.cases.len(), 4);
+    assert_eq!(task.request.cases[2].input, b"-3 5\n");
+    let stored = database
+        .submission(&created.info.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.user_id, 1);
+    assert_eq!(stored.source, submission_request.source);
+    assert_eq!(stored.info.state, SubmissionState::Queued);
+
+    let mut connection = fixture.connection().await;
+    sqlx::raw_sql("BEGIN IMMEDIATE;
+        INSERT INTO problem_versions SELECT problem_id, 2, 'Version two', statement, comparison_mode, published_at_ms + 1 FROM problem_versions WHERE problem_id = 1 AND version_no = 1;
+        INSERT INTO problem_version_languages SELECT problem_id, 2, language_id, cpu_time_ms, wall_time_ms, memory_bytes FROM problem_version_languages WHERE problem_id = 1 AND version_no = 1 AND language_id = 'c';
+        INSERT INTO test_cases VALUES (1, 2, 1, X'00FF010A', X'FF000A');
+        UPDATE problems SET current_version_no = 2 WHERE id = 1;
+        INSERT INTO problems VALUES (2, NULL, 0);
+        COMMIT;").execute(&mut connection).await.unwrap();
+    connection.close().await.unwrap();
+    assert_eq!(
+        database
+            .problem(1)
+            .await
+            .unwrap()
+            .unwrap()
+            .summary
+            .version_no,
+        2
+    );
+    assert_eq!(
+        database.problem_version(1, 1).await.unwrap().unwrap(),
+        original
+    );
+    assert_eq!(database.list_problems(20, 0).await.unwrap().len(), 1);
+    assert!(database.problem(2).await.unwrap().is_none());
+    let repeated = database
+        .create_submission(submission_request)
+        .await
+        .unwrap();
+    assert!(!repeated.created);
+    assert_eq!(repeated.info.id, created.info.id);
+    assert_eq!(repeated.info.version_no, 1);
+    assert_eq!(repeated.task.unwrap().request.cases.len(), 4);
+    let new = database.create_submission(request("c")).await.unwrap();
+    assert_eq!(new.info.version_no, 2);
+    let task = new.task.unwrap();
+    assert_eq!(task.request.cases[0].input, [0, 255, 1, 10]);
+    assert_eq!(task.request.cases[0].expected_output, [255, 0, 10]);
+    assert_eq!(
+        database
+            .queued_task(&created.info.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .version_no,
+        1
+    );
+    assert!(matches!(
+        database.create_submission(request("python")).await,
+        Err(Error::LanguageNotAllowed)
+    ));
+    let mut unpublished = request("c");
+    unpublished.problem_id = 2;
+    assert!(matches!(
+        database.create_submission(unpublished).await,
+        Err(Error::ProblemNotFound)
+    ));
+    fixture.close().await;
+}
+
+/// Concurrent requests share one identity, and different content cannot claim its key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_idempotency_and_conflict() {
+    let fixture = Fixture::new().await;
+    let submitted = request("python");
+    let mut tasks = vec![];
+    for _ in 0..8 {
+        let database = fixture.database.clone();
+        let request = submitted.clone();
+        tasks.push(tokio::spawn(async move {
+            database.create_submission(request).await.unwrap()
+        }));
+    }
+    let mut inserted = 0;
+    let mut ids = vec![];
+    for task in tasks {
+        let result = task.await.unwrap();
+        inserted += usize::from(result.created);
+        ids.push(result.info.id);
+    }
+    assert_eq!(inserted, 1);
+    assert!(ids.iter().all(|id| id == &ids[0]));
+    assert_eq!(
+        fixture
+            .database
+            .submission_by_key(submitted.request_key)
+            .await
+            .unwrap()
+            .unwrap()
+            .info
+            .id,
+        ids[0]
+    );
+    let mut conflict = submitted;
+    conflict.source.push(b'x');
+    assert!(matches!(
+        fixture.database.create_submission(conflict).await,
+        Err(Error::IdempotencyConflict)
+    ));
+    assert_eq!(
+        fixture
+            .database
+            .list_submissions(&SubmissionFilter::default(), 100, 0)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    fixture.close().await;
+}
+
+/// Major result shapes round-trip without losing binary bytes, absence, or explicit zero values.
+#[tokio::test]
+async fn terminal_storage_and_immutability() {
+    let fixture = Fixture::new().await;
+    let config = &fixture.config;
+    let database = &fixture.database;
+    let ce_bytes = vec![0, 255, 128, b'\n'];
+    let ce = TerminalOutcome::judged(
+        &proto::JudgeResult {
+            verdict: proto::Verdict::CompileError as i32,
+            compile_diagnostic: ce_bytes.clone(),
+            compile_diagnostic_truncated: true,
+            failed_case: None,
+        },
+        4,
+        &config.results,
+    )
+    .unwrap();
+    let wa = TerminalOutcome::judged(
+        &proto::JudgeResult {
+            verdict: proto::Verdict::WrongAnswer as i32,
+            failed_case: Some(proto::FailedCase {
+                case_index: 2,
+                stdout: vec![0, 255],
+                stderr: vec![128, 10],
+                resources: Some(proto::ResourceUsage {
+                    cpu_time_us: Some(0),
+                    wall_time_us: None,
+                    peak_memory_bytes: Some(42),
+                }),
+                exit: Some(Exit::ExitCode(0)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        4,
+        &config.results,
+    )
+    .unwrap();
+    let failure = TerminalOutcome::failed(
+        &proto::JobFailure {
+            code: "JobDeadlineExceeded".into(),
+            diagnostic: "Job deadline exceeded".into(),
+        },
+        &config.results,
+    )
+    .unwrap();
+    let mut stored_results = vec![];
+    for terminal in [accepted(config), ce, wa, failure.clone()] {
+        let submitted = request("c");
+        let created = database.create_submission(submitted.clone()).await.unwrap();
+        assert!(
+            !database
+                .save_terminal(&created.info.id, &terminal)
+                .await
+                .unwrap()
+        );
+        assert!(database.mark_dispatching(&created.info.id).await.unwrap());
+        assert!(database.mark_running(&created.info.id).await.unwrap());
+        assert!(!database.mark_running(&created.info.id).await.unwrap());
+        assert!(
+            database
+                .save_terminal(&created.info.id, &terminal)
+                .await
+                .unwrap()
+        );
+        let stored = database
+            .submission(&created.info.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.info.terminal_at_ms.is_some());
+        assert!(
+            !database
+                .save_terminal(&created.info.id, &failure)
+                .await
+                .unwrap()
+        );
+        assert!(!database.requeue(&created.info.id).await.unwrap());
+        assert!(!database.mark_dispatching(&created.info.id).await.unwrap());
+        assert_eq!(
+            database
+                .submission(&created.info.id)
+                .await
+                .unwrap()
+                .unwrap(),
+            stored
+        );
+        assert!(
+            database
+                .queued_task(&created.info.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let repeated = database.create_submission(submitted).await.unwrap();
+        assert!(!repeated.created && repeated.task.is_none());
+        stored_results.push(stored);
+    }
+    assert_eq!(stored_results[0].info.verdict, Some(Verdict::AC));
+    assert!(stored_results[0].terminal_details.is_none());
+    let Some(TerminalDetails::Compile(compile)) = &stored_results[1].terminal_details else {
+        panic!("Expected CE details")
+    };
+    assert_eq!(
+        BASE64_STANDARD
+            .decode(&compile.compile_diagnostic_base64)
+            .unwrap(),
+        ce_bytes
+    );
+    assert!(compile.compile_diagnostic_truncated);
+    let Some(TerminalDetails::Case(case)) = &stored_results[2].terminal_details else {
+        panic!("Expected failed case")
+    };
+    assert_eq!(
+        BASE64_STANDARD
+            .decode(&case.failed_case.stdout_base64)
+            .unwrap(),
+        [0, 255]
+    );
+    assert_eq!(
+        case.failed_case.resources.as_ref().unwrap().cpu_time_us,
+        Some(0)
+    );
+    assert_eq!(
+        case.failed_case.resources.as_ref().unwrap().wall_time_us,
+        None
+    );
+    assert_eq!(case.failed_case.exit_code, Some(0));
+    assert_eq!(case.failed_case.signal, None);
+    let json = serde_json::to_value(&stored_results[2].terminal_details).unwrap();
+    assert!(json.get("verdict").is_none());
+    assert!(
+        json["failed_case"]["resources"]
+            .get("wall_time_us")
+            .is_none()
+    );
+    assert!(json["failed_case"].get("signal").is_none());
+    assert_eq!(stored_results[3].info.state, SubmissionState::Failed);
+    assert_eq!(stored_results[3].info.verdict, None);
+    assert_eq!(
+        database
+            .list_submissions(
+                &SubmissionFilter {
+                    verdict: Some(Verdict::CE),
+                    ..Default::default()
+                },
+                20,
+                0
+            )
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    fixture.close().await;
+}
+
+/// Startup operations preserve queued and terminal records while failing only old in-flight work.
+#[tokio::test]
+async fn startup_reads_and_conditional_transitions() {
+    let fixture = Fixture::new().await;
+    let database = &fixture.database;
+    let queued = database.create_submission(request("c")).await.unwrap().info;
+    let dispatching = database.create_submission(request("c")).await.unwrap().info;
+    let running = database
+        .create_submission(request("python"))
+        .await
+        .unwrap()
+        .info;
+    let finished = database.create_submission(request("c")).await.unwrap().info;
+    assert!(database.mark_dispatching(&dispatching.id).await.unwrap());
+    assert!(database.requeue(&dispatching.id).await.unwrap());
+    assert!(database.mark_dispatching(&dispatching.id).await.unwrap());
+    assert!(database.mark_dispatching(&running.id).await.unwrap());
+    assert!(database.mark_running(&running.id).await.unwrap());
+    assert!(database.mark_dispatching(&finished.id).await.unwrap());
+    assert!(
+        database
+            .save_terminal(&finished.id, &accepted(&fixture.config))
+            .await
+            .unwrap()
+    );
+    let old_terminal = database.submission(&finished.id).await.unwrap();
+    let startup = database.queued_tasks().await.unwrap();
+    assert_eq!(startup.len(), 1);
+    assert_eq!(startup[0].request.job_id, queued.id);
+    assert_eq!(database.interrupt_in_flight().await.unwrap(), 2);
+    assert_eq!(database.interrupt_in_flight().await.unwrap(), 0);
+    assert_eq!(
+        database.submission(&finished.id).await.unwrap(),
+        old_terminal
+    );
+    for id in [&dispatching.id, &running.id] {
+        let stored = database.submission(id).await.unwrap().unwrap();
+        let Some(TerminalDetails::Failure(failure)) = stored.terminal_details else {
+            panic!("Expected interruption")
+        };
+        assert_eq!(failure.code, "SchedulerInterrupted");
+    }
+    let another = database.create_submission(request("c")).await.unwrap().info;
+    let mut expected = [queued, another];
+    expected.sort_by(|a, b| (a.created_at_ms, &a.id).cmp(&(b.created_at_ms, &b.id)));
+    assert_eq!(
+        database
+            .queued_tasks()
+            .await
+            .unwrap()
+            .iter()
+            .map(|task| task.request.job_id.clone())
+            .collect::<Vec<_>>(),
+        expected
+            .iter()
+            .map(|info| info.id.clone())
+            .collect::<Vec<_>>()
+    );
+    let mut small = fixture.config.clone();
+    small.scheduler.pending_max_count = 1;
+    let limited = Database::open(&small).await.unwrap();
+    assert!(matches!(limited.queued_tasks().await, Err(Error::Data(_))));
+    limited.close().await;
+    fixture.close().await;
+}
+
+/// Invalid deployment data rolls back creation, and application writes enforce user foreign keys.
+#[tokio::test]
+async fn invalid_task_data_and_foreign_keys() {
+    let fixture = Fixture::new().await;
+    let mut connection = fixture.connection().await;
+    sqlx::query("DELETE FROM test_cases WHERE case_index = 2")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    assert!(matches!(
+        fixture.database.create_submission(request("c")).await,
+        Err(Error::Data(_))
+    ));
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM submissions")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    sqlx::query("INSERT INTO test_cases VALUES (1, 1, 2, X'', X'')")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM users WHERE id = 1")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    let Error::Sql(sqlx::Error::Database(error)) = fixture
+        .database
+        .create_submission(request("c"))
+        .await
+        .unwrap_err()
+    else {
+        panic!("Expected SQL foreign-key violation")
+    };
+    assert!(error.is_foreign_key_violation());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM submissions")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap(),
+        0
+    );
+    connection.close().await.unwrap();
+    fixture.close().await;
+}
+
+/// Existing-file, schema, user and finite-lock-wait requirements report actual errors.
+#[tokio::test]
+async fn startup_checks_and_finite_lock_wait() {
+    let fixture = Fixture::new().await;
+    let mut missing = fixture.config.clone();
+    missing.database.path = fixture.directory.path().join("missing.db");
+    assert!(matches!(Database::open(&missing).await, Err(Error::Sql(_))));
+    assert!(!missing.database.path.exists());
+    missing.database.path = fixture.config.database.path.clone();
+    missing.test_user.user_id = 999;
+    assert!(matches!(
+        Database::open(&missing).await,
+        Err(Error::Data(_))
+    ));
+    let mut connection = fixture.connection().await;
+    sqlx::query("PRAGMA user_version = 2")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    assert!(matches!(
+        Database::open(&fixture.config).await,
+        Err(Error::Data(_))
+    ));
+    sqlx::query("PRAGMA user_version = 1")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    let mut fast = fixture.config.clone();
+    fast.database.busy_timeout_ms = 50;
+    let database = Database::open(&fast).await.unwrap();
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        database.create_submission(request("c")),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(result, Err(Error::Sql(_))));
+    sqlx::query("ROLLBACK")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    assert!(
+        database
+            .create_submission(request("c"))
+            .await
+            .unwrap()
+            .created
+    );
+    database.close().await;
+    connection.close().await.unwrap();
+    fixture.close().await;
+}
+
+/// The P06 executable validates an initialized database and clearly reports pending services.
+#[tokio::test]
+async fn executable_validates_database_without_serving() {
+    let fixture = Fixture::new().await;
+    let text = include_str!("../../../config/backend.example.toml").replace(
+        "\"acorn.db\"",
+        &format!("{:?}", fixture.config.database.path),
+    );
+    let path = fixture.directory.path().join("backend.toml");
+    std::fs::write(&path, text).unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_acorn-backend"))
+        .arg("--config")
+        .arg(path)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("Backend database validated"));
+    assert!(stderr.contains("Backend HTTP and Scheduler services are not implemented yet"));
+    let mut connection = fixture.connection().await;
+    let hash: String = sqlx::query("SELECT password_hash FROM users WHERE id = 1")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap()
+        .try_get("password_hash")
+        .unwrap();
+    assert!(hash.starts_with("$argon2id$v=19$m=19456,t=2,p=1$"));
+    let parts: Vec<_> = hash.split('$').collect();
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD_NO_PAD
+            .decode(parts[4])
+            .unwrap()
+            .len(),
+        16
+    );
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD_NO_PAD
+            .decode(parts[5])
+            .unwrap()
+            .len(),
+        32
+    );
+    connection.close().await.unwrap();
+    fixture.close().await;
+}

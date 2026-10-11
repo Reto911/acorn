@@ -2,6 +2,8 @@
 
 状态：已确认，版本 1。
 
+P06 已实现后端[数据库模块](../crates/backend/src/database/mod.rs)、[题目类型](../crates/backend/src/problems.rs)与[提交和终态类型](../crates/backend/src/submissions.rs)，不改变本版本的 SQL 结构。数据库方法提供创建、固定版本任务装配、条件状态和终态写入，以及启动读取／中断操作；后续 Scheduler 和 HTTP 通过这些方法调用。开发用户脚本见 [seed-user.sql](../examples/seed-user.sql)。
+
 初始建表语句见 [001-initial-schema.sql](../sql/001-initial-schema.sql)，执行说明见 [SQL 使用说明](../sql/README.md)。
 
 [002-example-problem.sql](../sql/002-example-problem.sql) 提供随正式发布保留的两数求和题及 C/Python 限额、用例，在新库建表后装入；它不改变结构版本或创建用户。

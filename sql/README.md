@@ -20,7 +20,13 @@ sqlite3 -bail acorn.db < sql/002-example-problem.sql
 
 该文件是初始业务数据，数据库结构版本仍为 1。它写入题号 1、版本 1，允许 C 和 Python，包含四个按顺序执行的用例；输入和答案均为 BLOB。C 的单用例预算为 CPU 1 秒、墙钟 3 秒、内存 256 MiB；Python 为 CPU 2 秒、墙钟 5 秒、内存 256 MiB。发布在一个事务中完成：先创建版本指针为空的题目，再写版本、语言和用例，最后指向版本 1。
 
-示例脚本用于新库，不覆盖已有题目。它不创建用户；首版测试用户仍由部署预置，后端配置其 `user_id`。已发布示例题后续需要修改时，按题目版本规则发布新版本。
+示例脚本用于新库，不覆盖已有题目。它不创建用户；首版测试用户由部署预置，后端配置其 `user_id`。开发时可在建表后执行一次：
+
+```sh
+sqlite3 -bail acorn.db < examples/seed-user.sql
+```
+
+[seed-user.sql](../examples/seed-user.sql) 写入用户 1，保存合法 Argon2id PHC 哈希（19 MiB、2 次迭代、并行度 1）。哈希由已丢弃的随机密码生成，脚本不提供登录凭据，当前也不启用登录功能。此文件用于开发；正式部署自行预置用户。已发布示例题后续需要修改时，按题目版本规则发布新版本。
 
 API 与 Scheduler 每次打开数据库连接后，都必须在事务开始前执行 `PRAGMA foreign_keys = ON`；此设置属于连接，不会随数据库文件保存，见 [SQLite 外键文档](https://www.sqlite.org/foreignkeys.html)。源码、输入和期望输出按 BLOB 绑定，SQL 参数使用驱动提供的参数绑定。
 

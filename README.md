@@ -2,7 +2,7 @@
 
 C 与 Python 3 的单文件源码判题系统。后端包含 HTTP API、Scheduler 和 SQLite 访问模块，通过 gRPC 调用独立 Worker。
 
-当前已完成 P01–P05，Worker 可独立通过 gRPC 提供 C/Python 串行判题、结果查询和 ACK。后端业务从 P06 开始实现。开发范围、执行契约和后续步骤见[文档索引](docs/README.md)与[开发计划](docs/04-development-plan.md)。
+当前已完成 P01–P06，Worker 可独立通过 gRPC 提供 C/Python 串行判题、结果查询和 ACK；后端已有配置、日志和 SQLite 业务访问。下一步 P07 接入 Scheduler。开发范围、执行契约和后续步骤见[文档索引](docs/README.md)与[开发计划](docs/04-development-plan.md)。
 
 ## 构建与检查
 
@@ -50,7 +50,26 @@ cargo run --locked -p acorn-worker -- --config config/worker.example.toml
 
 Ctrl-C 或 SIGTERM 先停止接纳，再通过共同停止路径结束当前执行，按 `sandbox.shutdown_timeout_ms` 等待收尾。正常停机返回 0；启动、监听、停机超时或停止未确认明确报错并返回 1。停止未确认时，运行中的服务仍可查询和 ACK 失败结果，但保持执行位置占用，由部署端处置。结果只存在本进程内存，重启不恢复。
 
-无效配置或不可调用的工具明确报错，不启动监听。后端仍只解析路径，配置解析和示例在 P06 提供。工具的 `--version` 检查不能替代真实沙箱验收。
+无效配置或不可调用的工具明确报错，不启动监听。工具的 `--version` 检查不能替代真实沙箱验收。
+
+后端读取 [backend.example.toml](config/backend.example.toml)，初始化英文日志，打开已初始化数据库并检查结构版本及预置测试用户。数据库路径相对于启动目录；示例使用 `acorn.db`、用户 1 和 `http://127.0.0.1:50051` Worker endpoint。首次本地准备数据库，在仓库根目录执行一次：
+
+```sh
+sqlite3 -bail acorn.db < sql/001-initial-schema.sql
+sqlite3 -bail acorn.db < examples/seed-user.sql
+sqlite3 -bail acorn.db < sql/002-example-problem.sql
+cargo run --locked -p acorn-backend -- --config config/backend.example.toml
+```
+
+当前后端在数据库校验后关闭连接池，明确提示 HTTP 和 Scheduler 尚未实现，并返回 1；该提示不表示数据库校验失败，也不代表服务已启动。应用不会创建数据库、装入 SQL 或执行升级。测试用户脚本仅供开发，Argon2id 哈希来自已丢弃的随机密码；当前没有登录功能或可用登录凭据。示例题仍随正式发布保留。
+
+P06 的数据库方法可直接测试：
+
+```sh
+cargo test -p acorn-backend --locked
+```
+
+后端使用一个共享 SQLx SQLite 连接池，固定最多一个连接；外键和有限锁等待配置用于每次连接建立。创建提交以 `BEGIN IMMEDIATE` 固定最新版本和幂等键，在返回完整内存任务前提交事务并释放连接。状态及终态使用条件更新，AC/CE/首个失败用例和执行失败按类型化 JSON 保存，字节字段使用 Base64。配置中的 HTTP JSON 上限、gRPC 二进制上限和原始任务／结果上限分别计量，示例值与 Worker 示例对齐。
 
 真实判题需要 Linux、Isolate、C/Python 工具链，以及设计规定的控制组、用户配额和权限配置。P03 已验证实际阶段执行与隔离；P04 已通过内部接口完成真实 C/Python 判题，P05 已通过实际 gRPC 客户端提交、轮询并 ACK。
 

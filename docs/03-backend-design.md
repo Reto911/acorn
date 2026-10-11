@@ -2,6 +2,8 @@
 
 状态：已确认，作为首版实现依据。
 
+实施进度：P06 已完成配置、日志、SQLite 业务访问和开发用户预置；Scheduler、HTTP 及完整启动停机编排仍按 P07–P09 实施。
+
 ## 1. 目标与范围
 
 后端是单个 Rust 进程，内含 HTTP API、Scheduler 和数据库访问模块。前端通过 HTTP JSON 查询题目、提交单文件源码并轮询结果；Scheduler 通过 unary gRPC 向独立 Worker 推送任务、轮询状态和确认结果。
@@ -81,6 +83,12 @@ API 与 Scheduler 共享一个 SQLx `SqlitePool`，首版固定 `max_connections
 后端仍验证语言、用例数量、数据大小和限额：源码按 UTF-8 编码后的长度计量；输入、期望输出及总载荷按原始字节计量。HTTP 请求体、gRPC 消息和原始任务载荷各有独立上限。
 
 同一版本的测试数据在一次任务装配中按 `case_index` 读取。正常新提交由 API 将内存中的完整任务直接交给 Scheduler，Scheduler 不再次读源码或题库。启动装入排队任务时才由 Scheduler 读取其固定版本数据。
+
+P06 的 [`Database`](../crates/backend/src/database/mod.rs) 提供题目列表与版本查询、创建幂等查询、提交详情与筛选历史、完整固定版本任务装配，以及三个非终态条件更新、终态保存和旧在途中断写入。`create_submission` 在短事务内查重、固定版本并装配 `JudgingTask`，提交并释放连接后返回；待接纳名额由后续调用服务预留，数据库层不等待队列。已有同键同内容记录保留原版本；仅 queued 记录返回可交接任务。`queued_tasks` 按顺序读取，并在超过配置容量时明确报错；入口尚不调用这些启动状态处理，统一编排在 P09 接入。
+
+终态先由 [`TerminalOutcome`](../crates/backend/src/submissions.rs) 按已知用例数和原始字节预算校验结果形状，再执行单条条件 UPDATE，同时原子提交状态、独立 verdict、JSON 详情和终态时间。P07 的 Worker 客户端仍须校验完整响应的 Job ID、运行状态、阶段及进度与终态消息对应关系。数据库错误保留 SQLx 原始原因，业务查重与校验错误使用独立类型；关键写入错误触发退出的调用侧监督在 P09 完成。
+
+配置示例见 [backend.example.toml](../config/backend.example.toml)。`scheduler.workers` 使用 Tonic endpoint URI；数据库路径相对于进程工作目录。HTTP 体积按源码最坏 JSON 转义开销预留，gRPC 门限按原始任务／结果另加协议空间校验，Base64 JSON 长度不复用二进制消息门限。P06 程序入口完成配置、结构版本和预置用户检查后关闭连接，明确报告服务尚未实现并返回 1。
 
 ## 5. HTTP 接口
 

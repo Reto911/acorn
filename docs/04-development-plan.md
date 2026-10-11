@@ -1,6 +1,6 @@
 # Worker 与后端开发计划
 
-状态：实施中；P01–P05 已完成，下一步 P06。
+状态：实施中；P01–P06 已完成，下一步 P07。
 
 ## 1. 目标与依据
 
@@ -8,7 +8,7 @@
 
 首版交付两个程序：独立 Worker，以及内含 Scheduler 的后端。完成后，可以使用 HTTP 提交 C 或 Python 单文件源码，经 gRPC 判题后查询持久化结果。每个 Worker 同时执行一个 Job，Job 内编译、运行和各用例始终串行；不同 Worker 可以处理不同 Submission。
 
-当前已有设计、建表 SQL、Cargo workspace、共享 Proto、两个程序入口，以及可独立启动的 Worker：配置、日志、语言计划、Isolate 阶段接口、串行判题、RPC 和结果保留均已实现。以下工程目录是首版目标结构，后端业务仍待开发。先打通真实沙箱的 Worker，再接入后端；每个阶段完成自己的验收后进入下一阶段。
+当前已有设计、建表 SQL、Cargo workspace、共享 Proto、两个程序入口，以及可独立启动的 Worker：配置、日志、语言计划、Isolate 阶段接口、串行判题、RPC 和结果保留均已实现。后端配置、日志、数据库访问及开发用户预置已完成。以下工程目录是首版目标结构，Scheduler、HTTP 与完整启动停机编排仍待开发；每个阶段完成自己的验收后进入下一阶段。
 
 运行时检查限于已约定的请求、资源、并发接纳和业务状态要求。实现依赖组件的正常返回与错误报告，不增加跨域检查、Worker 身份核验或额外清理审计。
 
@@ -52,7 +52,7 @@ config/
   worker.example.toml
   backend.example.toml
 examples/
-  seed-user.sql             # 开发用测试用户预置文件，待 P06 提供
+  seed-user.sql             # 已有开发用测试用户预置文件
   submissions/
 sql/001-initial-schema.sql   # 已有建表脚本
 sql/002-example-problem.sql  # 已有两数求和题，随正式发布保留
@@ -291,3 +291,15 @@ Job 总期限和内部停止沿用 P03 的停止通道。普通结束在返回�
 最初在工具沙箱运行 RPC 测试，回环监听绑定统一因 `Operation not permitted` 失败；改在宿主环境执行后通过，保留此失败原因。另在宿主环境以专用 box 202 执行 `ACORN_ISOLATE_BOX_ID=202 cargo test -p acorn-worker --locked --test rpc -- --ignored --nocapture`，一个真实 gRPC 验收测试通过，实际完成 C/Python 各两个用例的 AC、轮询与 ACK。P03 的配额和宿主隔离验收未在本阶段重新运行，不能扩大本次证据范围。
 
 Worker 独立交付点已完成；下一步 P06 实现后端 TOML、日志、SQLx 数据库访问与测试用户预置。
+
+### 7.7 P06：已完成
+
+已提供 [Backend 配置示例](../config/backend.example.toml)、TOML 校验和英文 stderr 日志，分别约束 HTTP 请求体、原始任务、gRPC 消息及结果大小。入口共用 Tokio runtime 打开已有 SQLite 文件，固定 SQLx 连接池上限为 1，启用外键和有限 busy timeout，检查结构版本 1 与配置用户；不自动创建数据库、建表、迁移或装入样例。
+
+已实现[数据库模块](../crates/backend/src/database/mod.rs)：题目当前／指定版本、语言限额、提交详情与筛选列表、幂等键查询及启动排队读取。创建使用 `BEGIN IMMEDIATE`，在事务内再次查重、固定最新版本并装配完整任务；同键同内容保留原 ID 和版本，内容冲突明确报错。源码和用例按 BLOB 绑定；返回前提交事务、释放连接，不跨越 Scheduler 交接。条件状态更新和终态保存防止迟到写入覆盖终态，并提供旧在途记录的 `SchedulerInterrupted` 写入方法。启动编排仍在 P09 接入。
+
+[终态类型](../crates/backend/src/submissions.rs)覆盖 AC、CE、首个失败用例及执行失败，独立保存 verdict，字节字段使用 Base64，未知统计保持缺失、真实零值保留。开发用 [seed-user.sql](../examples/seed-user.sql) 提供用户 1 和合法 Argon2id 编码哈希；生成时已实际验证哈希，随机原密码未保留，不构成登录凭据或鉴权实现。示例题继续使用原 `sql/002-example-problem.sql`，初始结构与题目脚本均未修改。
+
+已执行 `cargo fmt --all -- --check`、`cargo check --workspace --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings` 和 `cargo test -p acorn-backend --locked`，均通过。九个后端测试使用真实临时 SQLite 数据库和现有 SQL 脚本，覆盖查询与发布后版本固定、八个同键并发请求只插入一条记录、内容冲突、主要终态和二进制数据往返、可选统计、条件写入与终态不可覆盖、启动排队顺序和容量、连续用例校验、外键、缺失文件／用户、错误结构版本及有限锁等待。独立程序测试确认配置与数据库检查、英文日志及明确的未实现服务退出。首次检查发现测试中的多余 `Vec`，改为数组后 Clippy 通过。
+
+本阶段未启动 HTTP 或 Scheduler，未运行新的 Worker／Isolate 验收。当前后端入口完成数据库检查并关闭连接后，以状态码 1 报告服务尚未实现；数据库模块可由测试及后续组件调用。下一步 P07 实现内存队列、Worker 客户端与调度闭环。
