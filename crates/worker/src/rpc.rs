@@ -143,8 +143,8 @@ impl WorkerService {
             || run.cpu_time_ms > execution.max_run_cpu_time_ms
             || run.wall_time_ms == 0
             || run.wall_time_ms > execution.max_run_wall_time_ms
-            || run.memory_bytes == 0
-            || run.memory_bytes > execution.max_run_memory_bytes
+            || run.memory_kib == 0
+            || run.memory_kib > execution.max_run_memory_kib
         {
             return Err(Status::invalid_argument("InvalidJob"));
         }

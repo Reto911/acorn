@@ -1,6 +1,6 @@
 # 数据库 SQL
 
-[001-initial-schema.sql](001-initial-schema.sql) 实现[数据库设计版本 1](../docs/02-database-design.md)的六张业务表、外键、约束和索引。数据库结构版本记录在 `PRAGMA user_version` 中。
+[001-initial-schema.sql](001-initial-schema.sql) 实现[数据库设计版本 2](../docs/02-database-design.md)的六张业务表、外键、约束和索引。数据库结构版本记录在 `PRAGMA user_version` 中。
 
 使用 SQLite 3.38.0 或更新版本，并启用 JSON 函数。表使用 [STRICT 模式](https://www.sqlite.org/stricttables.html)约束存储类型；[JSON 函数](https://www.sqlite.org/json1.html)检查终态详情是合法 JSON 对象。
 
@@ -12,13 +12,15 @@ sqlite3 -bail acorn.db < sql/001-initial-schema.sql
 
 脚本自行开启并提交事务。应用使用驱动执行时，应在尚未开始事务的连接上运行整个脚本；发生错误时回滚并报告，不继续使用未初始化完成的数据库。脚本不插入业务数据。
 
+结构版本 2 的 `problem_version_languages.memory_kib` 以 KiB 保存内存限额，取代版本 1 的 `memory_bytes`。后端只接受结构版本 2，不自动升级；已有版本 1 数据库需由部署端离线转换或另建新库，不能直接重跑初始脚本、仅修改 `user_version` 或沿用原字节数。本文初始化命令仅适用于新库。
+
 [002-example-problem.sql](002-example-problem.sql) 提供随正式发布保留的内置题目“两数求和（A + B）”。在新库建表后执行一次：
 
 ```sh
 sqlite3 -bail acorn.db < sql/002-example-problem.sql
 ```
 
-该文件是初始业务数据，数据库结构版本仍为 1。它写入题号 1、版本 1，允许 C 和 Python，包含四个按顺序执行的用例；输入和答案均为 BLOB。C 的单用例预算为 CPU 1 秒、墙钟 3 秒、内存 256 MiB；Python 为 CPU 2 秒、墙钟 5 秒、内存 256 MiB。发布在一个事务中完成：先创建版本指针为空的题目，再写版本、语言和用例，最后指向版本 1。
+该文件是初始业务数据，不改变数据库结构版本 2。它写入题号 1、版本 1，允许 C 和 Python，包含四个按顺序执行的用例；输入和答案均为 BLOB。C 的单用例预算为 CPU 1 秒、墙钟 3 秒、内存 256 MiB；Python 为 CPU 2 秒、墙钟 5 秒、内存 256 MiB，内存列均保存 262144 KiB。发布在一个事务中完成：先创建版本指针为空的题目，再写版本、语言和用例，最后指向版本 1。
 
 示例脚本用于新库，不覆盖已有题目。它不创建用户；首版测试用户由部署预置，后端配置其 `user_id`。开发时可在建表后执行一次：
 

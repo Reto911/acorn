@@ -42,11 +42,11 @@ VALUES (
 );
 
 INSERT INTO problem_version_languages (
-    problem_id, version_no, language_id, cpu_time_ms, wall_time_ms, memory_bytes
+    problem_id, version_no, language_id, cpu_time_ms, wall_time_ms, memory_kib
 )
 VALUES
-    (1, 1, 'c', 1000, 3000, 268435456),
-    (1, 1, 'python', 2000, 5000, 268435456);
+    (1, 1, 'c', 1000, 3000, 262144),
+    (1, 1, 'python', 2000, 5000, 262144);
 
 INSERT INTO test_cases (
     problem_id, version_no, case_index, input, expected_output

@@ -121,8 +121,8 @@ pub struct RequestConfig {
     pub max_run_cpu_time_ms: u64,
     /// Per-case wall-clock ceiling in milliseconds.
     pub max_run_wall_time_ms: u64,
-    /// Per-case memory ceiling in bytes.
-    pub max_run_memory_bytes: u64,
+    /// Per-case memory ceiling in KiB.
+    pub max_run_memory_kib: u64,
 }
 
 /// Raw result limits, distinct from Base64 JSON size and gRPC encoding overhead.
@@ -222,8 +222,8 @@ impl Config {
                 self.request.max_run_wall_time_ms,
             ),
             (
-                "request.max_run_memory_bytes",
-                self.request.max_run_memory_bytes,
+                "request.max_run_memory_kib",
+                self.request.max_run_memory_kib,
             ),
             (
                 "results.compile_diagnostic_max_bytes",
@@ -266,6 +266,10 @@ impl Config {
         ensure!(
             self.request.max_run_cpu_time_ms <= self.request.max_run_wall_time_ms,
             "Run CPU ceiling exceeds wall ceiling"
+        );
+        ensure!(
+            self.request.max_run_memory_kib <= i32::MAX as u64,
+            "request.max_run_memory_kib exceeds Isolate's supported KiB range"
         );
         ensure!(
             !self.scheduler.workers.is_empty(),

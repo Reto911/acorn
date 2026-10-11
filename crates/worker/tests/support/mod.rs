@@ -97,7 +97,7 @@ pub fn job(id: &str, language: &str, source: &str, cases: &[(&[u8], &[u8])]) -> 
         run_limits: Some(RunLimits {
             cpu_time_ms: 1000,
             wall_time_ms: 2000,
-            memory_bytes: 128 * 1024 * 1024,
+            memory_kib: 128 * 1024,
         }),
     }
 }

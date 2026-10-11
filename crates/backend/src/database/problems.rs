@@ -69,7 +69,7 @@ async fn language_limits(
     problem_id: i64,
     version: i64,
 ) -> Result<Vec<LanguageLimits>> {
-    let rows = sqlx::query("SELECT language_id, cpu_time_ms, wall_time_ms, memory_bytes FROM problem_version_languages WHERE problem_id = ? AND version_no = ? ORDER BY language_id")
+    let rows = sqlx::query("SELECT language_id, cpu_time_ms, wall_time_ms, memory_kib FROM problem_version_languages WHERE problem_id = ? AND version_no = ? ORDER BY language_id")
         .bind(problem_id).bind(version).fetch_all(connection).await?;
     rows.iter()
         .map(|row| {
@@ -86,7 +86,7 @@ pub(super) fn run_limits(row: &SqliteRow) -> Result<RunLimits> {
     Ok(RunLimits {
         cpu_time_ms: unsigned(row.try_get("cpu_time_ms")?)?,
         wall_time_ms: unsigned(row.try_get("wall_time_ms")?)?,
-        memory_bytes: unsigned(row.try_get("memory_bytes")?)?,
+        memory_kib: unsigned(row.try_get("memory_kib")?)?,
     })
 }
 

@@ -22,6 +22,7 @@ fn example_builds_both_language_plans() {
         ["main.c", "-std=c17", "-O2", "-o", "program"]
     );
     assert_eq!(compile.limits.process_max_count, 32);
+    assert_eq!(compile.limits.memory_kib, 512 * 1024);
     assert_eq!(c.run.executable.to_str(), Some("./program"));
     let python = language::plan("python", &config).unwrap();
     assert!(python.compile.is_none());
@@ -62,5 +63,42 @@ fn missing_tool_is_reported() {
             .unwrap_err()
             .to_string()
             .contains("Failed to start configured tool")
+    );
+}
+
+/// One KiB is a valid limit; byte-sized artifacts must still fit that file budget.
+#[test]
+fn kib_limits_and_artifact_bytes_use_explicit_units() {
+    let mut config = Config::parse(EXAMPLE).unwrap();
+    config.execution.max_run_memory_kib = 1;
+    config.compile.memory_kib = 1;
+    config.sandbox.file_size_max_kib = 1;
+    config.sandbox.disk_quota_kib = 1;
+    config.compile.artifact_max_bytes = 1024;
+    config.validate().unwrap();
+    config.compile.artifact_max_bytes = 1025;
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("single-file")
+    );
+    config.compile.artifact_max_bytes = 1024;
+    config.compile.memory_kib = 0;
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("compile.memory_kib")
+    );
+    config.compile.memory_kib = i32::MAX as u64 + 1;
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("supported KiB range")
     );
 }

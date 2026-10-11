@@ -63,6 +63,8 @@ cargo run --locked -p acorn-backend -- --config config/backend.example.toml
 
 当前后端在数据库校验后关闭连接池，明确提示 HTTP 和 Scheduler 尚未实现，并返回 1；该提示不表示数据库校验失败，也不代表服务已启动。应用不会创建数据库、装入 SQL 或执行升级。测试用户脚本仅供开发，Argon2id 哈希来自已丢弃的随机密码；当前没有登录功能或可用登录凭据。示例题仍随正式发布保留。
 
+内存限额和 Isolate 单文件／磁盘空间限额统一使用 KiB（1 KiB = 1024 字节），配置字段明确以 `_kib` 结尾；实际资源统计、输出保留和产物导出大小仍按字节计量。数据库结构版本为 2，内存列为 `memory_kib`；旧配置与旧数据库需更新，后端与 Worker 按当前 KiB 协议同步构建运行。已有数据库由部署端离线转换或另建新库，详见 [SQL 使用说明](sql/README.md)。
+
 P06 的数据库方法可直接测试：
 
 ```sh
@@ -100,4 +102,4 @@ ACORN_ISOLATE_BOX_ID=200 ACORN_ISOLATION_SENTINEL=host-only-value \
   cargo test -p acorn-worker --locked --test isolate_real -- --ignored --nocapture
 ```
 
-该测试实际编译 C、使用独立程序副本执行两次并运行 Python，检查输出超限停止、三处可写目录共享空间及 inode 配额，以及宿主私有文件、继承环境、额外 FD 和宿主监听端口的隔离。配额设置失败、管理器异常退出和清理警告另由可控测试覆盖；停止未确认时跳过依赖停止的清理并保留执行占用，需由部署端处置。
+该测试实际编译 C、使用独立程序副本执行两次并运行 Python，检查输出超限停止、1 KiB 单文件上限触发 `EFBIG`、三处可写目录共享空间及 inode 配额，以及宿主私有文件、继承环境、额外 FD 和宿主监听端口的隔离。配额设置失败、管理器异常退出和清理警告另由可控测试覆盖；停止未确认时跳过依赖停止的清理并保留执行占用，需由部署端处置。

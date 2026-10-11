@@ -433,7 +433,7 @@ async fn validation_rejects_without_registering() {
     fixture.config.request.payload_max_bytes = 32;
     let mut harness = Harness::start(fixture.config.clone()).await;
     let mut invalid_limits = job("limits", "python", "pass", &[(b"", b"")]);
-    invalid_limits.run_limits.as_mut().unwrap().memory_bytes = 0;
+    invalid_limits.run_limits.as_mut().unwrap().memory_kib = 0;
     for (invalid, reason) in [
         (
             job("language", "other", "pass", &[(b"", b"")]),

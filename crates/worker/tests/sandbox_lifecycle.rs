@@ -10,7 +10,7 @@ use acorn_worker::{
 use tokio::{sync::watch, time::Instant};
 
 /// Create a manager substitute that records operations and injects one chosen failure.
-fn fixture(mode: &str) -> (tempfile::TempDir, IsolateSandbox) {
+fn fixture(mode: &str, file_size_max_kib: u64) -> (tempfile::TempDir, IsolateSandbox) {
     let directory = tempfile::tempdir().unwrap();
     let script = directory.path().join("manager");
     fs::write(
@@ -61,6 +61,7 @@ elif '--cleanup' in args:
     fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
     let mut config = Config::parse(include_str!("../../../config/worker.example.toml")).unwrap();
     config.sandbox.executable = script;
+    config.sandbox.file_size_max_kib = file_size_max_kib;
     (directory, IsolateSandbox::new(config.sandbox))
 }
 
@@ -77,7 +78,7 @@ fn spec() -> SandboxRunSpec {
         limits: StageLimits {
             cpu_time_ms: 1000,
             wall_time_ms: 2000,
-            memory_bytes: 16 * 1024 * 1024,
+            memory_kib: 16 * 1024,
             process_max_count: 1,
         },
         output: OutputPolicy::Compile { max_bytes: 1024 },
@@ -103,7 +104,7 @@ fn control() -> (
 /// Compilation drains both streams while retaining a combined prefix; cleanup failure is harmless.
 #[tokio::test]
 async fn bounded_diagnostics_and_cleanup_warning_preserve_result() {
-    let (directory, mut sandbox) = fixture("cleanup_failure");
+    let (directory, mut sandbox) = fixture("cleanup_failure", 16 * 1024);
     let (_sender, control) = control();
     let outcome = sandbox.run(spec(), control).await.unwrap();
     assert_eq!(outcome.exit_code, Some(0));
@@ -127,7 +128,7 @@ async fn bounded_diagnostics_and_cleanup_warning_preserve_result() {
 /// A failed quota initialization cannot reach the stage execution operation.
 #[tokio::test]
 async fn quota_failure_does_not_execute_program() {
-    let (directory, mut sandbox) = fixture("quota_failure");
+    let (directory, mut sandbox) = fixture("quota_failure", 16 * 1024);
     let (_sender, control) = control();
     let error = sandbox.run(spec(), control).await.unwrap_err();
     assert_eq!(error.kind, SandboxErrorKind::Execution);
@@ -141,7 +142,7 @@ async fn quota_failure_does_not_execute_program() {
 /// An abnormal manager exit skips dependent cleanup and retains the execution slot.
 #[tokio::test]
 async fn unconfirmed_stop_retains_resources_and_blocks_reuse() {
-    let (directory, mut sandbox) = fixture("manager_failure");
+    let (directory, mut sandbox) = fixture("manager_failure", 16 * 1024);
     let (_sender, stage_control) = control();
     let error = sandbox.run(spec(), stage_control).await.unwrap_err();
     assert_eq!(error.kind, SandboxErrorKind::StopUnconfirmed);
@@ -166,7 +167,7 @@ async fn unconfirmed_stop_retains_resources_and_blocks_reuse() {
 /// A Worker shutdown signal uses SIGTERM and preserves its cause through manager interruption.
 #[tokio::test]
 async fn internal_stop_is_confirmed_before_cleanup() {
-    let (directory, mut sandbox) = fixture("internal_stop");
+    let (directory, mut sandbox) = fixture("internal_stop", 16 * 1024);
     let (sender, stage_control) = control();
     let request = async {
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -189,4 +190,43 @@ async fn internal_stop_is_confirmed_before_cleanup() {
     assert_eq!(outcome.exit_signal, Some(15));
     assert!(sandbox.is_available());
     assert!(directory.path().join("cleaned").exists());
+}
+
+/// KiB limits below 1024 reach Isolate unchanged instead of becoming zero.
+#[tokio::test]
+async fn small_kib_limits_are_passed_without_division() {
+    for kib in [1, 1023] {
+        let (directory, mut sandbox) = fixture("normal", kib);
+        let mut stage = spec();
+        stage.limits.memory_kib = kib;
+        let (_sender, control) = control();
+        sandbox.run(stage, control).await.unwrap();
+        let operations = fs::read_to_string(directory.path().join("operations")).unwrap();
+        let arguments: Vec<_> = operations
+            .lines()
+            .find(|line| line.contains("--run"))
+            .unwrap()
+            .split_whitespace()
+            .collect();
+        assert!(arguments.contains(&format!("--cg-mem={kib}").as_str()));
+        assert!(arguments.contains(&format!("--fsize={kib}").as_str()));
+    }
+}
+
+/// Zero or unsupported KiB limits fail before initializing or executing a sandbox.
+#[tokio::test]
+async fn invalid_kib_limits_do_not_start_isolate() {
+    let too_large = i32::MAX as u64 + 1;
+    for (memory_kib, file_kib) in [(0, 1), (1, 0), (too_large, 1), (1, too_large)] {
+        let (directory, mut sandbox) = fixture("normal", file_kib);
+        let mut stage = spec();
+        stage.limits.memory_kib = memory_kib;
+        let (_sender, control) = control();
+        assert_eq!(
+            sandbox.run(stage, control).await.unwrap_err().kind,
+            SandboxErrorKind::Execution
+        );
+        assert!(!directory.path().join("operations").exists());
+        assert!(sandbox.is_available());
+    }
 }

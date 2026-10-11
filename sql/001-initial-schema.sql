@@ -1,4 +1,4 @@
--- Initial schema for docs/02-database-design.md, version 1.
+-- Initial schema for docs/02-database-design.md, version 2.
 -- Requires SQLite 3.38.0 or later with JSON functions enabled.
 -- Run once against an empty database, outside an existing transaction.
 -- Every application connection must also enable foreign_keys.
@@ -47,7 +47,7 @@ CREATE TABLE problem_version_languages (
     language_id TEXT NOT NULL CHECK (language_id IN ('c', 'python')),
     cpu_time_ms INTEGER NOT NULL CHECK (cpu_time_ms > 0),
     wall_time_ms INTEGER NOT NULL CHECK (wall_time_ms > 0),
-    memory_bytes INTEGER NOT NULL CHECK (memory_bytes > 0),
+    memory_kib INTEGER NOT NULL CHECK (memory_kib > 0),
     PRIMARY KEY (problem_id, version_no, language_id),
     FOREIGN KEY (problem_id, version_no)
         REFERENCES problem_versions (problem_id, version_no)
@@ -132,6 +132,6 @@ CREATE INDEX submissions_verdict_history_idx
 CREATE INDEX submissions_queued_order_idx
     ON submissions (created_at_ms, id) WHERE state = 'queued';
 
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;
 
 COMMIT;

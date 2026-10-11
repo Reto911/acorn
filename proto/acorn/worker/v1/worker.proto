@@ -21,7 +21,7 @@ message TestCase {
 message RunLimits {
   uint64 cpu_time_ms = 1;
   uint64 wall_time_ms = 2;
-  uint64 memory_bytes = 3;
+  uint64 memory_kib = 3;
 }
 message SubmitJobReply {
   string job_id = 1;

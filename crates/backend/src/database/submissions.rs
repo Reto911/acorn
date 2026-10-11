@@ -298,7 +298,7 @@ async fn load_task(
     config: &Config,
 ) -> Result<JudgingTask> {
     validate_source(&source, config)?;
-    let language = sqlx::query("SELECT v.comparison_mode, l.cpu_time_ms, l.wall_time_ms, l.memory_bytes FROM problem_versions v JOIN problem_version_languages l USING (problem_id, version_no) WHERE v.problem_id = ? AND v.version_no = ? AND l.language_id = ?")
+    let language = sqlx::query("SELECT v.comparison_mode, l.cpu_time_ms, l.wall_time_ms, l.memory_kib FROM problem_versions v JOIN problem_version_languages l USING (problem_id, version_no) WHERE v.problem_id = ? AND v.version_no = ? AND l.language_id = ?")
         .bind(info.problem_id).bind(info.version_no).bind(&info.language_id).fetch_optional(&mut *connection).await?.ok_or(Error::LanguageNotAllowed)?;
     if language.try_get::<String, _>("comparison_mode")? != "trim_trailing_ascii_whitespace" {
         return Err(Error::Data(anyhow::anyhow!(
@@ -311,8 +311,8 @@ async fn load_task(
         || limits.cpu_time_ms > policy.max_run_cpu_time_ms
         || limits.wall_time_ms == 0
         || limits.wall_time_ms > policy.max_run_wall_time_ms
-        || limits.memory_bytes == 0
-        || limits.memory_bytes > policy.max_run_memory_bytes
+        || limits.memory_kib == 0
+        || limits.memory_kib > policy.max_run_memory_kib
     {
         return Err(Error::Data(anyhow::anyhow!(
             "Stored task limits exceed deployment ceilings"

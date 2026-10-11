@@ -1,8 +1,10 @@
 # 数据库设计
 
-状态：已确认，版本 1。
+状态：已确认，版本 2。
 
-P06 已实现后端[数据库模块](../crates/backend/src/database/mod.rs)、[题目类型](../crates/backend/src/problems.rs)与[提交和终态类型](../crates/backend/src/submissions.rs)，不改变本版本的 SQL 结构。数据库方法提供创建、固定版本任务装配、条件状态和终态写入，以及启动读取／中断操作；后续 Scheduler 和 HTTP 通过这些方法调用。开发用户脚本见 [seed-user.sql](../examples/seed-user.sql)。
+P06 已实现后端[数据库模块](../crates/backend/src/database/mod.rs)、[题目类型](../crates/backend/src/problems.rs)与[提交和终态类型](../crates/backend/src/submissions.rs)。数据库方法提供创建、固定版本任务装配、条件状态和终态写入，以及启动读取／中断操作；后续 Scheduler 和 HTTP 通过这些方法调用。开发用户脚本见 [seed-user.sql](../examples/seed-user.sql)。
+
+结构版本 2 将版本语言表的 `memory_bytes` 改为 `memory_kib`，以 KiB 保存内存限额并直接装配新的 RPC 字段；实际结果中的内存统计仍为字节。应用检查 `PRAGMA user_version = 2`，拒绝旧结构，不自动修改已有数据库。旧库的离线转换或新库初始化由部署端执行，不能只修改结构版本号或将原字节值直接当作 KiB。
 
 初始建表语句见 [001-initial-schema.sql](../sql/001-initial-schema.sql)，执行说明见 [SQL 使用说明](../sql/README.md)。
 
@@ -99,7 +101,7 @@ API 与 Scheduler 属于同一后端进程，见[后端设计](03-backend-design
 | `language_id` | 首版为 `c` 或 `python` |
 | `cpu_time_ms` | 单用例 CPU 限额，正整数 |
 | `wall_time_ms` | 单用例墙钟限额，正整数 |
-| `memory_bytes` | 单用例内存限额，正整数 |
+| `memory_kib` | 单用例内存限额，正整数，单位 KiB |
 
 联合主键为 `(problem_id, version_no, language_id)`。一行表示该版本允许此语言，并给出对应预算；C 与 Python 可以采用不同限额。所有 Worker 使用相同的语言约定，不在此记录 Worker 能力。
 

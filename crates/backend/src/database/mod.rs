@@ -75,9 +75,9 @@ impl Database {
             let version: i64 = sqlx::query_scalar("PRAGMA user_version")
                 .fetch_one(&pool)
                 .await?;
-            if version != 1 {
+            if version != 2 {
                 return Err(Error::Data(anyhow::anyhow!(
-                    "Expected schema version 1, got {version}"
+                    "Expected schema version 2, got {version}"
                 )));
             }
             let exists: bool =

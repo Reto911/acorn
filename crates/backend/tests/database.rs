@@ -116,6 +116,7 @@ async fn published_queries_and_fixed_version_creation() {
         ["c", "python"]
     );
     assert_eq!(original.languages[0].limits.cpu_time_ms, 1000);
+    assert_eq!(original.languages[0].limits.memory_kib, 256 * 1024);
     assert!(database.problem_version(2, 1).await.unwrap().is_none());
     let submission_request = request("c");
     let created = database
@@ -126,6 +127,10 @@ async fn published_queries_and_fixed_version_creation() {
     assert_eq!(task.request.job_id, created.info.id);
     assert_eq!(task.request.source, submission_request.source);
     assert_eq!(task.request.cases.len(), 4);
+    assert_eq!(
+        task.request.run_limits.as_ref().unwrap().memory_kib,
+        256 * 1024
+    );
     assert_eq!(task.request.cases[2].input, b"-3 5\n");
     let stored = database
         .submission(&created.info.id)
@@ -139,7 +144,7 @@ async fn published_queries_and_fixed_version_creation() {
     let mut connection = fixture.connection().await;
     sqlx::raw_sql("BEGIN IMMEDIATE;
         INSERT INTO problem_versions SELECT problem_id, 2, 'Version two', statement, comparison_mode, published_at_ms + 1 FROM problem_versions WHERE problem_id = 1 AND version_no = 1;
-        INSERT INTO problem_version_languages SELECT problem_id, 2, language_id, cpu_time_ms, wall_time_ms, memory_bytes FROM problem_version_languages WHERE problem_id = 1 AND version_no = 1 AND language_id = 'c';
+        INSERT INTO problem_version_languages SELECT problem_id, 2, language_id, cpu_time_ms, wall_time_ms, 1 FROM problem_version_languages WHERE problem_id = 1 AND version_no = 1 AND language_id = 'c';
         INSERT INTO test_cases VALUES (1, 2, 1, X'00FF010A', X'FF000A');
         UPDATE problems SET current_version_no = 2 WHERE id = 1;
         INSERT INTO problems VALUES (2, NULL, 0);
@@ -172,6 +177,7 @@ async fn published_queries_and_fixed_version_creation() {
     let new = database.create_submission(request("c")).await.unwrap();
     assert_eq!(new.info.version_no, 2);
     let task = new.task.unwrap();
+    assert_eq!(task.request.run_limits.as_ref().unwrap().memory_kib, 1);
     assert_eq!(task.request.cases[0].input, [0, 255, 1, 10]);
     assert_eq!(task.request.cases[0].expected_output, [255, 0, 10]);
     assert_eq!(
@@ -532,15 +538,20 @@ async fn startup_checks_and_finite_lock_wait() {
         Err(Error::Data(_))
     ));
     let mut connection = fixture.connection().await;
-    sqlx::query("PRAGMA user_version = 2")
+    sqlx::query("PRAGMA user_version = 1")
         .execute(&mut connection)
         .await
         .unwrap();
-    assert!(matches!(
-        Database::open(&fixture.config).await,
-        Err(Error::Data(_))
-    ));
-    sqlx::query("PRAGMA user_version = 1")
+    let error = match Database::open(&fixture.config).await {
+        Err(error) => error,
+        Ok(_) => panic!("Legacy byte-unit schema must be rejected"),
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("Expected schema version 2, got 1")
+    );
+    sqlx::query("PRAGMA user_version = 2")
         .execute(&mut connection)
         .await
         .unwrap();

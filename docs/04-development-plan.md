@@ -303,3 +303,19 @@ Worker 独立交付点已完成；下一步 P06 实现后端 TOML、日志、SQL
 已执行 `cargo fmt --all -- --check`、`cargo check --workspace --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings` 和 `cargo test -p acorn-backend --locked`，均通过。九个后端测试使用真实临时 SQLite 数据库和现有 SQL 脚本，覆盖查询与发布后版本固定、八个同键并发请求只插入一条记录、内容冲突、主要终态和二进制数据往返、可选统计、条件写入与终态不可覆盖、启动排队顺序和容量、连续用例校验、外键、缺失文件／用户、错误结构版本及有限锁等待。独立程序测试确认配置与数据库检查、英文日志及明确的未实现服务退出。首次检查发现测试中的多余 `Vec`，改为数组后 Clippy 通过。
 
 本阶段未启动 HTTP 或 Scheduler，未运行新的 Worker／Isolate 验收。当前后端入口完成数据库检查并关闭连接后，以状态码 1 报告服务尚未实现；数据库模块可由测试及后续组件调用。下一步 P07 实现内存队列、Worker 客户端与调度闭环。
+
+### 7.8 Isolate 限额单位：已修复
+
+定位到 `--cg-mem` 与 `--fsize` 参数构造均将字节预算直接除以 1024。原有阶段校验会在初始化前拒绝换算后的 0，因此不能据此断言实际以无限额运行；但 RPC 和启动配置仍接受字节单位，存在不足 1 KiB 的预算延后失败及非整 KiB 预算向下取整的问题。
+
+已将内存限额从题库、后端配置、RPC、Worker 配置与语言计划统一为 `memory_kib`／`max_run_memory_kib`，单文件限额改为 `file_size_max_kib`，原有磁盘空间配额仍为 KiB。Isolate 参数直接使用已校验的 KiB 正整数，不再除以 1024；启动校验同时限制支持的 KiB 整数范围。产物导出、输出保留及实际资源统计仍按字节计量，产物预算与文件／磁盘预算比较时使用 KiB 乘以 1024。
+
+已同步设计、Proto、SQL、配置示例和调用方，通过原构建流程重新生成协议代码。按用户确认的开发期约定，直接将 `RunLimits` 字段号 3 改为 `memory_kib`，删除旧字段保留声明和兼容测试，不增加兼容分支。SQLite 结构版本升为 2，内存列改为 `memory_kib`，示例题仍为 256 MiB、保存 262144 KiB。旧数据库明确拒绝，旧配置也不兼容；部署端需同步更新服务，并离线转换旧库或初始化新库，不自动迁移或修改现存数据库。
+
+已执行 `cargo fmt --all -- --check`、`cargo check --workspace --locked` 和 `cargo clippy --workspace --all-targets --locked -- -D warnings`，均通过。协议简化前，宿主环境执行 `cargo test --workspace --locked -- --test-threads=1`，三十六个常规测试通过，三个真实验收默认忽略；其中三个新增测试覆盖 1 KiB 配置与产物字节边界、1／1023 KiB 参数原值传递、零值和超范围在初始化前拒绝。既有数据库查询测试补充从题库到 RPC 的 KiB 数值保持、1 KiB 新版本任务及旧结构拒绝检查。旧字段兼容测试在本次确认后删除，其此前通过记录不代表当前继续提供兼容能力。
+
+协议直接修改后已再次运行上述格式、workspace 编译与 Clippy 命令，均通过；重新生成协议并在宿主环境执行同一串行 workspace 测试命令，三十五个常规测试通过，三个真实验收默认忽略。设计中的 Proto 代码块与协议源文件一致，文档本地链接检查通过。
+
+首次默认并发执行 `cargo test --workspace --locked` 时，原有 `deadline_stops_execution_and_reports_failure` 的 300 ms 期限测试收到 `StopUnconfirmed`，与预期的 `JobDeadlineExceeded` 不同，命令失败；随后串行执行时该测试与其余常规测试通过。该期限测试及运行停止策略未修改，默认并发运行的时序敏感性仍需单独定位，不能将串行结果记为默认并发命令通过。
+
+在宿主环境用专用 box 203 执行 `ACORN_ISOLATE_BOX_ID=203 ACORN_ISOLATION_SENTINEL=host-only-value cargo test -p acorn-worker --locked --test isolate_real -- --ignored --nocapture`，一个真实 Isolate 阶段验收通过，包含新增的 1 KiB 单文件上限检查：写入 1024 字节成功，再写入 1 字节得到 `EFBIG`，文件长度保持 1024。该次验收也实际覆盖原有 C/Python 阶段、输出停止、共享空间／inode 配额及宿主隔离检查。真实 Executor 和 RPC 专项验收本次未重新运行。

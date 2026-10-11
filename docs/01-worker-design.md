@@ -89,7 +89,7 @@ message TestCase {
 message RunLimits {
   uint64 cpu_time_ms = 1;
   uint64 wall_time_ms = 2;
-  uint64 memory_bytes = 3;
+  uint64 memory_kib = 3;
 }
 message SubmitJobReply {
   string job_id = 1;
@@ -167,6 +167,8 @@ message JobFailure {
 源码、输入和答案直接放入有大小上限的请求，不使用外部下载地址或宿主文件路径。测试用例的数组顺序就是执行顺序，`case_index` 从 1 开始；不额外设置用例 ID 和排序字段。
 
 `language_id` 首版接受 `c` 和 `python`，后者表示 Python 3。输出比较规则固定，不由请求选择 checker。题目要求的单用例 CPU、墙钟时间和内存通过 `run_limits` 提交；Worker 配置其允许上限。编译预算、输出上限和其他门限由 Worker 配置文件提供。
+
+内存限额使用正整数 `memory_kib`，单位为 KiB（1 KiB = 1024 字节），从题库到 RPC、语言计划和 Isolate 参数保持同一单位。当前开发阶段直接将字段号 3 的名称和单位改为 `memory_kib`，不保留旧字段或兼容处理；后端与 Worker 按当前协议同步构建运行。实际资源统计 `peak_memory_bytes` 仍使用字节。
 
 `FINISHED` 表示取得判题结论，包含一个 `JudgeResult`；`FAILED` 表示执行基础设施或 Job 总期限导致失败，包含 `JobFailure`。CE、WA、RE、TLE、MLE、OLE 都是判题结论，不是基础设施失败。运行中不包含终态消息。
 
@@ -308,7 +310,7 @@ Worker 调用一次完整的阶段执行操作，输入为 `SandboxRunSpec`，�
 
 P03 的实现位于 [`sandbox` 模块](../crates/worker/src/sandbox/mod.rs)。`IsolateSandbox::run` 串行执行一个 `SandboxRunSpec`，`StageControl` 携带接纳时确定的绝对期限和内部 watch 停止通道。调用方必须等待阶段调用结束，通过通道请求停止，不中止执行 future。`SandboxRunOutcome` 保留独立的 OOM、输出超限和超时事实及原始停止原因，由 P04 选择判题结论；统计仅来自实际元数据，进程树内存使用 `cg-mem`，不以单进程 RSS 代替。`SandboxErrorKind::Execution` 表示尚未启动或已确认停止的基础设施错误；`StopUnconfirmed` 保留元数据工作目录、管理器句柄和执行占用，同一个后端实例拒绝再次执行。
 
-阶段文件名和产物名均为语言计划提供的单个相对文件名。导出时拒绝符号链接、硬链接及非常规文件，并按产物上限独立复制字节。Isolate 的内存及单文件大小参数使用 KiB，字节预算向下取整，不能表达的零 KiB 或超出后端整数范围的预算在初始化前明确报错，避免零值被解释为无限制。CPU 和墙钟以毫秒转换成小数秒。
+阶段文件名和产物名均为语言计划提供的单个相对文件名。导出时拒绝符号链接、硬链接及非常规文件，并按产物上限独立复制字节。Isolate 的 `--cg-mem`、`--fsize` 和磁盘空间配额均直接使用 KiB，不再由字节除以 1024 换算；1 KiB 是有效的非零限额，0 或超出后端有符号整数范围的值在初始化前明确报错。配置使用 `execution.max_run_memory_kib`、`compile.memory_kib`、`sandbox.file_size_max_kib` 和已有的 `sandbox.disk_quota_kib`。产物导出与输出保留仍按实际字节数计量，比较产物与文件／磁盘限额时将已校验的 KiB 预算乘以 1024。CPU 和墙钟以毫秒转换成小数秒。
 
 Isolate 的 `--run` 不包含 `--cleanup`。封装在执行进程尚未启动或进程树已确认停止后调用 `--cleanup`，覆盖成功、CE、超限和内部错误；初始化成功但后续准备失败时也进入清理路径。停止未确认时跳过产物导出、沙箱清理和依赖停止的私有文件清理，保留可能仍在使用的资源，由部署端处置。这是调用已有清理操作，不追加资源扫描、清理报告核验或其他证明步骤，见[Isolate 官方手册](https://www.ucw.cz/isolate/isolate.1.html)。
 
@@ -403,7 +405,7 @@ payload_max_bytes = 8_388_608
 job_wall_time_ms = 120_000
 max_run_cpu_time_ms = 10_000
 max_run_wall_time_ms = 15_000
-max_run_memory_bytes = 536_870_912
+max_run_memory_kib = 524_288
 run_process_max_count = 1
 stdout_max_bytes = 65_536
 stderr_max_bytes = 65_536
@@ -419,7 +421,7 @@ run_arguments = ["-I", "-B", "-S", "main.py"]
 [compile]
 cpu_time_ms = 10_000
 wall_time_ms = 20_000
-memory_bytes = 536_870_912
+memory_kib = 524_288
 process_max_count = 32
 diagnostic_max_bytes = 65_536
 artifact_max_bytes = 16_777_216
@@ -429,7 +431,7 @@ backend = "isolate"
 executable = "/usr/bin/isolate"
 box_id = 0
 fd_max_count = 64
-file_size_max_bytes = 16_777_216
+file_size_max_kib = 16_384
 disk_quota_kib = 65_536
 disk_quota_inodes = 4_096
 stop_timeout_ms = 2_000

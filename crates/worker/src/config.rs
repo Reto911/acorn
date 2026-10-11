@@ -82,8 +82,8 @@ pub struct ExecutionConfig {
     pub max_run_cpu_time_ms: u64,
     /// Maximum requested per-case wall time, in milliseconds.
     pub max_run_wall_time_ms: u64,
-    /// Maximum requested per-case process-tree memory, in bytes.
-    pub max_run_memory_bytes: u64,
+    /// Maximum requested per-case process-tree memory, in KiB.
+    pub max_run_memory_kib: u64,
     /// Process count for case execution; the first version requires one.
     pub run_process_max_count: u32,
     /// Retained stdout limit per case, in bytes.
@@ -130,8 +130,8 @@ pub struct CompileConfig {
     pub cpu_time_ms: u64,
     /// Compilation wall time limit, in milliseconds.
     pub wall_time_ms: u64,
-    /// Compiler process-tree memory limit, in bytes.
-    pub memory_bytes: u64,
+    /// Compiler process-tree memory limit, in KiB.
+    pub memory_kib: u64,
     /// Maximum compiler processes and threads.
     pub process_max_count: u32,
     /// Maximum combined retained compiler stdout and stderr, in bytes.
@@ -152,8 +152,8 @@ pub struct SandboxConfig {
     pub box_id: u32,
     /// Maximum open file descriptors inside a stage.
     pub fd_max_count: u32,
-    /// Maximum size of a single file, in bytes.
-    pub file_size_max_bytes: u64,
+    /// Maximum size of a single file, in KiB.
+    pub file_size_max_kib: u64,
     /// Shared writable storage hard quota, in KiB.
     pub disk_quota_kib: u32,
     /// Shared writable inode hard quota.
@@ -246,8 +246,8 @@ impl Config {
                 self.execution.max_run_wall_time_ms,
             ),
             (
-                "execution.max_run_memory_bytes",
-                self.execution.max_run_memory_bytes,
+                "execution.max_run_memory_kib",
+                self.execution.max_run_memory_kib,
             ),
             (
                 "execution.stdout_max_bytes",
@@ -259,7 +259,7 @@ impl Config {
             ),
             ("compile.cpu_time_ms", self.compile.cpu_time_ms),
             ("compile.wall_time_ms", self.compile.wall_time_ms),
-            ("compile.memory_bytes", self.compile.memory_bytes),
+            ("compile.memory_kib", self.compile.memory_kib),
             (
                 "compile.process_max_count",
                 self.compile.process_max_count as u64,
@@ -273,10 +273,7 @@ impl Config {
                 self.compile.artifact_max_bytes as u64,
             ),
             ("sandbox.fd_max_count", self.sandbox.fd_max_count as u64),
-            (
-                "sandbox.file_size_max_bytes",
-                self.sandbox.file_size_max_bytes,
-            ),
+            ("sandbox.file_size_max_kib", self.sandbox.file_size_max_kib),
             ("sandbox.disk_quota_kib", self.sandbox.disk_quota_kib as u64),
             (
                 "sandbox.disk_quota_inodes",
@@ -302,6 +299,23 @@ impl Config {
         ] {
             ensure!(value > 0, "{name} must be positive");
         }
+        for (name, value) in [
+            (
+                "execution.max_run_memory_kib",
+                self.execution.max_run_memory_kib,
+            ),
+            ("compile.memory_kib", self.compile.memory_kib),
+            ("sandbox.file_size_max_kib", self.sandbox.file_size_max_kib),
+            (
+                "sandbox.disk_quota_kib",
+                u64::from(self.sandbox.disk_quota_kib),
+            ),
+        ] {
+            ensure!(
+                value <= i32::MAX as u64,
+                "{name} exceeds Isolate's supported KiB range"
+            );
+        }
         ensure!(
             self.sandbox.backend == "isolate",
             "sandbox.backend must be isolate"
@@ -323,7 +337,7 @@ impl Config {
             "Compile CPU time must not exceed wall time"
         );
         ensure!(
-            self.compile.artifact_max_bytes as u64 <= self.sandbox.file_size_max_bytes,
+            self.compile.artifact_max_bytes as u64 <= self.sandbox.file_size_max_kib * 1024,
             "Artifact limit exceeds the single-file limit"
         );
         ensure!(

@@ -175,10 +175,10 @@ impl IsolateSandbox {
             format!("--meta={}", meta_path.display()),
             format!("--time={}", seconds(spec.limits.cpu_time_ms)),
             format!("--wall-time={}", seconds(spec.limits.wall_time_ms)),
-            format!("--cg-mem={}", spec.limits.memory_bytes / 1024),
+            format!("--cg-mem={}", spec.limits.memory_kib),
             format!("--processes={}", spec.limits.process_max_count),
             format!("--open-files={}", self.config.fd_max_count),
-            format!("--fsize={}", self.config.file_size_max_bytes / 1024),
+            format!("--fsize={}", self.config.file_size_max_kib),
             "--dir=/dev/shm:tmp".to_owned(),
         ]);
         for (key, value) in &spec.command.environment {
@@ -395,9 +395,9 @@ fn validate(spec: &SandboxRunSpec, config: &SandboxConfig) -> Result<()> {
     for (name, value) in [
         ("CPU milliseconds", spec.limits.cpu_time_ms),
         ("wall milliseconds", spec.limits.wall_time_ms),
-        ("memory KiB", spec.limits.memory_bytes / 1024),
+        ("memory KiB", spec.limits.memory_kib),
         ("process count", u64::from(spec.limits.process_max_count)),
-        ("file size KiB", config.file_size_max_bytes / 1024),
+        ("file size KiB", config.file_size_max_kib),
         ("FD count", u64::from(config.fd_max_count)),
         ("disk quota KiB", u64::from(config.disk_quota_kib)),
         ("inode quota", u64::from(config.disk_quota_inodes)),

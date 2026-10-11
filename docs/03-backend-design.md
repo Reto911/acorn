@@ -82,6 +82,8 @@ API 与 Scheduler 共享一个 SQLx `SqlitePool`，首版固定 `max_connections
 
 后端仍验证语言、用例数量、数据大小和限额：源码按 UTF-8 编码后的长度计量；输入、期望输出及总载荷按原始字节计量。HTTP 请求体、gRPC 消息和原始任务载荷各有独立上限。
 
+内存限额从 SQLite `memory_kib`、配置 `request.max_run_memory_kib` 到 RPC `RunLimits.memory_kib` 统一使用 KiB，不进行字节除法。数据库结构版本为 2，旧版数据库明确拒绝；后端与 Worker 需使用同一版 KiB 协议。实际资源统计和结果字节字段的单位保持原契约。
+
 同一版本的测试数据在一次任务装配中按 `case_index` 读取。正常新提交由 API 将内存中的完整任务直接交给 Scheduler，Scheduler 不再次读源码或题库。启动装入排队任务时才由 Scheduler 读取其固定版本数据。
 
 P06 的 [`Database`](../crates/backend/src/database/mod.rs) 提供题目列表与版本查询、创建幂等查询、提交详情与筛选历史、完整固定版本任务装配，以及三个非终态条件更新、终态保存和旧在途中断写入。`create_submission` 在短事务内查重、固定版本并装配 `JudgingTask`，提交并释放连接后返回；待接纳名额由后续调用服务预留，数据库层不等待队列。已有同键同内容记录保留原版本；仅 queued 记录返回可交接任务。`queued_tasks` 按顺序读取，并在超过配置容量时明确报错；入口尚不调用这些启动状态处理，统一编排在 P09 接入。

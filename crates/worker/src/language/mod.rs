@@ -14,8 +14,8 @@ pub struct StageLimits {
     pub cpu_time_ms: u64,
     /// Maximum elapsed wall time, in milliseconds.
     pub wall_time_ms: u64,
-    /// Maximum process-tree memory, in bytes.
-    pub memory_bytes: u64,
+    /// Maximum process-tree memory, in KiB.
+    pub memory_kib: u64,
     /// Maximum number of processes and threads.
     pub process_max_count: u32,
 }
@@ -79,7 +79,7 @@ pub fn plan(language_id: &str, config: &Config) -> Result<LanguagePlan> {
                 limits: StageLimits {
                     cpu_time_ms: config.compile.cpu_time_ms,
                     wall_time_ms: config.compile.wall_time_ms,
-                    memory_bytes: config.compile.memory_bytes,
+                    memory_kib: config.compile.memory_kib,
                     process_max_count: config.compile.process_max_count,
                 },
                 artifact_name: "program".into(),

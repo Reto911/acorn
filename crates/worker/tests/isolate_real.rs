@@ -36,7 +36,7 @@ fn limits() -> StageLimits {
     StageLimits {
         cpu_time_ms: 2000,
         wall_time_ms: 3000,
-        memory_bytes: 128 * 1024 * 1024,
+        memory_kib: 128 * 1024,
         process_max_count: 1,
     }
 }
@@ -128,6 +128,20 @@ async fn real_stage_acceptance() {
     assert!(overflow.output_limit_exceeded && overflow.stdout.truncated);
     assert_eq!(overflow.stdout.bytes.len(), 4096);
     assert_eq!(overflow.stop_reason, Some(StopReason::OutputLimit));
+
+    let mut file_limited = config.clone();
+    file_limited.sandbox.file_size_max_kib = 1;
+    let ran = python(
+        &file_limited,
+        "import errno, os, signal\nsignal.signal(signal.SIGXFSZ, signal.SIG_IGN)\nwith open('/box/limited', 'wb', buffering=0) as f:\n    assert f.write(b'x' * 1024) == 1024\n    try:\n        f.write(b'x')\n    except OSError as e:\n        assert e.errno == errno.EFBIG, e\n    else:\n        raise AssertionError('One-KiB file limit did not apply')\n    assert os.fstat(f.fileno()).st_size == 1024\nprint('file-limit')\n",
+    ).await;
+    assert_eq!(
+        ran.exit_code,
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&ran.stderr.bytes)
+    );
+    assert_eq!(ran.stdout.bytes, b"file-limit\n");
 
     // These host resources exist while the isolated interpreter probes them.
     let private = tempfile::tempdir().unwrap();

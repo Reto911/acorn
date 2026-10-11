@@ -213,7 +213,7 @@ impl Executor {
         let limits = StageLimits {
             cpu_time_ms: limits.cpu_time_ms,
             wall_time_ms: limits.wall_time_ms,
-            memory_bytes: limits.memory_bytes,
+            memory_kib: limits.memory_kib,
             process_max_count: self.config.execution.run_process_max_count,
         };
         for (index, case) in context.request.cases.iter().enumerate() {
