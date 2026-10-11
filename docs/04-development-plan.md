@@ -1,6 +1,6 @@
 # Worker 与后端开发计划
 
-状态：待实施。
+状态：实施中；P01 已完成，下一步 P02。
 
 ## 1. 目标与依据
 
@@ -8,7 +8,7 @@
 
 首版交付两个程序：独立 Worker，以及内含 Scheduler 的后端。完成后，可以使用 HTTP 提交 C 或 Python 单文件源码，经 gRPC 判题后查询持久化结果。每个 Worker 同时执行一个 Job，Job 内编译、运行和各用例始终串行；不同 Worker 可以处理不同 Submission。
 
-当前已有设计与建表 SQL，以下工程目录和程序均为待开发产物。先打通真实沙箱的 Worker，再接入后端；每个阶段完成自己的验收后进入下一阶段。
+当前已有设计、建表 SQL、Cargo workspace、共享 Proto 和两个程序入口。以下工程目录是首版目标结构，配置解析、沙箱执行及后端业务仍待开发。先打通真实沙箱的 Worker，再接入后端；每个阶段完成自己的验收后进入下一阶段。
 
 运行时检查限于已约定的请求、资源、并发接纳和业务状态要求。实现依赖组件的正常返回与错误报告，不增加跨域检查、Worker 身份核验或额外清理审计。
 
@@ -194,16 +194,19 @@ Worker 以子进程启动 `isolate --run`，通过 `Child::wait().await` 等待�
 
 ## 5. 验证与提交方式
 
-每个步骤完成时，运行 Rust 格式检查、受影响 crate 的编译检查及与本次改动有关的测试。落地后的基础命令为：
+每个步骤完成时，必须运行 Rust 格式检查、Clippy 和受影响 crate 的编译检查，并运行与本次改动有关的测试。基础命令为：
 
 ```sh
 cargo fmt --all -- --check
-cargo check --workspace
-cargo test -p acorn-worker
-cargo test -p acorn-backend
+cargo check --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test -p acorn-worker --locked
+cargo test -p acorn-backend --locked
 ```
 
 上述命令在 P01 建立工程后使用；Worker 与后端测试按改动范围选择。真实沙箱验证单独标明 Isolate 和权限前提，不能把测试替身的结果当作真实隔离验证。环境不具备时如实记录未运行。
+
+文档 lint 在 workspace 中统一设为 `deny`，所有 crate 必须继承：公共 API 使用 `missing_docs`，私有项补充使用 `clippy::missing_docs_in_private_items`。自写模块、结构体、字段、方法和函数缺少 Rustdoc 文档时检查失败；生成代码只在包含输出的专用模块局部豁免。检查范围与配置说明见[项目说明](../README.md#构建与检查)。
 
 测试重点是正常业务闭环、接纳与幂等、失败短路、结果保存与 ACK、明确拒绝后的重新分派和既定启动停机规则。失败分支通过可控结果验证，不刻意制造小概率故障、严格时序窗口或庞大的字段组合矩阵。仅在发现实际问题或新增行为时补回归覆盖。
 
@@ -215,3 +218,31 @@ cargo test -p acorn-backend
 - 后端可通过 HTTP 查询题目、创建提交、查询历史与结果；Scheduler 队列、节点缓存及状态转换符合设计。
 - 单库保存历史和唯一终态，幂等键生效，历史版本引用正确；保存结果早于 ACK。
 - 启动、正常停机和规定的失败处理可复现；配置、样例和英文日志足以支持本地运行与排查。
+
+## 7. 实施记录
+
+### 7.1 P01：已完成
+
+已建立包含 `acorn-protocol`、`acorn-worker`、`acorn-backend` 的 Cargo workspace，采用 Rust 2024 edition。依赖由 `Cargo.lock` 锁定，本次使用 Tonic / tonic-prost / tonic-prost-build 0.14.6、Prost 0.14.4、Clap 4.6.7。
+
+[worker.proto](../proto/acorn/worker/v1/worker.proto) 与 Worker 设计第 3.2 节的 Proto 一致，包含三个 unary RPC、终态和退出信息的 `oneof`、可选失败用例及统计字段。[构建脚本](../crates/protocol/build.rs) 将消息和客户端、服务端生成到 Cargo 的 `OUT_DIR`，通过 `acorn_protocol::worker::v1` 导出；Worker 的 `rpc` 模块引用服务端接口，后端的 `scheduler::worker_client` 引用客户端。
+
+两个程序入口均支持必填的 `--config <PATH>`、`--help` 和 `--version`。当前传入路径只完成参数解析，随后明确提示服务尚未实现并以状态码 1 退出；不读取 TOML 或启动服务。配置解析分别在 P02、P06 补齐。构建与入口说明见[项目说明](../README.md)。
+
+本次验证环境为 Rust/Cargo 1.101.0-nightly、protoc 3.21.12。已执行：
+
+- `cargo fmt --all -- --check`：通过。
+- `cargo check --workspace` 及锁定依赖后的 `cargo check --workspace --locked`：三个 crate 编译通过。
+- `cargo test --workspace --locked`：两个协议测试通过，覆盖可选统计的零值与缺失值、零退出码，以及执行失败独立的终态分支。Worker 和后端尚无业务测试。
+- 分别通过 `cargo run --quiet --locked -p <package> -- <args>` 检查两个程序：帮助和版本返回 0；缺少配置路径返回 2；包含空格的配置路径正确传入，服务未实现提示返回 1。
+- 比对 Proto 与设计中的代码块，内容一致。临时在 Proto 的消息前加入注释，重新编译后确认生成代码出现该注释；恢复原文件后再次编译，确认生成代码也恢复。
+
+首次增量生成验证发现，位于 crate 目录之外的 Proto 修改没有触发重新生成。构建脚本现已显式输出该文件的 `rerun-if-changed`，并跟踪 `PROTOC` 环境变量；上述修改与恢复检查在修正后通过。首次依赖下载受沙箱内 crates.io DNS 解析限制，获准访问网络后完成下载和编译。
+
+本阶段尚未执行真实 gRPC 判题或沙箱验证，不能据此宣称 Worker 服务可用。下一步按 P02 实现 Worker TOML 配置与校验、英文日志及 C/Python 语言计划。
+
+### 7.2 文档约束与 Clippy：已完成
+
+workspace 已启用 `missing_docs = "deny"` 和 `clippy::missing_docs_in_private_items = "deny"`，三个 crate 均继承规则。补齐现有自写源码的模块、结构体及入口文档；Tonic/Prost 输出仅在 `worker::v1` 模块局部豁免，未修改生成文件。项目说明、本计划及 `AGENTS.md` 均将 Clippy 列为 Rust 代码变更的必备检查。
+
+已用临时缺文档代码验证公共模块、结构体、字段、方法、函数，以及私有模块、结构体、字段和方法都会使 Clippy 失败，随后恢复原源码。最终 `cargo fmt --all -- --check`、`cargo check --workspace --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings` 和 `cargo test --workspace --locked` 均通过，两个协议测试通过。此变更不扩展 P01 的运行能力，下一开发步骤仍为 P02。

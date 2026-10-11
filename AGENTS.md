@@ -74,10 +74,15 @@ in the relevant design documents and must not be maintained here in duplicate.
 - Choose checks for the changed behavior and prefer existing tests. Add regression
   coverage only for a concrete requirement or failure. Do not require a full test
   suite, fault matrix or repeated runs for every subtask.
-- For code changes, check formatting, compile affected modules and run relevant
-  tests using the implementation language and build tools actually adopted.
+- For code changes, check formatting, run Clippy, compile affected modules and
+  run relevant tests using the implementation language and build tools adopted.
   Use only validation commands already present in the project or actually
   established during the current task.
+- For Rust changes, `cargo clippy --workspace --all-targets --locked -- -D warnings`
+  is required. Document authored modules, structs, fields, methods and functions
+  with Rustdoc comments, including private items. New crates must inherit the
+  workspace lint configuration. Limit generated-code exemptions to the module
+  that includes generated output.
 - For protocol changes, update the design and protocol definitions together,
   regenerate affected code and verify the changed contract.
 - Base behavioral and integration checks on the acceptance requirements in the

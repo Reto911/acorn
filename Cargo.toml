@@ -1,0 +1,22 @@
+[workspace]
+members = ["crates/protocol", "crates/worker", "crates/backend"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.lints.rust]
+missing_docs = "deny"
+
+[workspace.lints.clippy]
+missing_docs_in_private_items = "deny"
+
+[workspace.dependencies]
+acorn-protocol = { path = "crates/protocol" }
+clap = { version = "4.6", features = ["derive"] }
+prost = "0.14"
+tonic = "0.14"
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"

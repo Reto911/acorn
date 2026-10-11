@@ -1,0 +1,96 @@
+syntax = "proto3";
+package acorn.worker.v1;
+
+service JudgeWorker {
+  rpc SubmitJob(SubmitJobRequest) returns (SubmitJobReply);
+  rpc GetJob(GetJobRequest) returns (GetJobReply);
+  rpc AcknowledgeResult(AcknowledgeResultRequest) returns (AcknowledgeResultReply);
+}
+
+message SubmitJobRequest {
+  string job_id = 1;
+  string language_id = 2;
+  bytes source = 3;
+  repeated TestCase cases = 4;
+  RunLimits run_limits = 5;
+}
+message TestCase {
+  bytes input = 1;
+  bytes expected_output = 2;
+}
+message RunLimits {
+  uint64 cpu_time_ms = 1;
+  uint64 wall_time_ms = 2;
+  uint64 memory_bytes = 3;
+}
+message SubmitJobReply {
+  string job_id = 1;
+  JobState state = 2;
+  bool duplicate = 3;
+}
+message GetJobRequest { string job_id = 1; }
+message GetJobReply {
+  string job_id = 1;
+  JobState state = 2;
+  JobPhase phase = 3;
+  uint32 completed_cases = 4;
+  uint32 total_cases = 5;
+  oneof terminal {
+    JudgeResult result = 6;
+    JobFailure failure = 7;
+  }
+}
+message AcknowledgeResultRequest { string job_id = 1; }
+message AcknowledgeResultReply {}
+
+enum JobState {
+  JOB_STATE_UNSPECIFIED = 0;
+  JOB_STATE_RUNNING = 1;
+  JOB_STATE_FINISHED = 2;
+  JOB_STATE_FAILED = 3;
+}
+enum JobPhase {
+  JOB_PHASE_UNSPECIFIED = 0;
+  JOB_PHASE_PREPARING = 1;
+  JOB_PHASE_COMPILING = 2;
+  JOB_PHASE_RUNNING_CASE = 3;
+  JOB_PHASE_CHECKING = 4;
+  JOB_PHASE_DONE = 5;
+}
+message JudgeResult {
+  Verdict verdict = 1;
+  optional FailedCase failed_case = 2;
+  bytes compile_diagnostic = 3;
+  bool compile_diagnostic_truncated = 4;
+}
+message FailedCase {
+  uint32 case_index = 1;
+  bytes stdout = 2;
+  bytes stderr = 3;
+  bool stdout_truncated = 4;
+  bool stderr_truncated = 5;
+  ResourceUsage resources = 6;
+  oneof exit {
+    uint32 exit_code = 7;
+    uint32 signal = 8;
+  }
+}
+message ResourceUsage {
+  optional uint64 cpu_time_us = 1;
+  optional uint64 wall_time_us = 2;
+  optional uint64 peak_memory_bytes = 3;
+}
+enum Verdict {
+  VERDICT_UNSPECIFIED = 0;
+  VERDICT_ACCEPTED = 1;
+  VERDICT_WRONG_ANSWER = 2;
+  VERDICT_COMPILE_ERROR = 3;
+  VERDICT_RUNTIME_ERROR = 4;
+  VERDICT_TIME_LIMIT_EXCEEDED = 5;
+  VERDICT_MEMORY_LIMIT_EXCEEDED = 6;
+  VERDICT_OUTPUT_LIMIT_EXCEEDED = 7;
+}
+message JobFailure {
+  string code = 1;
+  string diagnostic = 2;
+}
