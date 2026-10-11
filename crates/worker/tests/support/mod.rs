@@ -25,6 +25,8 @@ impl Fixture {
 import pathlib, shutil, signal, subprocess, sys, time
 root = pathlib.Path({root:?})
 mode = {mode:?}
+if (root / 'mode').exists():
+    mode = (root / 'mode').read_text()
 args = sys.argv[1:]
 with (root / 'operations').open('a') as log:
     log.write(' '.join(args) + '\n')

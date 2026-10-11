@@ -2,7 +2,7 @@
 
 C 与 Python 3 的单文件源码判题系统。后端包含 HTTP API、Scheduler 和 SQLite 访问模块，通过 gRPC 调用独立 Worker。
 
-当前已完成 P01 工程骨架与共享协议、P02 Worker 配置与语言计划、P03 Isolate 阶段执行接口，以及 P04 串行判题执行器。开发范围、执行契约和后续步骤见[文档索引](docs/README.md)与[开发计划](docs/04-development-plan.md)。
+当前已完成 P01–P05，Worker 可独立通过 gRPC 提供 C/Python 串行判题、结果查询和 ACK。后端业务从 P06 开始实现。开发范围、执行契约和后续步骤见[文档索引](docs/README.md)与[开发计划](docs/04-development-plan.md)。
 
 ## 构建与检查
 
@@ -46,9 +46,13 @@ cargo run --locked -p acorn-backend -- --help
 cargo run --locked -p acorn-worker -- --config config/worker.example.toml
 ```
 
-当前有效 Worker 配置会输出验证完成日志，随后提示 RPC 服务尚未实现并以状态码 1 退出；无效配置或不可调用的工具明确报错，不启动监听。后端仍只解析路径，配置解析和示例在 P06 提供。工具的 `--version` 检查不能替代真实沙箱验收。
+有效 Worker 配置通过校验后启动 gRPC 监听，提供 `SubmitJob`、`GetJob` 和 `AcknowledgeResult`。提交立即返回，后台执行不随提交连接断开而取消；一个 Worker 同时只执行一个 Job，忙时不排队。终态须由调用方保存后 ACK，未确认结果区满时拒绝新任务。请求和结果消息上限从配置应用到 Tonic 服务端。
 
-真实判题需要 Linux、Isolate、C/Python 工具链，以及设计规定的控制组、用户配额和权限配置。P03 已验证实际阶段执行与隔离；P04 已通过内部接口完成真实 C/Python 判题，独立 RPC 服务在 P05 提供。
+Ctrl-C 或 SIGTERM 先停止接纳，再通过共同停止路径结束当前执行，按 `sandbox.shutdown_timeout_ms` 等待收尾。正常停机返回 0；启动、监听、停机超时或停止未确认明确报错并返回 1。停止未确认时，运行中的服务仍可查询和 ACK 失败结果，但保持执行位置占用，由部署端处置。结果只存在本进程内存，重启不恢复。
+
+无效配置或不可调用的工具明确报错，不启动监听。后端仍只解析路径，配置解析和示例在 P06 提供。工具的 `--version` 检查不能替代真实沙箱验收。
+
+真实判题需要 Linux、Isolate、C/Python 工具链，以及设计规定的控制组、用户配额和权限配置。P03 已验证实际阶段执行与隔离；P04 已通过内部接口完成真实 C/Python 判题，P05 已通过实际 gRPC 客户端提交、轮询并 ACK。
 
 P04 执行器的真实验收使用独立 box ID，按内部调用检查 C 的 AC/CE/WA、Python 的 AC/语法错误 RE，以及完成用例数：
 
@@ -56,6 +60,15 @@ P04 执行器的真实验收使用独立 box ID，按内部调用检查 C 的 AC
 ACORN_ISOLATE_BOX_ID=201 \
   cargo test -p acorn-worker --locked --test executor -- --ignored --nocapture
 ```
+
+P05 的真实验收通过生成的 Tonic 客户端连接回环随机端口，在专用 box 202 完成 C/Python 两用例 AC、查询和 ACK：
+
+```sh
+ACORN_ISOLATE_BOX_ID=202 \
+  cargo test -p acorn-worker --locked --test rpc -- --ignored --nocapture
+```
+
+常规 RPC 测试也会绑定回环随机端口，但使用受控管理器，不要求 Isolate 初始化权限。限制本机 socket 的工具沙箱需在宿主执行这些测试；受控管理器的 GCC/Python 执行不构成真实隔离证据。
 
 ## Isolate 阶段验收
 

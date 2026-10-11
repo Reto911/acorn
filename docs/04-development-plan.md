@@ -1,6 +1,6 @@
 # Worker 与后端开发计划
 
-状态：实施中；P01–P04 已完成，下一步 P05。
+状态：实施中；P01–P05 已完成，下一步 P06。
 
 ## 1. 目标与依据
 
@@ -8,7 +8,7 @@
 
 首版交付两个程序：独立 Worker，以及内含 Scheduler 的后端。完成后，可以使用 HTTP 提交 C 或 Python 单文件源码，经 gRPC 判题后查询持久化结果。每个 Worker 同时执行一个 Job，Job 内编译、运行和各用例始终串行；不同 Worker 可以处理不同 Submission。
 
-当前已有设计、建表 SQL、Cargo workspace、共享 Proto、两个程序入口及 Worker 配置、日志、语言计划、Isolate 阶段执行接口和串行判题执行器。以下工程目录是首版目标结构，RPC 及后端业务仍待开发。先打通真实沙箱的 Worker，再接入后端；每个阶段完成自己的验收后进入下一阶段。
+当前已有设计、建表 SQL、Cargo workspace、共享 Proto、两个程序入口，以及可独立启动的 Worker：配置、日志、语言计划、Isolate 阶段接口、串行判题、RPC 和结果保留均已实现。以下工程目录是首版目标结构，后端业务仍待开发。先打通真实沙箱的 Worker，再接入后端；每个阶段完成自己的验收后进入下一阶段。
 
 运行时检查限于已约定的请求、资源、并发接纳和业务状态要求。实现依赖组件的正常返回与错误报告，不增加跨域检查、Worker 身份核验或额外清理审计。
 
@@ -279,3 +279,15 @@ Job 总期限和内部停止沿用 P03 的停止通道。普通结束在返回�
 已执行 `cargo fmt --all -- --check`、`cargo check --workspace --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings` 和 `cargo test -p acorn-worker --locked`。十五个常规 Worker 测试通过，其中新增六个执行器测试覆盖 C AC/CE/WA、编译诊断截断、Python 独立源码副本与语法错误 RE、首个失败短路、精确比较、总期限、超限优先级及 OLE 有界结果。测试管理器调用真实 GCC/Python，但不提供隔离，这些结果只证明执行编排。
 
 使用专用 box 201 在宿主执行环境单独运行 `ACORN_ISOLATE_BOX_ID=201 cargo test -p acorn-worker --locked --test executor -- --ignored --nocapture`，一个真实验收测试通过，覆盖 C AC/CE/WA、Python AC/RE 及完成用例数。工具沙箱内同一命令先因 Isolate 初始化返回 `Must be started as root` 失败，随后在宿主权限环境通过；未把工具沙箱失败记作宿主部署故障，也未重新宣称 P03 全部隔离项目再次验收。RPC 尚未实现，下一步 P05。
+
+### 7.6 P05：已完成
+
+已实现 [`WorkerService`](../crates/worker/src/rpc.rs)、[内存记录与 ACK 队列](../crates/worker/src/jobs.rs)，并将 [Worker 入口](../crates/worker/src/main.rs) 接入实际 Tonic 监听。三个 unary RPC 使用既定状态与原因；配置传输上限，校验新请求的语言、用例、字节数及限额。ID 查重先于内容校验，登记前在同一接纳临界区复查；接纳即返回，后台执行不绑定提交连接。运行进度保存在内存，终态在收尾后发布，记录仅含有界查询结果。
+
+查询不改变结果保留；未确认区满时拒绝新任务，ACK 后按定长 FIFO 淘汰，重复 ACK 不调整顺序。执行占用与结果记录分开，停止未确认时失败可查，ACK 或记录淘汰均不释放位置。Ctrl-C/SIGTERM 停止新接纳并沿 P03/P04 通道停止当前执行、等待收尾；超时或仍未确认停止返回错误，不 abort 执行 future 或宣称成功。后端入口仍为骨架。
+
+已执行 `cargo fmt --all -- --check`、`cargo check --workspace --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings`，均通过。在宿主环境执行 `cargo test -p acorn-worker --locked --test rpc`，新增六个常规测试通过；随后 `cargo test --workspace --locked` 的二十三个常规测试通过（Worker 二十一个、协议两个），三个真实验收测试默认忽略。覆盖八个并发同 ID 请求只执行一次、无效内容的重复请求、忙时不登记、连接更换后继续执行、结果区满、查询保留、重复 ACK 与 FIFO、停止未确认后 ACK/淘汰仍占用、内部停机及独立程序的配置启动/RPC/SIGTERM 收尾。测试替身只证明这些编排与协议行为，不证明真实隔离。
+
+最初在工具沙箱运行 RPC 测试，回环监听绑定统一因 `Operation not permitted` 失败；改在宿主环境执行后通过，保留此失败原因。另在宿主环境以专用 box 202 执行 `ACORN_ISOLATE_BOX_ID=202 cargo test -p acorn-worker --locked --test rpc -- --ignored --nocapture`，一个真实 gRPC 验收测试通过，实际完成 C/Python 各两个用例的 AC、轮询与 ACK。P03 的配额和宿主隔离验收未在本阶段重新运行，不能扩大本次证据范围。
+
+Worker 独立交付点已完成；下一步 P06 实现后端 TOML、日志、SQLx 数据库访问与测试用户预置。

@@ -21,7 +21,7 @@ nix = { version = "0.30", features = ["signal", "fs"] }
 prost = "0.14"
 serde = { version = "1", features = ["derive"] }
 tempfile = "3"
-tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 toml = "0.9"
 tonic = "0.14"
 tonic-prost = "0.14"
