@@ -2,7 +2,7 @@
 
 C 与 Python 3 的单文件源码判题系统。后端包含 HTTP API、Scheduler 和 SQLite 访问模块，通过 gRPC 调用独立 Worker。
 
-当前已完成 P01–P07，Worker 可独立通过 gRPC 提供 C/Python 串行判题、结果查询和 ACK；后端已有配置、日志、SQLite 业务访问及可独立调用的 Scheduler。下一步 P08 接入 HTTP 和程序入口。开发范围、执行契约和后续步骤见[文档索引](docs/README.md)与[开发计划](docs/04-development-plan.md)。
+当前已完成 P01–P08：Worker 独立提供 C/Python 串行判题，后端通过 HTTP 创建提交、进程内 Scheduler 分派、gRPC 取结果、SQLite 持久化和 ACK 完成业务闭环。下一步 P09 补齐启动装入及故障边界。开发范围、执行契约和后续步骤见[文档索引](docs/README.md)与[开发计划](docs/04-development-plan.md)。
 
 ## 构建与检查
 
@@ -52,7 +52,7 @@ Ctrl-C 或 SIGTERM 先停止接纳，再通过共同停止路径结束当前执�
 
 无效配置或不可调用的工具明确报错，不启动监听。工具的 `--version` 检查不能替代真实沙箱验收。
 
-后端读取 [backend.example.toml](config/backend.example.toml)，初始化英文日志，打开已初始化数据库并检查结构版本及预置测试用户。数据库路径相对于启动目录；示例使用 `acorn.db`、用户 1 和 `http://127.0.0.1:50051` Worker endpoint。首次本地准备数据库，在仓库根目录执行一次：
+后端读取 [backend.example.toml](config/backend.example.toml)，初始化英文日志，打开已初始化数据库并检查结构版本及预置测试用户，然后启动 Scheduler 和 HTTP 监听。数据库路径相对于启动目录；示例使用 `acorn.db`、用户 1 和 `http://127.0.0.1:50051` Worker endpoint。先启动上文的 Worker，再在另一终端于仓库根目录准备新数据库并启动后端：
 
 ```sh
 sqlite3 -bail acorn.db < sql/001-initial-schema.sql
@@ -61,21 +61,35 @@ sqlite3 -bail acorn.db < sql/002-example-problem.sql
 cargo run --locked -p acorn-backend -- --config config/backend.example.toml
 ```
 
-当前后端入口仍在数据库校验后关闭连接池，以原占位提示报告 HTTP 和 Scheduler 尚未实现并返回 1；Scheduler 库模块已完成，程序入口与 HTTP 将在 P08 组装。该提示不表示数据库校验失败，也不代表服务已启动。应用不会创建数据库、装入 SQL 或执行升级。测试用户脚本仅供开发，Argon2id 哈希来自已丢弃的随机密码；当前没有登录功能或可用登录凭据。示例题仍随正式发布保留。
+三个 SQL 脚本仅在新库执行一次。应用不会创建数据库、装入 SQL 或执行升级。测试用户脚本仅供开发，Argon2id 哈希来自已丢弃的随机密码；当前没有登录功能或可用登录凭据。示例题仍随正式发布保留。
+
+后端收到 Ctrl-C 或 SIGTERM 后停止创建接纳和新分派，等待已开始的短创建操作、在途判题、结果保存及一次有 deadline 的 ACK，再关闭连接池。Scheduler 异常结束会使后端退出。当前入口从空内存队列开始，已有 `queued` 可由同键重传重新交接；启动自动装入、旧 `dispatching/running` 中断写入和创建关键写入故障的完整退出编排仍在 P09 接入。
+
+查询题目并提交 Python 两数求和源码：
+
+```sh
+curl http://127.0.0.1:8080/api/v1/problems
+curl -i http://127.0.0.1:8080/api/v1/submissions \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: 7b5f28d3-51a4-463c-98a4-0a11815d8d46' \
+  -d '{"problem_id":1,"language_id":"python","source":"a,b=map(int,input().split());print(a+b)\n"}'
+```
+
+创建返回 `202`、`submission_id`、`state` 和 `Location`；同键同内容重传返回 `200`，新的主动提交更换 UUID 键。按返回的 `Location` 轮询详情即可取得持久化终态；提交历史为 `GET /api/v1/submissions`。两个列表都返回 `{"items":[...],"limit":20,"offset":0}`，支持 `limit`、`offset`；详情中的终态字节字段使用 Base64。六个路由、筛选和英文错误码见[HTTP 契约](docs/03-backend-design.md#5-http-接口)。
 
 内存限额和 Isolate 单文件／磁盘空间限额统一使用 KiB（1 KiB = 1024 字节），配置字段明确以 `_kib` 结尾；实际资源统计、输出保留和产物导出大小仍按字节计量。数据库结构版本为 2，内存列为 `memory_kib`；旧配置与旧数据库需更新，后端与 Worker 按当前 KiB 协议同步构建运行。已有数据库由部署端离线转换或另建新库，详见 [SQL 使用说明](sql/README.md)。
 
-P06/P07 的数据库和 Scheduler 方法可直接测试：
+P06–P08 的数据库、Scheduler 和 HTTP 常规测试：
 
 ```sh
 cargo test -p acorn-backend --locked
 ```
 
-P07 的真实验收将已入库任务交给 Scheduler，通过 gRPC、SQLite 和 Isolate 检查 C/Python AC、C CE、Python 首例 WA，以及保存与 ACK 淘汰。使用独立 box ID，在具备既定权限的宿主环境执行：
+P07/P08 的真实验收通过实际 HTTP 端口、Scheduler、gRPC、SQLite 和 Isolate 检查 C/Python AC、C CE、Python 首例 WA，以及保存与 ACK 淘汰。使用独立 box ID，在具备既定权限的宿主环境执行：
 
 ```sh
 ACORN_ISOLATE_BOX_ID=204 \
-  cargo test -p acorn-backend --locked --test workflow real_scheduler_acceptance -- --ignored --nocapture
+  cargo test -p acorn-backend --locked --test workflow real_http_worker_acceptance -- --ignored --nocapture
 ```
 
 后端使用一个共享 SQLx SQLite 连接池，固定最多一个连接；外键和有限锁等待配置用于每次连接建立。创建提交以 `BEGIN IMMEDIATE` 固定最新版本和幂等键，在返回完整内存任务前提交事务并释放连接。状态及终态使用条件更新，AC/CE/首个失败用例和执行失败按类型化 JSON 保存，字节字段使用 Base64。配置中的 HTTP JSON 上限、gRPC 二进制上限和原始任务／结果上限分别计量，示例值与 Worker 示例对齐。

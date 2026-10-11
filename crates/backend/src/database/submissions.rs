@@ -56,7 +56,7 @@ impl Database {
 
     /// Fix the latest version and create at most one record per owner/key transaction.
     ///
-    /// The caller supplies the later Scheduler reservation; this method never waits
+    /// The creation service owns the Scheduler reservation; this method never waits
     /// for queue capacity or holds its transaction across task handoff.
     pub async fn create_submission(&self, request: CreateSubmission) -> Result<CreatedSubmission> {
         validate_source(&request.source, &self.config)?;

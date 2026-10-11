@@ -1,6 +1,6 @@
 # Worker 与后端开发计划
 
-状态：实施中；P01–P07 已完成，下一步 P08。
+状态：实施中；P01–P08 已完成，下一步 P09。
 
 ## 1. 目标与依据
 
@@ -8,7 +8,7 @@
 
 首版交付两个程序：独立 Worker，以及内含 Scheduler 的后端。完成后，可以使用 HTTP 提交 C 或 Python 单文件源码，经 gRPC 判题后查询持久化结果。每个 Worker 同时执行一个 Job，Job 内编译、运行和各用例始终串行；不同 Worker 可以处理不同 Submission。
 
-当前已有设计、建表 SQL、Cargo workspace、共享 Proto、两个程序入口，以及可独立启动的 Worker：配置、日志、语言计划、Isolate 阶段接口、串行判题、RPC 和结果保留均已实现。后端配置、日志、数据库访问、开发用户预置和 Scheduler 库模块已完成。以下工程目录是首版目标结构，HTTP、程序入口组装与完整启动停机编排仍待开发；每个阶段完成自己的验收后进入下一阶段。
+当前已有设计、建表 SQL、Cargo workspace、共享 Proto、两个程序入口，以及可独立启动的 Worker：配置、日志、语言计划、Isolate 阶段接口、串行判题、RPC 和结果保留均已实现。后端已完成配置、日志、数据库访问、开发用户预置、Scheduler 和 HTTP API，并接入实际监听及正常停止的基础编排。启动装入、旧在途记录中断和完整故障边界仍按 P09 实施；每个阶段完成自己的验收后进入下一阶段。
 
 运行时检查限于已约定的请求、资源、并发接纳和业务状态要求。实现依赖组件的正常返回与错误报告，不增加跨域检查、Worker 身份核验或额外清理审计。
 
@@ -337,3 +337,22 @@ Worker 独立交付点已完成；下一步 P06 实现后端 TOML、日志、SQL
 - 在宿主使用专用 box 204 执行 `ACORN_ISOLATE_BOX_ID=204 cargo test -p acorn-backend --locked --test workflow real_scheduler_acceptance -- --ignored --nocapture`：一个真实验收通过。直接交接已入库任务，经 Scheduler、gRPC、Isolate 和 SQLite 完成 C/Python 各四用例 AC、C CE 和 Python 首例 WA；Worker 未确认区及 ACK FIFO 均设为 1，验证保存后 ACK、连续接纳及最早结果淘汰。此项不覆盖 HTTP，也未重跑 P03 全部隔离／配额或 Worker 专项验收。
 
 当前程序入口保留 P06 行为，HTTP 与入口组装在 P08 接入。
+
+### 7.10 P08：已完成
+
+已实现 [`http`](../crates/backend/src/http/mod.rs) 的六个 JSON API 操作、独立 DTO、分页筛选、统一英文错误响应、`DefaultBodyLimit` 和由 Tower `ServiceBuilder` 组合的 `TraceLayer`。框架 JSON／路径／查询解析错误及路由、方法错误均转换为设计中的错误码；严格拒绝未允许的创建字段和列表参数，不向题目查询返回测试数据，不向历史返回源码或诊断。按用户确认，两个列表使用 `items`、`limit`、`offset` 分页对象，不额外查询总数。
+
+[`CreationService`](../crates/backend/src/submissions/creation.rs) 先查同键内容，仅 queued 且未在内存中的记录需要重新交接；新建及重新交接先取得调度许可，在既有短事务中再次查重、固定版本并装配任务，提交后交给 Scheduler。查重竞争、回滚和重复投递释放多余许可。创建操作由独立 Tokio 任务持有，HTTP 仅等待结果；用实际 SQLite 写锁阻塞创建并中止 HTTP 等待者，验证解锁后仍完成保存和判题。八个同键并发请求只创建一个提交；题目发布后旧键和缺失本地记录的 queued 重交接均保持原版本，新键选择最新版本。队列满的新键不建记录，已知提交继续可查，queued 重交接失败带原 ID。
+
+[后端入口](../crates/backend/src/main.rs) 已组装共享池、空内存 Scheduler 和实际 Axum HTTP 监听，监督两个后台任务；收到 Ctrl-C／SIGTERM 后停止新创建和分派，等待已开始的短创建操作、在途结果与一次 ACK。独立进程测试通过实际 HTTP 查询题目并用 SIGTERM 正常退出。入口尚不装入已有 queued 或中断旧 dispatching/running；创建关键写入等完整故障退出边界也仍属 P09，未将本阶段记作 P09 完成。
+
+本阶段已执行：
+
+- `cargo fmt --all -- --check`、`cargo check --workspace --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings`：通过。
+- `cargo test -p acorn-backend --locked`：阶段中的后端常规测试通过；真实验收默认忽略。
+- 在宿主执行 `cargo test --workspace --locked`：最终四十九个常规测试通过（后端二十三个、Worker 二十四个、协议两个），四个真实验收默认忽略。此次采用命令的默认并发方式，原期限测试本次通过；第 7.8 节记录的并发失败及其未定位原因仍保留，未修改该测试或停止策略，不能据一次通过宣称时序敏感性已解决。
+- 在宿主使用专用 box 204 执行 `ACORN_ISOLATE_BOX_ID=204 cargo test -p acorn-backend --locked --test workflow real_http_worker_acceptance -- --ignored --nocapture`：一个真实验收通过。实际通过 HTTP 监听、Scheduler、gRPC、Isolate 和 SQLite 完成 C/Python 各四用例 AC、C CE 和 Python 首例 WA，并查询持久化详情；Worker 未确认区及 ACK FIFO 均设为 1，连续任务可接纳且最早结果已按 ACK FIFO 淘汰。本次没有重跑 P03 的全部隔离／配额检查或原 Worker Executor、RPC 专项，不能扩大验收范围。
+
+最初离线解析缺少新增的 tower-http，首次在线获取因 crates.io DNS 失败；后续获取成功并由 Cargo 更新锁文件。新增测试首次编译漏导入 SQLx `Connection` trait，补齐后编译及 Clippy 通过。未修改生成协议、数据库结构或原 Worker 实现；最初完成实现时未提交 Git，后按用户要求拆分为 P07 Scheduler、P08 HTTP 两次提交。项目说明已更新启动、HTTP 示例、真实验收命令和当前限制；下一步 P09。
+
+拆分提交后，在最终 P08 状态再次执行格式检查、workspace 编译、Clippy、默认并发 workspace 测试和上述真实 HTTP 验收，均通过：四十九个常规测试通过，四个真实验收默认忽略，另单独执行的真实 HTTP 验收一个通过。文档本地链接与锚点检查及 `git diff --check` 通过。

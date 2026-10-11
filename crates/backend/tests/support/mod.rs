@@ -12,19 +12,27 @@ use std::{
 use acorn_backend::{
     config::Config,
     database::Database,
+    http,
     scheduler::Scheduler,
-    submissions::{CreateSubmission, Submission, SubmissionState},
+    submissions::{CreateSubmission, CreationService, Submission, SubmissionState},
 };
 use acorn_protocol::worker::v1::{
     self as proto,
     judge_worker_server::{JudgeWorker, JudgeWorkerServer},
 };
+use axum::{
+    Router,
+    body::{Body, to_bytes},
+    http::{Request, StatusCode},
+};
+use serde_json::{Value, json};
 use sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
 use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 use tonic::{
     Request as RpcRequest, Response, Status, codegen::tokio_stream::wrappers::TcpListenerStream,
     transport::Server,
 };
+use tower::ServiceExt;
 use uuid::Uuid;
 
 /// Actual initialized database, never mocked SQL behavior.
@@ -69,6 +77,28 @@ impl Fixture {
             config,
             database,
         }
+    }
+
+    /// Deployment-side connection for controlled publication and lock contention.
+    pub async fn connection(&self) -> SqliteConnection {
+        SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(&self.config.database.path)
+                .foreign_keys(true),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// Publish a second immutable version while retaining all original version data.
+    pub async fn publish_next(&self) {
+        let mut connection = self.connection().await;
+        sqlx::raw_sql("BEGIN IMMEDIATE;
+            INSERT INTO problem_versions SELECT problem_id, 2, 'New title', statement, comparison_mode, published_at_ms + 1 FROM problem_versions WHERE problem_id = 1 AND version_no = 1;
+            INSERT INTO problem_version_languages SELECT problem_id, 2, language_id, cpu_time_ms, wall_time_ms, memory_kib FROM problem_version_languages WHERE problem_id = 1 AND version_no = 1;
+            INSERT INTO test_cases SELECT problem_id, 2, case_index, input, expected_output FROM test_cases WHERE problem_id = 1 AND version_no = 1;
+            UPDATE problems SET current_version_no = 2 WHERE id = 1; COMMIT;").execute(&mut connection).await.unwrap();
+        connection.close().await.unwrap();
     }
 }
 
@@ -284,12 +314,16 @@ impl RpcServer {
     }
 }
 
-/// P07 assembly with real transport and SQLite and replaceable Worker behavior.
+/// P07/P08 assembly with real transport and SQLite and replaceable Worker behavior.
 pub struct Harness {
     /// Database files and configuration.
     pub fixture: Fixture,
     /// Production Scheduler handle.
     pub scheduler: Scheduler,
+    /// Production owned creation service.
+    pub creation: CreationService,
+    /// Production HTTP routes invoked as Tower requests.
+    pub app: Router,
     /// Independently controlled Worker endpoints.
     pub servers: Vec<RpcServer>,
     /// Production dispatcher task, observed at cleanup.
@@ -313,9 +347,14 @@ impl Harness {
             .collect();
         let (scheduler, task) =
             Scheduler::start(&fixture.config, fixture.database.clone()).unwrap();
+        let creation =
+            CreationService::new(&fixture.config, fixture.database.clone(), scheduler.clone());
+        let app = http::router(&fixture.config, fixture.database.clone(), creation.clone());
         Self {
             fixture,
             scheduler,
+            creation,
+            app,
             servers,
             task,
         }
@@ -363,9 +402,11 @@ impl Harness {
         .unwrap()
     }
 
-    /// Drain tracking before closing transport and database.
+    /// Drain owned creation and tracking before closing transport and database.
     pub async fn close(self) {
+        self.creation.stop();
         self.scheduler.pause();
+        self.creation.wait_idle().await;
         for server in &self.servers {
             server.mock.released.store(true, Ordering::SeqCst);
         }
@@ -383,6 +424,8 @@ impl Harness {
 
     /// Observe an expected fatal dispatcher error rather than claiming normal shutdown.
     pub async fn close_failed(self) {
+        self.creation.stop();
+        self.creation.wait_idle().await;
         assert!(
             tokio::time::timeout(Duration::from_secs(5), self.task)
                 .await
@@ -396,6 +439,53 @@ impl Harness {
     }
 }
 
+/// Make an HTTP request and decode the API response as JSON.
+pub async fn call(
+    app: &Router,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+    key: Option<Uuid>,
+) -> (StatusCode, axum::http::HeaderMap, Value) {
+    let mut builder = Request::builder().method(method).uri(path);
+    if let Some(key) = key {
+        builder = builder.header("idempotency-key", key.to_string());
+    }
+    let body = if let Some(body) = body {
+        builder = builder.header("content-type", "application/json");
+        Body::from(body.to_string())
+    } else {
+        Body::empty()
+    };
+    let response = app
+        .clone()
+        .oneshot(builder.body(body).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = to_bytes(response.into_body(), 2 * 1024 * 1024)
+        .await
+        .unwrap();
+    (status, headers, serde_json::from_slice(&bytes).unwrap())
+}
+
+/// Create a fixture submission and return its identity after checking the immediate response.
+pub async fn create(app: &Router, language: &str, source: &str) -> String {
+    let (status, headers, body) = call(
+        app,
+        "POST",
+        "/api/v1/submissions",
+        Some(json!({"problem_id": 1, "language_id": language, "source": source})),
+        Some(Uuid::new_v4()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let id = body["submission_id"].as_str().unwrap().to_owned();
+    assert_eq!(headers["location"], format!("/api/v1/submissions/{id}"));
+    id
+}
+
 /// Wait on an observable fixture event with a bound, avoiding rare network race construction.
 pub async fn wait_for(condition: impl Fn() -> bool) {
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -405,4 +495,41 @@ pub async fn wait_for(condition: impl Fn() -> bool) {
     })
     .await
     .unwrap();
+}
+
+/// Use actual HTTP/1.0 over a loopback socket for real end-to-end acceptance.
+pub async fn network_call(
+    address: std::net::SocketAddr,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+    key: Option<Uuid>,
+) -> (u16, Value) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let payload = body.map(|body| body.to_string()).unwrap_or_default();
+    let key = key
+        .map(|key| format!("Idempotency-Key: {key}\r\n"))
+        .unwrap_or_default();
+    let request = format!(
+        "{method} {path} HTTP/1.0\r\nHost: localhost\r\nContent-Type: application/json\r\n{key}Content-Length: {}\r\n\r\n{payload}",
+        payload.len()
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).await.unwrap();
+        let boundary = bytes
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .unwrap();
+        let headers = std::str::from_utf8(&bytes[..boundary]).unwrap();
+        let status = headers.split_whitespace().nth(1).unwrap().parse().unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes[boundary + 4..]).unwrap(),
+        )
+    })
+    .await
+    .unwrap()
 }

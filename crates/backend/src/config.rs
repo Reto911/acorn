@@ -41,7 +41,7 @@ pub struct Config {
     pub logging: LoggingConfig,
 }
 
-/// HTTP settings consumed by the later API implementation.
+/// HTTP listener, JSON extraction and list pagination settings.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HttpConfig {

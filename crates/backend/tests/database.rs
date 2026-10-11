@@ -587,24 +587,69 @@ async fn startup_checks_and_finite_lock_wait() {
 
 /// The P06 executable validates an initialized database and clearly reports pending services.
 #[tokio::test]
-async fn executable_validates_database_without_serving() {
+async fn executable_serves_http_and_stops() {
     let fixture = Fixture::new().await;
-    let text = include_str!("../../../config/backend.example.toml").replace(
-        "\"acorn.db\"",
-        &format!("{:?}", fixture.config.database.path),
-    );
+    use std::{process::Stdio, time::Duration};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    let text = include_str!("../../../config/backend.example.toml")
+        .replace(
+            "\"acorn.db\"",
+            &format!("{:?}", fixture.config.database.path),
+        )
+        .replace("127.0.0.1:8080", "127.0.0.1:0");
     let path = fixture.directory.path().join("backend.toml");
     std::fs::write(&path, text).unwrap();
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_acorn-backend"))
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_acorn-backend"))
         .arg("--config")
         .arg(path)
-        .output()
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
         .unwrap();
-    assert_eq!(output.status.code(), Some(1));
-    assert!(output.stdout.is_empty());
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("Backend database validated"));
-    assert!(stderr.contains("Backend HTTP and Scheduler services are not implemented yet"));
+    let mut logs = BufReader::new(child.stderr.take().unwrap()).lines();
+    let address = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(line) = logs.next_line().await.unwrap() {
+            if line.contains("Backend HTTP listening") {
+                return line
+                    .split("listen=")
+                    .nth(1)
+                    .unwrap()
+                    .split_whitespace()
+                    .next()
+                    .unwrap()
+                    .to_owned();
+            }
+        }
+        panic!("Backend did not start listening")
+    })
+    .await
+    .unwrap();
+    let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+    stream
+        .write_all(b"GET /api/v1/problems HTTP/1.0\r\n\r\n")
+        .await
+        .unwrap();
+    let mut response = String::new();
+    tokio::time::timeout(Duration::from_secs(5), stream.read_to_string(&mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(response.starts_with("HTTP/1.0 200"));
+    assert!(response.contains("\"items\""));
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(child.id().unwrap() as i32),
+        nix::sys::signal::Signal::SIGTERM,
+    )
+    .unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .code(),
+        Some(0)
+    );
     let mut connection = fixture.connection().await;
     let hash: String = sqlx::query("SELECT password_hash FROM users WHERE id = 1")
         .fetch_one(&mut connection)

@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod database;
+pub mod http;
 pub mod logging;
 pub mod problems;
 pub mod scheduler;

@@ -2,7 +2,7 @@
 
 状态：已确认，版本 2。
 
-P06 已实现后端[数据库模块](../crates/backend/src/database/mod.rs)、[题目类型](../crates/backend/src/problems.rs)与[提交和终态类型](../crates/backend/src/submissions.rs)。P07 的 Scheduler 已使用条件状态和终态写入方法；HTTP 创建交接由 P08 接入，启动读取／中断方法由 P09 接入入口。开发用户脚本见 [seed-user.sql](../examples/seed-user.sql)。
+P06 已实现后端[数据库模块](../crates/backend/src/database/mod.rs)、[题目类型](../crates/backend/src/problems.rs)与[提交和终态类型](../crates/backend/src/submissions.rs)。P07/P08 的 Scheduler 和 HTTP 已使用创建、固定版本任务装配、条件状态和终态写入方法；启动读取／中断方法由 P09 接入入口。开发用户脚本见 [seed-user.sql](../examples/seed-user.sql)。
 
 结构版本 2 将版本语言表的 `memory_bytes` 改为 `memory_kib`，以 KiB 保存内存限额并直接装配新的 RPC 字段；实际结果中的内存统计仍为字节。应用检查 `PRAGMA user_version = 2`，拒绝旧结构，不自动修改已有数据库。旧库的离线转换或新库初始化由部署端执行，不能只修改结构版本号或将原字节值直接当作 KiB。
 

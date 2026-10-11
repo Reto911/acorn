@@ -1,5 +1,9 @@
 //! Submission identities, task ownership and bounded typed terminal details.
 
+mod creation;
+
+pub use creation::{CreationError, CreationService};
+
 use acorn_protocol::worker::v1::{self as proto, SubmitJobRequest};
 use base64::{Engine, prelude::BASE64_STANDARD};
 use serde::{Deserialize, Serialize};
@@ -144,7 +148,7 @@ pub struct CreateSubmission {
     pub problem_id: i64,
     /// Requested built-in language.
     pub language_id: String,
-    /// Original bytes, already UTF-8 encoded by the later HTTP boundary.
+    /// Original bytes, already UTF-8 encoded by the HTTP boundary.
     pub source: Vec<u8>,
     /// Parsed and canonicalized Idempotency-Key UUID.
     pub request_key: Uuid,
@@ -251,7 +255,7 @@ pub struct FailureDetails {
     pub diagnostic: String,
 }
 
-/// Untagged JSON shape required by the database and later HTTP result contract.
+/// Untagged JSON shape shared by database persistence and HTTP results.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum TerminalDetails {

@@ -1,4 +1,4 @@
-//! P07 contracts over real SQLite and controlled or deployment Worker gRPC.
+//! P07/P08 contracts over real SQLite, production HTTP routes and controlled gRPC.
 
 mod support;
 
@@ -6,43 +6,95 @@ use std::{sync::atomic::Ordering, time::Duration};
 
 use acorn_backend::{
     scheduler::AdmissionError,
-    submissions::{CreateSubmission, SubmissionState, TerminalDetails, Verdict},
+    submissions::{CreateSubmission, SubmissionState, TerminalDetails, TerminalOutcome, Verdict},
 };
-use support::{Harness, Mode, wait_for};
+use acorn_protocol::worker::v1::{JudgeResult, Verdict as RpcVerdict};
+use axum::{
+    body::{Body, to_bytes},
+    http::{Request, StatusCode},
+};
+use serde_json::{Value, json};
+use sqlx::Connection;
+use support::{Harness, Mode, call, create, wait_for};
+use tower::ServiceExt;
 use uuid::Uuid;
 
-/// Terminal persistence preserves binary data, real zero and missing statistics before ACK.
+/// Basic public query shapes exclude private tests and support retained old versions.
+#[tokio::test]
+async fn published_queries_and_history_shapes() {
+    let harness = Harness::start(&[Mode::Finish], 8).await;
+    assert!(harness.fixture.directory.path().exists());
+    let (status, _, list) = call(&harness.app, "GET", "/api/v1/problems", None, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(list["limit"], 20);
+    assert_eq!(list["offset"], 0);
+    assert_eq!(list["items"][0]["problem_id"], 1);
+    assert!(list["items"][0].get("statement").is_none());
+    let (_, _, detail) = call(&harness.app, "GET", "/api/v1/problems/1", None, None).await;
+    assert_eq!(detail["languages"][0]["memory_kib"], 262144);
+    assert!(detail.get("cases").is_none());
+    harness.fixture.publish_next().await;
+    let (_, _, latest) = call(&harness.app, "GET", "/api/v1/problems/1", None, None).await;
+    let (_, _, old) = call(
+        &harness.app,
+        "GET",
+        "/api/v1/problems/1/versions/1",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(latest["version_no"], 2);
+    assert_eq!(old["version_no"], 1);
+    let id = create(&harness.app, "python", "ac").await;
+    harness.terminal(&id).await;
+    let (_, _, history) = call(
+        &harness.app,
+        "GET",
+        "/api/v1/submissions?problem_id=1&state=finished&verdict=AC&limit=1",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(history["items"][0]["submission_id"], id);
+    assert_eq!(history["items"][0]["version_no"], 2);
+    assert!(history["items"][0].get("source").is_none());
+    assert!(history["items"][0].get("terminal_details").is_none());
+    harness.close().await;
+}
+
+/// All major terminal HTTP forms preserve binary data, real zero and missing statistics.
 #[tokio::test]
 async fn terminal_details_and_single_ack() {
     let harness = Harness::start(&[Mode::AckFailure], 8).await;
-    assert!(harness.fixture.directory.path().exists());
-    for (source, verdict) in [
-        ("ac", Verdict::AC),
-        ("ce", Verdict::CE),
-        ("wa", Verdict::WA),
-    ] {
-        let id = harness.submit("c", source).await;
-        let terminal = harness.terminal(&id).await;
-        assert_eq!(terminal.info.state, SubmissionState::Finished);
-        assert_eq!(terminal.info.verdict, Some(verdict));
-        assert!(terminal.info.terminal_at_ms.is_some());
-        match terminal.terminal_details {
-            None => assert_eq!(verdict, Verdict::AC),
-            Some(TerminalDetails::Compile(details)) => {
-                assert_eq!(verdict, Verdict::CE);
-                assert_eq!(details.compile_diagnostic_base64, "AP8K");
+    for (source, verdict) in [("ac", "AC"), ("ce", "CE"), ("wa", "WA")] {
+        let id = create(&harness.app, "c", source).await;
+        harness.terminal(&id).await;
+        let (status, _, body) = call(
+            &harness.app,
+            "GET",
+            &format!("/api/v1/submissions/{id}"),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["state"], "finished");
+        assert_eq!(body["verdict"], verdict);
+        assert!(body["terminal_at_ms"].is_i64());
+        match source {
+            "ac" => assert!(body["terminal_details"].is_null()),
+            "ce" => assert_eq!(
+                body["terminal_details"]["compile_diagnostic_base64"],
+                "AP8K"
+            ),
+            _ => {
+                let case = &body["terminal_details"]["failed_case"];
+                assert_eq!(case["stdout_base64"], "AP8=");
+                assert_eq!(case["resources"]["cpu_time_us"], 0);
+                assert!(case["resources"].get("wall_time_us").is_none());
+                assert_eq!(case["exit_code"], 0);
+                assert!(case.get("signal").is_none());
             }
-            Some(TerminalDetails::Case(details)) => {
-                assert_eq!(verdict, Verdict::WA);
-                let case = details.failed_case;
-                assert_eq!(case.stdout_base64, "AP8=");
-                let resources = case.resources.unwrap();
-                assert_eq!(resources.cpu_time_us, Some(0));
-                assert_eq!(resources.wall_time_us, None);
-                assert_eq!(case.exit_code, Some(0));
-                assert_eq!(case.signal, None);
-            }
-            Some(TerminalDetails::Failure(details)) => panic!("Unexpected failure: {details:?}"),
         }
     }
     assert_eq!(harness.servers[0].mock.acks.load(Ordering::SeqCst), 3);
@@ -188,6 +240,451 @@ async fn awaiting_admission_counts_toward_capacity() {
     harness.close().await;
 }
 
+/// Full queues reject new records but known queued and terminal keys remain idempotent.
+#[tokio::test]
+async fn queue_full_and_idempotency_preserve_identity_and_version() {
+    let harness = Harness::start(&[Mode::Busy], 1).await;
+    let key = Uuid::new_v4();
+    let body = json!({"problem_id": 1, "language_id": "c", "source": "int main(void) {}\n"});
+    let (status, _, first) = call(
+        &harness.app,
+        "POST",
+        "/api/v1/submissions",
+        Some(body.clone()),
+        Some(key),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    harness.fixture.publish_next().await;
+    let (status, _, repeated) = call(
+        &harness.app,
+        "POST",
+        "/api/v1/submissions",
+        Some(body.clone()),
+        Some(key),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(repeated["submission_id"], first["submission_id"]);
+    let id = first["submission_id"].as_str().unwrap();
+    assert_eq!(
+        harness
+            .fixture
+            .database
+            .submission(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .info
+            .version_no,
+        1
+    );
+    let (status, _, conflict) = call(
+        &harness.app,
+        "POST",
+        "/api/v1/submissions",
+        Some(json!({"problem_id": 1, "language_id": "python", "source": "changed"})),
+        Some(key),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(conflict["error"]["code"], "IdempotencyConflict");
+    let new_key = Uuid::new_v4();
+    let (status, _, full) = call(
+        &harness.app,
+        "POST",
+        "/api/v1/submissions",
+        Some(body.clone()),
+        Some(new_key),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(full["error"]["code"], "QueueFull");
+    assert!(full["error"].get("submission_id").is_none());
+    assert!(
+        harness
+            .fixture
+            .database
+            .submission_by_key(new_key)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let orphan_key = Uuid::new_v4();
+    let orphan = harness
+        .fixture
+        .database
+        .create_submission(CreateSubmission {
+            problem_id: 1,
+            language_id: "c".into(),
+            source: body["source"].as_str().unwrap().as_bytes().to_vec(),
+            request_key: orphan_key,
+        })
+        .await
+        .unwrap();
+    let (status, _, full) = call(
+        &harness.app,
+        "POST",
+        "/api/v1/submissions",
+        Some(body),
+        Some(orphan_key),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(full["error"]["submission_id"], orphan.info.id);
+    harness.close().await;
+}
+
+/// A queued record missing from memory re-enters with its original version after publication.
+#[tokio::test]
+async fn queued_rehandoff_keeps_original_version() {
+    let harness = Harness::start(&[Mode::Finish], 4).await;
+    let key = Uuid::new_v4();
+    let orphan = harness
+        .fixture
+        .database
+        .create_submission(CreateSubmission {
+            problem_id: 1,
+            language_id: "python".into(),
+            source: b"ac".to_vec(),
+            request_key: key,
+        })
+        .await
+        .unwrap();
+    harness.fixture.publish_next().await;
+    let (status, _, response) = call(
+        &harness.app,
+        "POST",
+        "/api/v1/submissions",
+        Some(json!({"problem_id":1,"language_id":"python","source":"ac"})),
+        Some(key),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["submission_id"], orphan.info.id);
+    assert_eq!(harness.terminal(&orphan.info.id).await.info.version_no, 1);
+    let id = create(&harness.app, "python", "ac").await;
+    assert_eq!(harness.terminal(&id).await.info.version_no, 2);
+    harness.close().await;
+}
+
+/// Simultaneous same-key creates merge into one persisted and locally queued submission.
+#[tokio::test]
+async fn concurrent_creation_merges_and_rollback_releases_permits() {
+    let harness = Harness::start(&[Mode::Busy], 16).await;
+    let key = Uuid::new_v4();
+    let mut requests = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let app = harness.app.clone();
+        requests.spawn(async move {
+            call(
+                &app,
+                "POST",
+                "/api/v1/submissions",
+                Some(json!({"problem_id":1,"language_id":"python","source":"same"})),
+                Some(key),
+            )
+            .await
+        });
+    }
+    let mut ids = std::collections::HashSet::new();
+    let mut new_count = 0;
+    while let Some(response) = requests.join_next().await {
+        let (status, _, body) = response.unwrap();
+        assert!(matches!(status, StatusCode::OK | StatusCode::ACCEPTED));
+        new_count += usize::from(status == StatusCode::ACCEPTED);
+        ids.insert(body["submission_id"].as_str().unwrap().to_owned());
+    }
+    assert_eq!(new_count, 1);
+    assert_eq!(ids.len(), 1);
+    for _ in 0..16 {
+        let (status, _, body) = call(
+            &harness.app,
+            "POST",
+            "/api/v1/submissions",
+            Some(json!({"problem_id":1,"language_id":"rust","source":"unsupported"})),
+            Some(Uuid::new_v4()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"]["code"], "UnsupportedLanguage");
+    }
+    let mut permits = Vec::new();
+    while let Ok(permit) = harness.scheduler.reserve() {
+        permits.push(permit);
+    }
+    assert_eq!(permits.len(), 15);
+    drop(permits);
+    harness.close().await;
+}
+
+/// Aborting an HTTP waiter during a locked creation does not cancel commit or handoff.
+#[tokio::test]
+async fn disconnected_create_finishes_transaction_and_handoff() {
+    let harness = Harness::start(&[Mode::Finish], 1).await;
+    let mut lock = harness.fixture.connection().await;
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut lock)
+        .await
+        .unwrap();
+    let key = Uuid::new_v4();
+    let app = harness.app.clone();
+    let waiting = tokio::spawn(async move {
+        call(
+            &app,
+            "POST",
+            "/api/v1/submissions",
+            Some(json!({"problem_id":1,"language_id":"python","source":"ac"})),
+            Some(key),
+        )
+        .await
+    });
+    wait_for(|| matches!(harness.scheduler.reserve(), Err(AdmissionError::QueueFull))).await;
+    waiting.abort();
+    assert!(waiting.await.unwrap_err().is_cancelled());
+    sqlx::query("COMMIT").execute(&mut lock).await.unwrap();
+    harness.creation.wait_idle().await;
+    let saved = harness
+        .fixture
+        .database
+        .submission_by_key(key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        harness.terminal(&saved.info.id).await.info.verdict,
+        Some(Verdict::AC)
+    );
+    lock.close().await.unwrap();
+    harness.close().await;
+}
+
+/// Known ended records remain accessible and cannot be overwritten by a late result.
+#[tokio::test]
+async fn terminal_replay_bypasses_capacity_and_late_result_is_acked() {
+    let harness = Harness::start(&[Mode::Running], 1).await;
+    let key = Uuid::new_v4();
+    let body = json!({"problem_id":1,"language_id":"python","source":"ac"});
+    let (_, _, response) = call(
+        &harness.app,
+        "POST",
+        "/api/v1/submissions",
+        Some(body.clone()),
+        Some(key),
+    )
+    .await;
+    let id = response["submission_id"].as_str().unwrap();
+    wait_for(|| harness.servers[0].mock.gets.load(Ordering::SeqCst) > 0).await;
+    let failure = acorn_protocol::worker::v1::JobFailure {
+        code: "WorkerUnavailable".into(),
+        diagnostic: "Previously saved failure".into(),
+    };
+    let terminal = TerminalOutcome::failed(&failure, &harness.fixture.config.results).unwrap();
+    assert!(
+        harness
+            .fixture
+            .database
+            .save_terminal(id, &terminal)
+            .await
+            .unwrap()
+    );
+    let permit = harness.scheduler.reserve().unwrap();
+    let (status, _, repeated) = call(
+        &harness.app,
+        "POST",
+        "/api/v1/submissions",
+        Some(body),
+        Some(key),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(repeated["submission_id"], id);
+    harness.servers[0]
+        .mock
+        .released
+        .store(true, Ordering::SeqCst);
+    let saved = harness.terminal(id).await;
+    assert_eq!(saved.info.state, SubmissionState::Failed);
+    assert_eq!(harness.servers[0].mock.acks.load(Ordering::SeqCst), 1);
+    let ac = TerminalOutcome::judged(
+        &JudgeResult {
+            verdict: RpcVerdict::Accepted as i32,
+            ..Default::default()
+        },
+        4,
+        &harness.fixture.config.results,
+    )
+    .unwrap();
+    assert!(
+        !harness
+            .fixture
+            .database
+            .save_terminal(id, &ac)
+            .await
+            .unwrap()
+    );
+    drop(permit);
+    harness.close().await;
+}
+
+/// Routing, extraction and business errors all use stable English JSON envelopes.
+#[tokio::test]
+async fn http_errors_and_body_limits() {
+    let harness = Harness::start(&[Mode::Finish], 4).await;
+    for (method, path, status, code) in [
+        ("GET", "/missing", StatusCode::NOT_FOUND, "RouteNotFound"),
+        (
+            "DELETE",
+            "/api/v1/problems",
+            StatusCode::METHOD_NOT_ALLOWED,
+            "MethodNotAllowed",
+        ),
+        (
+            "GET",
+            "/api/v1/problems/not-a-number",
+            StatusCode::BAD_REQUEST,
+            "InvalidRequest",
+        ),
+        (
+            "GET",
+            "/api/v1/problems?limit=0",
+            StatusCode::BAD_REQUEST,
+            "InvalidRequest",
+        ),
+        (
+            "GET",
+            "/api/v1/submissions?state=unknown",
+            StatusCode::BAD_REQUEST,
+            "InvalidRequest",
+        ),
+        (
+            "GET",
+            "/api/v1/problems?extra=1",
+            StatusCode::BAD_REQUEST,
+            "InvalidRequest",
+        ),
+        (
+            "GET",
+            "/api/v1/problems/999",
+            StatusCode::NOT_FOUND,
+            "ProblemNotFound",
+        ),
+        (
+            "GET",
+            "/api/v1/problems/1/versions/999",
+            StatusCode::NOT_FOUND,
+            "ProblemVersionNotFound",
+        ),
+    ] {
+        let (actual, _, body) = call(&harness.app, method, path, None, None).await;
+        assert_eq!(actual, status, "{path}: {body}");
+        assert_eq!(body["error"]["code"], code);
+    }
+    for (body, key, status, code) in [
+        (
+            json!({"problem_id":1,"language_id":"python","source":"ac"}),
+            None,
+            StatusCode::BAD_REQUEST,
+            "InvalidIdempotencyKey",
+        ),
+        (
+            json!({"problem_id":1,"language_id":"python","source":""}),
+            Some(Uuid::new_v4()),
+            StatusCode::BAD_REQUEST,
+            "InvalidRequest",
+        ),
+        (
+            json!({"problem_id":1,"language_id":"python","source":"ac","user_id":2}),
+            Some(Uuid::new_v4()),
+            StatusCode::BAD_REQUEST,
+            "InvalidRequest",
+        ),
+        (
+            json!({"problem_id":999,"language_id":"python","source":"ac"}),
+            Some(Uuid::new_v4()),
+            StatusCode::NOT_FOUND,
+            "ProblemNotFound",
+        ),
+        (
+            json!({"problem_id":1,"language_id":"python","source":"x".repeat(65537)}),
+            Some(Uuid::new_v4()),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "SourceTooLarge",
+        ),
+        (
+            json!({"problem_id":1,"language_id":"python","source":"x".repeat(524288)}),
+            Some(Uuid::new_v4()),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "RequestTooLarge",
+        ),
+    ] {
+        let (actual, _, body) =
+            call(&harness.app, "POST", "/api/v1/submissions", Some(body), key).await;
+        assert_eq!(actual, status, "{body}");
+        assert_eq!(body["error"]["code"], code);
+    }
+    for (content_type, body, code) in [
+        ("text/plain", "{}", "UnsupportedMediaType"),
+        ("application/json", "{", "InvalidRequest"),
+    ] {
+        let response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/submissions")
+                    .header("content-type", content_type)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 1024).await.unwrap()).unwrap();
+        assert_eq!(body["error"]["code"], code);
+    }
+    let (_, _, body) = call(
+        &harness.app,
+        "GET",
+        &format!("/api/v1/submissions/{}", Uuid::new_v4()),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(body["error"]["code"], "SubmissionNotFound");
+    let mut connection = harness.fixture.connection().await;
+    sqlx::query(
+        "DELETE FROM problem_version_languages WHERE problem_id = 1 AND language_id = 'python'",
+    )
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    connection.close().await.unwrap();
+    let (status, _, body) = call(
+        &harness.app,
+        "POST",
+        "/api/v1/submissions",
+        Some(json!({"problem_id":1,"language_id":"python","source":"ac"})),
+        Some(Uuid::new_v4()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["code"], "LanguageNotAllowed");
+    harness.creation.stop();
+    let (status, _, body) = call(
+        &harness.app,
+        "POST",
+        "/api/v1/submissions",
+        Some(json!({"problem_id":1,"language_id":"python","source":"ac"})),
+        Some(Uuid::new_v4()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"]["code"], "BackendStopping");
+    harness.close().await;
+}
+
 /// Required writes fail the dispatcher and never ACK an uncommitted result.
 #[tokio::test]
 async fn database_failure_ends_tracking_without_ack() {
@@ -209,11 +706,11 @@ async fn database_failure_ends_tracking_without_ack() {
     harness.close_failed().await;
 }
 
-/// Scheduler through real gRPC and Isolate; requires a dedicated deployment box.
+/// HTTP handlers through real gRPC and Isolate; requires a dedicated deployment box.
 #[tokio::test]
 #[ignore = "Requires host Isolate privileges, cgroups, quotas and ACORN_ISOLATE_BOX_ID"]
-async fn real_scheduler_acceptance() {
-    use acorn_backend::scheduler::Scheduler;
+async fn real_http_worker_acceptance() {
+    use acorn_backend::{http, scheduler::Scheduler, submissions::CreationService};
     use acorn_worker::{config::Config as WorkerConfig, rpc::WorkerService};
     use tokio::{net::TcpListener, sync::oneshot};
     use tonic::{codegen::tokio_stream::wrappers::TcpListenerStream, transport::Server};
@@ -240,63 +737,67 @@ async fn real_scheduler_acceptance() {
     );
     let (scheduler, scheduler_task) =
         Scheduler::start(&fixture.config, fixture.database.clone()).unwrap();
+    let creation =
+        CreationService::new(&fixture.config, fixture.database.clone(), scheduler.clone());
+    let app = http::router(&fixture.config, fixture.database.clone(), creation.clone());
+    let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let http_address = http_listener.local_addr().unwrap();
+    let (http_stop, http_stopped) = oneshot::channel();
+    let http_task = tokio::spawn(async move {
+        axum::serve(http_listener, app)
+            .with_graceful_shutdown(async {
+                let _ = http_stopped.await;
+            })
+            .await
+    });
     let mut first_id = None;
     for (language, source, verdict) in [
         (
             "c",
             "#include <stdio.h>\nint main(void) { long long a,b; if(scanf(\"%lld%lld\",&a,&b)==2) printf(\"%lld\\n\",a+b); return 0; }",
-            Verdict::AC,
+            "AC",
         ),
-        (
-            "python",
-            "a,b=map(int,input().split());print(a+b)",
-            Verdict::AC,
-        ),
-        ("c", "invalid C source", Verdict::CE),
-        ("python", "print(0)", Verdict::WA),
+        ("python", "a,b=map(int,input().split());print(a+b)", "AC"),
+        ("c", "invalid C source", "CE"),
+        ("python", "print(0)", "WA"),
     ] {
-        let permit = scheduler.reserve().unwrap();
-        let created = fixture
-            .database
-            .create_submission(CreateSubmission {
-                problem_id: 1,
-                language_id: language.into(),
-                source: source.as_bytes().to_vec(),
-                request_key: Uuid::new_v4(),
-            })
-            .await
-            .unwrap();
-        let id = created.info.id;
-        assert!(scheduler.enqueue(created.task.unwrap(), permit).unwrap());
+        let (status, created) = support::network_call(
+            http_address,
+            "POST",
+            "/api/v1/submissions",
+            Some(json!({"problem_id":1,"language_id":language,"source":source})),
+            Some(Uuid::new_v4()),
+        )
+        .await;
+        assert_eq!(status, 202);
+        let id = created["submission_id"].as_str().unwrap().to_owned();
         if first_id.is_none() {
             first_id = Some(id.clone());
         }
-        let terminal = tokio::time::timeout(Duration::from_secs(30), async {
+        let body = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
-                let submission = fixture.database.submission(&id).await.unwrap().unwrap();
-                if matches!(
-                    submission.info.state,
-                    SubmissionState::Finished | SubmissionState::Failed
-                ) && !scheduler.contains(&id)
+                let (_, body) = support::network_call(
+                    http_address,
+                    "GET",
+                    &format!("/api/v1/submissions/{id}"),
+                    None,
+                    None,
+                )
+                .await;
+                if matches!(body["state"].as_str(), Some("finished" | "failed"))
+                    && !scheduler.contains(&id)
                 {
-                    break submission;
+                    break body;
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })
         .await
         .unwrap();
-        assert_eq!(
-            terminal.info.state,
-            SubmissionState::Finished,
-            "{terminal:?}"
-        );
-        assert_eq!(terminal.info.verdict, Some(verdict), "{terminal:?}");
-        if verdict == Verdict::WA {
-            let Some(TerminalDetails::Case(details)) = terminal.terminal_details else {
-                panic!("Expected failed case");
-            };
-            assert_eq!(details.failed_case.case_index, 1);
+        assert_eq!(body["state"], "finished", "{body}");
+        assert_eq!(body["verdict"], verdict, "{body}");
+        if verdict == "WA" {
+            assert_eq!(body["terminal_details"]["failed_case"]["case_index"], 1);
         }
     }
     let mut worker_client =
@@ -312,6 +813,10 @@ async fn real_scheduler_acceptance() {
         .await
         .unwrap_err();
     assert_eq!(removed.code(), tonic::Code::NotFound);
+    http_stop.send(()).unwrap();
+    http_task.await.unwrap().unwrap();
+    creation.stop();
+    creation.wait_idle().await;
     scheduler.shutdown();
     scheduler_task.await.unwrap().unwrap();
     worker.shutdown().await.unwrap();

@@ -15,7 +15,7 @@ use sqlx::{
 
 use crate::config::Config;
 
-/// Database and business errors remain distinguishable for the later HTTP boundary.
+/// Database and business errors remain distinguishable at the HTTP boundary.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// The requested problem has no current published version.
