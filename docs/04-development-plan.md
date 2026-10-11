@@ -1,6 +1,6 @@
 # Worker 与后端开发计划
 
-状态：实施中；P01–P06 已完成，下一步 P07。
+状态：实施中；P01–P07 已完成，下一步 P08。
 
 ## 1. 目标与依据
 
@@ -8,7 +8,7 @@
 
 首版交付两个程序：独立 Worker，以及内含 Scheduler 的后端。完成后，可以使用 HTTP 提交 C 或 Python 单文件源码，经 gRPC 判题后查询持久化结果。每个 Worker 同时执行一个 Job，Job 内编译、运行和各用例始终串行；不同 Worker 可以处理不同 Submission。
 
-当前已有设计、建表 SQL、Cargo workspace、共享 Proto、两个程序入口，以及可独立启动的 Worker：配置、日志、语言计划、Isolate 阶段接口、串行判题、RPC 和结果保留均已实现。后端配置、日志、数据库访问及开发用户预置已完成。以下工程目录是首版目标结构，Scheduler、HTTP 与完整启动停机编排仍待开发；每个阶段完成自己的验收后进入下一阶段。
+当前已有设计、建表 SQL、Cargo workspace、共享 Proto、两个程序入口，以及可独立启动的 Worker：配置、日志、语言计划、Isolate 阶段接口、串行判题、RPC 和结果保留均已实现。后端配置、日志、数据库访问、开发用户预置和 Scheduler 库模块已完成。以下工程目录是首版目标结构，HTTP、程序入口组装与完整启动停机编排仍待开发；每个阶段完成自己的验收后进入下一阶段。
 
 运行时检查限于已约定的请求、资源、并发接纳和业务状态要求。实现依赖组件的正常返回与错误报告，不增加跨域检查、Worker 身份核验或额外清理审计。
 
@@ -319,3 +319,21 @@ Worker 独立交付点已完成；下一步 P06 实现后端 TOML、日志、SQL
 首次默认并发执行 `cargo test --workspace --locked` 时，原有 `deadline_stops_execution_and_reports_failure` 的 300 ms 期限测试收到 `StopUnconfirmed`，与预期的 `JobDeadlineExceeded` 不同，命令失败；随后串行执行时该测试与其余常规测试通过。该期限测试及运行停止策略未修改，默认并发运行的时序敏感性仍需单独定位，不能将串行结果记为默认并发命令通过。
 
 在宿主环境用专用 box 203 执行 `ACORN_ISOLATE_BOX_ID=203 ACORN_ISOLATION_SENTINEL=host-only-value cargo test -p acorn-worker --locked --test isolate_real -- --ignored --nocapture`，一个真实 Isolate 阶段验收通过，包含新增的 1 KiB 单文件上限检查：写入 1024 字节成功，再写入 1 字节得到 `EFBIG`，文件长度保持 1024。该次验收也实际覆盖原有 C/Python 阶段、输出停止、共享空间／inode 配额及宿主隔离检查。真实 Executor 和 RPC 专项验收本次未重新运行。
+
+### 7.9 P07：已完成
+
+已实现 [`Scheduler`](../crates/backend/src/scheduler/mod.rs)：短同步锁保护 FIFO 和按 Submission ID 去重的本地记录，信号量作为待接纳名额的唯一计数。许可随创建预留、排队和等待接纳的任务转移，明确接纳或本地结束后释放，忙时退回队首继续持有。节点缓存保存当前 Job、配置地址和再次尝试时刻，按轮转选择；各节点的 [`tracking`](../crates/backend/src/scheduler/tracking.rs) 独立运行并回送完成事件，不因一个 Worker 的 RPC 等待阻塞其他节点。
+
+[`worker_client`](../crates/backend/src/scheduler/worker_client.rs) 复用地址对应的 Tonic channel，三个调用分别设置服务端可见 deadline 和本地 timeout，应用独立发送／接收消息上限。分派先条件提交 `queued → dispatching`；明确接纳后写 `running` 并归还待接纳名额，固定地址和 ID 查询。只对明确忙、结果区满或停机拒绝退回队首并立即选择其他候选节点；提交响应不明只查询一次，查不到或无法确认时保存失败，正常查询失败也不重交旧 Job。
+
+响应在 RPC 边界验证身份、状态、阶段、进度和终态对应关系，再复用 `TerminalOutcome` 验证原始字节和结果形状。终态提交成功后才执行一次 ACK；ACK 失败仅记警告，迟到结果不覆盖终态。已确认的后端失败代码 `WorkerUnavailable`、`WorkerJobNotFound`、`InvalidWorkerResponse` 写入后端设计；无效响应保存失败且不 ACK。关键写入失败使调度任务返回错误，未提交结果不 ACK。
+
+新增的受控 gRPC 测试使用真实回环监听和 SQLite，覆盖忙时立即改派、两个节点同时跟踪不同提交、等待接纳占用名额、重复与过期投递、一次查询确认、失联不重交、非法响应、提交先于 ACK 及 ACK 失败。另通过关闭共享连接池验证结果写入失败时调度退出且没有 ACK；该测试不代表真实磁盘故障验收。真实 Worker 验收和本提交检查记录如下。
+
+为拆分独立提交，P07 的测试直接预留名额、创建数据库记录并交接任务，不依赖 HTTP 或创建服务。此提交状态实际执行：
+
+- `cargo fmt --all -- --check`、`cargo check --workspace --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings`：通过。
+- 在宿主执行 `cargo test --workspace --locked`：四十二个常规测试通过（后端十六个、Worker 二十四个、协议两个），四个真实验收默认忽略。采用默认并发方式；第 7.8 节的历史期限测试时序问题仍未单独定位。
+- 在宿主使用专用 box 204 执行 `ACORN_ISOLATE_BOX_ID=204 cargo test -p acorn-backend --locked --test workflow real_scheduler_acceptance -- --ignored --nocapture`：一个真实验收通过。直接交接已入库任务，经 Scheduler、gRPC、Isolate 和 SQLite 完成 C/Python 各四用例 AC、C CE 和 Python 首例 WA；Worker 未确认区及 ACK FIFO 均设为 1，验证保存后 ACK、连续接纳及最早结果淘汰。此项不覆盖 HTTP，也未重跑 P03 全部隔离／配额或 Worker 专项验收。
+
+当前程序入口保留 P06 行为，HTTP 与入口组装在 P08 接入。

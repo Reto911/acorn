@@ -18,7 +18,7 @@ pub struct ProblemSummary {
 pub struct LanguageLimits {
     /// Built-in c or python language identifier.
     pub language_id: String,
-    /// Millisecond and byte limits passed unchanged to the Worker.
+    /// Millisecond and KiB limits passed unchanged to the Worker.
     pub limits: RunLimits,
 }
 

@@ -2,7 +2,7 @@
 
 C 与 Python 3 的单文件源码判题系统。后端包含 HTTP API、Scheduler 和 SQLite 访问模块，通过 gRPC 调用独立 Worker。
 
-当前已完成 P01–P06，Worker 可独立通过 gRPC 提供 C/Python 串行判题、结果查询和 ACK；后端已有配置、日志和 SQLite 业务访问。下一步 P07 接入 Scheduler。开发范围、执行契约和后续步骤见[文档索引](docs/README.md)与[开发计划](docs/04-development-plan.md)。
+当前已完成 P01–P07，Worker 可独立通过 gRPC 提供 C/Python 串行判题、结果查询和 ACK；后端已有配置、日志、SQLite 业务访问及可独立调用的 Scheduler。下一步 P08 接入 HTTP 和程序入口。开发范围、执行契约和后续步骤见[文档索引](docs/README.md)与[开发计划](docs/04-development-plan.md)。
 
 ## 构建与检查
 
@@ -61,14 +61,21 @@ sqlite3 -bail acorn.db < sql/002-example-problem.sql
 cargo run --locked -p acorn-backend -- --config config/backend.example.toml
 ```
 
-当前后端在数据库校验后关闭连接池，明确提示 HTTP 和 Scheduler 尚未实现，并返回 1；该提示不表示数据库校验失败，也不代表服务已启动。应用不会创建数据库、装入 SQL 或执行升级。测试用户脚本仅供开发，Argon2id 哈希来自已丢弃的随机密码；当前没有登录功能或可用登录凭据。示例题仍随正式发布保留。
+当前后端入口仍在数据库校验后关闭连接池，以原占位提示报告 HTTP 和 Scheduler 尚未实现并返回 1；Scheduler 库模块已完成，程序入口与 HTTP 将在 P08 组装。该提示不表示数据库校验失败，也不代表服务已启动。应用不会创建数据库、装入 SQL 或执行升级。测试用户脚本仅供开发，Argon2id 哈希来自已丢弃的随机密码；当前没有登录功能或可用登录凭据。示例题仍随正式发布保留。
 
 内存限额和 Isolate 单文件／磁盘空间限额统一使用 KiB（1 KiB = 1024 字节），配置字段明确以 `_kib` 结尾；实际资源统计、输出保留和产物导出大小仍按字节计量。数据库结构版本为 2，内存列为 `memory_kib`；旧配置与旧数据库需更新，后端与 Worker 按当前 KiB 协议同步构建运行。已有数据库由部署端离线转换或另建新库，详见 [SQL 使用说明](sql/README.md)。
 
-P06 的数据库方法可直接测试：
+P06/P07 的数据库和 Scheduler 方法可直接测试：
 
 ```sh
 cargo test -p acorn-backend --locked
+```
+
+P07 的真实验收将已入库任务交给 Scheduler，通过 gRPC、SQLite 和 Isolate 检查 C/Python AC、C CE、Python 首例 WA，以及保存与 ACK 淘汰。使用独立 box ID，在具备既定权限的宿主环境执行：
+
+```sh
+ACORN_ISOLATE_BOX_ID=204 \
+  cargo test -p acorn-backend --locked --test workflow real_scheduler_acceptance -- --ignored --nocapture
 ```
 
 后端使用一个共享 SQLx SQLite 连接池，固定最多一个连接；外键和有限锁等待配置用于每次连接建立。创建提交以 `BEGIN IMMEDIATE` 固定最新版本和幂等键，在返回完整内存任务前提交事务并释放连接。状态及终态使用条件更新，AC/CE/首个失败用例和执行失败按类型化 JSON 保存，字节字段使用 Base64。配置中的 HTTP JSON 上限、gRPC 二进制上限和原始任务／结果上限分别计量，示例值与 Worker 示例对齐。

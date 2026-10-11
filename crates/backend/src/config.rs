@@ -73,7 +73,7 @@ pub struct TestUserConfig {
     pub user_id: i64,
 }
 
-/// Queue and Worker settings for the following Scheduler stage.
+/// Waiting-admission capacity and Worker dispatch settings.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SchedulerConfig {

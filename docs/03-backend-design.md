@@ -2,7 +2,7 @@
 
 状态：已确认，作为首版实现依据。
 
-实施进度：P06 已完成配置、日志、SQLite 业务访问和开发用户预置；Scheduler、HTTP 及完整启动停机编排仍按 P07–P09 实施。
+实施进度：P06/P07 已完成配置、日志、SQLite 业务访问、开发用户预置及 Scheduler 库模块；HTTP 与程序入口组装按 P08 实施，启动恢复与完整故障边界仍按 P09 实施。
 
 ## 1. 目标与范围
 
@@ -88,7 +88,7 @@ API 与 Scheduler 共享一个 SQLx `SqlitePool`，首版固定 `max_connections
 
 P06 的 [`Database`](../crates/backend/src/database/mod.rs) 提供题目列表与版本查询、创建幂等查询、提交详情与筛选历史、完整固定版本任务装配，以及三个非终态条件更新、终态保存和旧在途中断写入。`create_submission` 在短事务内查重、固定版本并装配 `JudgingTask`，提交并释放连接后返回；待接纳名额由后续调用服务预留，数据库层不等待队列。已有同键同内容记录保留原版本；仅 queued 记录返回可交接任务。`queued_tasks` 按顺序读取，并在超过配置容量时明确报错；入口尚不调用这些启动状态处理，统一编排在 P09 接入。
 
-终态先由 [`TerminalOutcome`](../crates/backend/src/submissions.rs) 按已知用例数和原始字节预算校验结果形状，再执行单条条件 UPDATE，同时原子提交状态、独立 verdict、JSON 详情和终态时间。P07 的 Worker 客户端仍须校验完整响应的 Job ID、运行状态、阶段及进度与终态消息对应关系。数据库错误保留 SQLx 原始原因，业务查重与校验错误使用独立类型；关键写入错误触发退出的调用侧监督在 P09 完成。
+终态先由 [`TerminalOutcome`](../crates/backend/src/submissions.rs) 按已知用例数和原始字节预算校验结果形状，再执行单条条件 UPDATE，同时原子提交状态、独立 verdict、JSON 详情和终态时间。P07 的 Worker 客户端校验完整响应的 Job ID、运行状态、阶段及进度与终态消息对应关系。数据库错误保留 SQLx 原始原因，业务查重与校验错误使用独立类型；Scheduler 关键写入错误使调度任务返回错误，入口监督及完整故障退出边界在 P08/P09 接入。
 
 配置示例见 [backend.example.toml](../config/backend.example.toml)。`scheduler.workers` 使用 Tonic endpoint URI；数据库路径相对于进程工作目录。HTTP 体积按源码最坏 JSON 转义开销预留，gRPC 门限按原始任务／结果另加协议空间校验，Base64 JSON 长度不复用二进制消息门限。P06 程序入口完成配置、结构版本和预置用户检查后关闭连接，明确报告服务尚未实现并返回 1。
 
@@ -199,6 +199,8 @@ CE 的 `terminal_details` 使用 `compile_diagnostic_base64`、`compile_diagnost
 
 ### 7.1 内存状态与分派策略
 
+P07 的实现位于 [`scheduler`](../crates/backend/src/scheduler/mod.rs)，短同步锁保护 FIFO 与按 ID 去重的本地记录；Worker 缓存由单个调度循环持有，各任务的 RPC 跟踪在独立 Tokio 任务中执行并回送完成事件，见 [`tracking`](../crates/backend/src/scheduler/tracking.rs)。数据库访问和网络等待均在锁外执行。
+
 Scheduler 保存 FIFO 待接纳队列、按 Submission ID 去重的记录、当前提交到 Worker 地址的映射，以及各 Worker 的可用状态缓存。Worker 地址来自配置，上述调度状态不落库。
 
 队列上限包含创建中的预留、排队任务和等待 `SubmitJob` 接纳确认的任务。Worker 明确接纳后归还该名额；明确忙而退回队列时继续占用原名额，避免重入队时挤占已经释放的空间。
@@ -238,6 +240,8 @@ Scheduler 保存 FIFO 待接纳队列、按 Submission ID 去重的记录、当�
 gRPC deadline 覆盖单次提交、查询或 ACK；不启用应用层自动重发提交或对冲调用。只对明确未接纳的任务重新分派；状态不明或已执行任务不自动重试。
 
 首版一个 Submission ID 就是一个 Job ID。`SubmitJob` 返回重复记录时，继续查询该记录，不生成第二个 ID。所有 RPC 响应须与所查询 ID 对应。
+
+后端保存的通信与协议失败代码为 `WorkerUnavailable`（通信故障或无法确认）、`WorkerJobNotFound`（查询明确无记录）和 `InvalidWorkerResponse`（身份、状态、阶段、进度或终态形状违反协议）。明确非法请求保存 Worker 的 `InvalidJob`／`UnsupportedLanguage` 原因；Worker 自身返回的合法失败终态保留其代码。诊断按配置限制 UTF-8 字节。无效响应保存失败，不视为已经通过校验的远端终态，不发送 ACK。
 
 ### 7.3 保存结果与 ACK
 

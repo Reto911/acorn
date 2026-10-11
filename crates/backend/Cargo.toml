@@ -25,4 +25,5 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+acorn-worker = { path = "../worker" }
 tempfile.workspace = true
