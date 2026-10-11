@@ -2,7 +2,7 @@
 
 C 与 Python 3 的单文件源码判题系统。后端包含 HTTP API、Scheduler 和 SQLite 访问模块，通过 gRPC 调用独立 Worker。
 
-当前已完成 P01 工程骨架与共享协议、P02 Worker 配置与语言计划，以及 P03 Isolate 阶段执行接口。开发范围、执行契约和后续步骤见[文档索引](docs/README.md)与[开发计划](docs/04-development-plan.md)。
+当前已完成 P01 工程骨架与共享协议、P02 Worker 配置与语言计划、P03 Isolate 阶段执行接口，以及 P04 串行判题执行器。开发范围、执行契约和后续步骤见[文档索引](docs/README.md)与[开发计划](docs/04-development-plan.md)。
 
 ## 构建与检查
 
@@ -48,7 +48,14 @@ cargo run --locked -p acorn-worker -- --config config/worker.example.toml
 
 当前有效 Worker 配置会输出验证完成日志，随后提示 RPC 服务尚未实现并以状态码 1 退出；无效配置或不可调用的工具明确报错，不启动监听。后端仍只解析路径，配置解析和示例在 P06 提供。工具的 `--version` 检查不能替代真实沙箱验收。
 
-真实判题需要 Linux、Isolate、C/Python 工具链，以及设计规定的控制组、用户配额和权限配置。P03 已验证实际阶段执行与隔离；串行判题执行器在 P04 接入，独立 RPC 服务在 P05 提供。
+真实判题需要 Linux、Isolate、C/Python 工具链，以及设计规定的控制组、用户配额和权限配置。P03 已验证实际阶段执行与隔离；P04 已通过内部接口完成真实 C/Python 判题，独立 RPC 服务在 P05 提供。
+
+P04 执行器的真实验收使用独立 box ID，按内部调用检查 C 的 AC/CE/WA、Python 的 AC/语法错误 RE，以及完成用例数：
+
+```sh
+ACORN_ISOLATE_BOX_ID=201 \
+  cargo test -p acorn-worker --locked --test executor -- --ignored --nocapture
+```
 
 ## Isolate 阶段验收
 

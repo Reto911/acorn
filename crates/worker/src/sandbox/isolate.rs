@@ -266,7 +266,7 @@ impl IsolateSandbox {
 
 impl StageControl {
     /// Check an already requested stop before starting an execution process.
-    fn current_stop(&self) -> Option<StopReason> {
+    pub fn current_stop(&self) -> Option<StopReason> {
         (*self.stop.borrow())
             .or_else(|| (Instant::now() >= self.deadline).then_some(StopReason::JobDeadline))
     }

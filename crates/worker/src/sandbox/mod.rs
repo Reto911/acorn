@@ -80,6 +80,7 @@ pub enum StopReason {
 }
 
 /// Job deadline and internal stop channel; independent of RPC connection lifetime.
+#[derive(Clone)]
 pub struct StageControl {
     /// Absolute deadline established at Job admission.
     pub deadline: Instant,

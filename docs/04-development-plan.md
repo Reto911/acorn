@@ -1,6 +1,6 @@
 # Worker 与后端开发计划
 
-状态：实施中；P01–P03 已完成，下一步 P04。
+状态：实施中；P01–P04 已完成，下一步 P05。
 
 ## 1. 目标与依据
 
@@ -8,7 +8,7 @@
 
 首版交付两个程序：独立 Worker，以及内含 Scheduler 的后端。完成后，可以使用 HTTP 提交 C 或 Python 单文件源码，经 gRPC 判题后查询持久化结果。每个 Worker 同时执行一个 Job，Job 内编译、运行和各用例始终串行；不同 Worker 可以处理不同 Submission。
 
-当前已有设计、建表 SQL、Cargo workspace、共享 Proto、两个程序入口及 Worker 配置、日志、语言计划和 Isolate 阶段执行接口。以下工程目录是首版目标结构，串行判题执行器、RPC 及后端业务仍待开发。先打通真实沙箱的 Worker，再接入后端；每个阶段完成自己的验收后进入下一阶段。
+当前已有设计、建表 SQL、Cargo workspace、共享 Proto、两个程序入口及 Worker 配置、日志、语言计划、Isolate 阶段执行接口和串行判题执行器。以下工程目录是首版目标结构，RPC 及后端业务仍待开发。先打通真实沙箱的 Worker，再接入后端；每个阶段完成自己的验收后进入下一阶段。
 
 运行时检查限于已约定的请求、资源、并发接纳和业务状态要求。实现依赖组件的正常返回与错误报告，不增加跨域检查、Worker 身份核验或额外清理审计。
 
@@ -269,3 +269,13 @@ workspace 已启用 `missing_docs = "deny"` 和 `clippy::missing_docs_in_private
 - 沙箱不能访问实际存在的宿主私有文件，不继承宿主测试环境变量和额外可继承 FD，也不能连接同时存在的宿主 loopback 监听端口。
 
 管理器异常退出和配额设置失败由测试替身触发，未将这些替身测试记作真实隔离证据。尚未实现 Job 判题结论、失败短路或对外 RPC；下一步 P04 使用此接口实现串行判题执行器。
+
+### 7.5 P04：已完成
+
+已实现 [`Executor`](../crates/worker/src/executor.rs)：共用语言计划与完整阶段接口，C 只编译一次、Python 直接运行，各用例复制原始程序文件并串行执行；按固定尾部六种 ASCII 空白规则比较，首个失败立即短路。返回 AC、CE 或唯一首个失败用例，保留真实可选统计；已确认超限按 MLE、OLE、TLE 选择。阶段与完成数通过同步回调提供给后续 RPC 层。
+
+Job 总期限和内部停止沿用 P03 的停止通道。普通结束在返回终态前尝试删除私有文件并释放请求和产物；停止未确认保留 Job 上下文和执行占用。失败诊断限制为 512 个 UTF-8 字节，代码与职责见 Worker 设计第 5.3 节。
+
+已执行 `cargo fmt --all -- --check`、`cargo check --workspace --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings` 和 `cargo test -p acorn-worker --locked`。十五个常规 Worker 测试通过，其中新增六个执行器测试覆盖 C AC/CE/WA、编译诊断截断、Python 独立源码副本与语法错误 RE、首个失败短路、精确比较、总期限、超限优先级及 OLE 有界结果。测试管理器调用真实 GCC/Python，但不提供隔离，这些结果只证明执行编排。
+
+使用专用 box 201 在宿主执行环境单独运行 `ACORN_ISOLATE_BOX_ID=201 cargo test -p acorn-worker --locked --test executor -- --ignored --nocapture`，一个真实验收测试通过，覆盖 C AC/CE/WA、Python AC/RE 及完成用例数。工具沙箱内同一命令先因 Isolate 初始化返回 `Must be started as root` 失败，随后在宿主权限环境通过；未把工具沙箱失败记作宿主部署故障，也未重新宣称 P03 全部隔离项目再次验收。RPC 尚未实现，下一步 P05。
