@@ -2,7 +2,7 @@
 
 C 与 Python 3 的单文件源码判题系统。后端包含 HTTP API、Scheduler 和 SQLite 访问模块，通过 gRPC 调用独立 Worker。
 
-当前已完成 P01 工程骨架与共享协议，以及 P02 Worker 配置、日志和语言计划。开发范围、执行契约和后续步骤见[文档索引](docs/README.md)与[开发计划](docs/04-development-plan.md)。
+当前已完成 P01 工程骨架与共享协议、P02 Worker 配置与语言计划，以及 P03 Isolate 阶段执行接口。开发范围、执行契约和后续步骤见[文档索引](docs/README.md)与[开发计划](docs/04-development-plan.md)。
 
 ## 构建与检查
 
@@ -48,4 +48,17 @@ cargo run --locked -p acorn-worker -- --config config/worker.example.toml
 
 当前有效 Worker 配置会输出验证完成日志，随后提示 RPC 服务尚未实现并以状态码 1 退出；无效配置或不可调用的工具明确报错，不启动监听。后端仍只解析路径，配置解析和示例在 P06 提供。工具的 `--version` 检查不能替代真实沙箱验收。
 
-真实判题需要 Linux、Isolate、C/Python 工具链，以及设计规定的控制组、用户配额和权限配置；这些前提在 P03 验证。
+真实判题需要 Linux、Isolate、C/Python 工具链，以及设计规定的控制组、用户配额和权限配置。P03 已验证实际阶段执行与隔离；串行判题执行器在 P04 接入，独立 RPC 服务在 P05 提供。
+
+## Isolate 阶段验收
+
+部署时保留 Isolate 官方的 root 所有权和 setuid 安装方式，在沙箱根目录所在文件系统启用用户配额，并准备控制组。Worker 仍以启动用户运行。若采用普通用户初始化方式，由管理员在 `/etc/isolate` 设置 `restricted_init = 0`，再以该用户执行 `isolate --check-config`；配置加载成功仍不能替代初始化与实际运行检查。隔离和配额约定见 [Worker 设计第 7.2 节](docs/01-worker-design.md#72-基于-isolate-默认规则的隔离策略)。
+
+默认测试运行无需 Isolate 初始化权限；真实验收单独执行，须选择专用 box ID，避免与其他 Worker 冲突。以下命令使用 box 200，测试按本机默认 `/var/lib/isolate` 根目录检查清理：
+
+```sh
+ACORN_ISOLATE_BOX_ID=200 ACORN_ISOLATION_SENTINEL=host-only-value \
+  cargo test -p acorn-worker --locked --test isolate_real -- --ignored --nocapture
+```
+
+该测试实际编译 C、使用独立程序副本执行两次并运行 Python，检查输出超限停止、三处可写目录共享空间及 inode 配额，以及宿主私有文件、继承环境、额外 FD 和宿主监听端口的隔离。配额设置失败、管理器异常退出和清理警告另由可控测试覆盖；停止未确认时跳过依赖停止的清理并保留执行占用，需由部署端处置。

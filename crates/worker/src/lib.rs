@@ -4,3 +4,4 @@ pub mod config;
 pub mod language;
 pub mod logging;
 pub mod rpc;
+pub mod sandbox;

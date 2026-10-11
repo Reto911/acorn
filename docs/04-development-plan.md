@@ -1,6 +1,6 @@
 # Worker 与后端开发计划
 
-状态：实施中；P01、P02 已完成，下一步 P03。
+状态：实施中；P01–P03 已完成，下一步 P04。
 
 ## 1. 目标与依据
 
@@ -8,7 +8,7 @@
 
 首版交付两个程序：独立 Worker，以及内含 Scheduler 的后端。完成后，可以使用 HTTP 提交 C 或 Python 单文件源码，经 gRPC 判题后查询持久化结果。每个 Worker 同时执行一个 Job，Job 内编译、运行和各用例始终串行；不同 Worker 可以处理不同 Submission。
 
-当前已有设计、建表 SQL、Cargo workspace、共享 Proto、两个程序入口及 Worker 配置、日志和语言计划。以下工程目录是首版目标结构，沙箱执行及后端业务仍待开发。先打通真实沙箱的 Worker，再接入后端；每个阶段完成自己的验收后进入下一阶段。
+当前已有设计、建表 SQL、Cargo workspace、共享 Proto、两个程序入口及 Worker 配置、日志、语言计划和 Isolate 阶段执行接口。以下工程目录是首版目标结构，串行判题执行器、RPC 及后端业务仍待开发。先打通真实沙箱的 Worker，再接入后端；每个阶段完成自己的验收后进入下一阶段。
 
 运行时检查限于已约定的请求、资源、并发接纳和业务状态要求。实现依赖组件的正常返回与错误报告，不增加跨域检查、Worker 身份核验或额外清理审计。
 
@@ -252,3 +252,20 @@ workspace 已启用 `missing_docs = "deny"` 和 `clippy::missing_docs_in_private
 已提供 Worker TOML 配置类型与 [worker.example.toml](../config/worker.example.toml)，校验门限和预算关系，并以启动用户检查 Isolate、GCC、Python 的 `--version`。日志使用 tracing 单行英文文本、时间戳和配置级别，输出到 stderr，不继承环境日志级别。C/Python 适配器只生成命令数组、有限环境、编译预算和文件规则；C 编译一次得到固定 `program`，Python 无预编译，使用 `-I -B -S main.py`。
 
 已运行 `cargo fmt --all -- --check`、`cargo check --workspace --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo test -p acorn-worker --locked`。三个 Worker 测试通过，覆盖示例语言计划、代表性的无效预算和缺失工具。有效配置的入口检查确认英文日志写入 stderr；入口随后明确提示 RPC 尚未实现并返回 1，未宣称服务启动。下一步 P03 验证真实沙箱接口。
+
+### 7.4 P03：已完成
+
+已实现 [Isolate 阶段接口](../crates/worker/src/sandbox/mod.rs)：初始化时设置空间及 inode 配额，复制阶段文件，以默认隔离规则、有限环境和显式资源预算执行；`/dev/shm` 映射为配额文件系统上的私有临时目录。异步持续收集 stdout/stderr，编译诊断共用有界保留预算，运行输出超限触发 SIGTERM。管理器退出码 0/1 确认停止后才解析元数据、独立导出固定常规产物并调用清理。清理失败记 warn；停止未确认返回独立错误并保留资源和占用。Job 期限和内部停止请求均通过同一停止路径处理。
+
+已执行 `cargo fmt --all -- --check`、`cargo check --workspace --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings` 和 `cargo test -p acorn-worker --locked`。九个常规 Worker 测试通过，覆盖原 P02 三项，以及元数据缺失与 SIGKILL 不推断 OOM、固定产物导出边界、有界编译诊断与清理警告、配额初始化失败不执行、异常管理器保留占用和内部停机停止。默认命令跳过需要宿主权限的真实测试。
+
+真实验收使用 Isolate 2.6、当前普通用户、专用 box 200、cgroup v2，以及 `/var/lib/isolate` 所在 ext4 用户配额文件系统。最初 `/etc/isolate` 的 `restricted_init=1` 阻止普通用户初始化，当前用户也没有免密码 sudo；在管理员将其改为 `restricted_init=0` 后，当前用户实际完成带配额初始化和清理。工具沙箱的只读挂载和 NoNewPrivs 不能代表宿主配置，真实验收在宿主执行环境运行。
+
+通过[项目说明中的命令](../README.md#isolate-阶段验收)单独执行一个真实验收测试，结果通过，实际覆盖：
+
+- C 编译并导出程序，两次使用独立程序副本计算得到 `42`；Python 命令正常执行。取得实际 CPU/墙钟统计，阶段结束后调用清理。
+- Python 持续输出触发 OLE，保留 4096 字节 stdout 和截断标记，原始停止原因保持为输出超限；确认停止后清理。
+- 分别使用 512 KiB 空间配额和 12 inode 配额，在 `/box`、`/tmp`、`/dev/shm` 累计写入，三处均可写且累计达到同一配额时得到 `EDQUOT`。
+- 沙箱不能访问实际存在的宿主私有文件，不继承宿主测试环境变量和额外可继承 FD，也不能连接同时存在的宿主 loopback 监听端口。
+
+管理器异常退出和配额设置失败由测试替身触发，未将这些替身测试记作真实隔离证据。尚未实现 Job 判题结论、失败短路或对外 RPC；下一步 P04 使用此接口实现串行判题执行器。
