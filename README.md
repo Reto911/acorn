@@ -4,7 +4,18 @@ C 与 Python 3 的单文件源码判题系统。后端包含 HTTP API、Schedule
 
 当前已完成 P01–P10：Worker 独立提供 C/Python 串行判题，后端通过 HTTP 创建提交、进程内 Scheduler 分派、gRPC 取结果、SQLite 持久化和 ACK 完成业务闭环，并已接入启动装入、正常停机及故障退出。首版源码样例、真实单／双 Worker 验收、独立程序从空库启动及重启查询已完成，操作步骤见下文。开发范围、执行契约和实际验证记录见[文档索引](docs/README.md)与[开发计划](docs/04-development-plan.md)。
 
-浏览器 GUI 采用 Vue 3、TypeScript 和 Monaco，已完成 F01–F06：工程与 HTTP 客户端、真实题目浏览、C/Python 编辑、本地草稿、主动提交、结果详情、固定版本题面和状态轮询，以及提交历史筛选、分页和详情往返，运行与检查命令见[前端说明](web/README.md)。完整首版联调按[前端开发计划](docs/06-frontend-development-plan.md)的 F07 继续验收，交互依据见[GUI 设计](docs/05-frontend-design.md)；健康观测后置。
+浏览器 GUI 采用 Vue 3、TypeScript 和 Monaco，已完成 F01–F07：题目浏览、C/Python 编辑、本地草稿、主动提交、结果详情、固定版本题面、状态轮询，以及提交历史筛选、分页和详情往返。首版桌面联调已覆盖 C/Python AC、C CE、Python WA 和 C TLE，实际新增与复用记录、UI-01–UI-09 对应关系及未测范围见[前端开发计划](docs/06-frontend-development-plan.md#57-f07首版浏览器联调与操作说明)。交互依据见[GUI 设计](docs/05-frontend-design.md)，健康观测继续后置。
+
+## 浏览器 GUI
+
+先按下文[程序入口](#程序入口)启动 Worker 和后端；已有数据库只需使用原配置启动，不重复执行初始化 SQL。再按[前端环境与安装](web/README.md#环境与安装)准备 Node.js、pnpm、依赖和本地配置，在仓库根目录执行：
+
+```sh
+cd web
+pnpm dev
+```
+
+打开 [本地题目列表](http://localhost:5173/problems)，进入两数求和题，选择 C 或 Python 3，粘贴对应的 `examples/submissions/a-plus-b.c` 或 `a-plus-b.py` 源码。Ctrl+S 保存本地草稿，点击“提交代码”后进入结果页并取得 AC；“本题提交记录”可重新打开结果。完整操作、检查和静态部署说明见[前端说明](web/README.md)。GUI 支持宽度不小于 1024 CSS px 的桌面浏览器；当前没有登录、历史源码查询或健康观测。
 
 ## 构建与检查
 

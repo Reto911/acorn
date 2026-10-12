@@ -1,6 +1,6 @@
 # Acorn 前端
 
-独立的 Vue 3 + TypeScript 浏览器工程。当前完成 F01–F06：中文浅色页面、路由懒加载、本地 Monaco 和编辑器 Worker，HTTP 客户端与提交请求恢复/重试/放弃入口，真实题目浏览，C/Python 编辑、本地草稿、主动提交，结果详情、固定版本题面和状态轮询，以及历史筛选、分页和详情往返。页面不使用模拟业务数据，完整首版联调留在 F07。
+独立的 Vue 3 + TypeScript 浏览器工程。当前完成 F01–F07：中文浅色页面、路由懒加载、本地 Monaco 和编辑器 Worker，HTTP 客户端与提交请求恢复/重试/放弃入口，真实题目浏览，C/Python 编辑、本地草稿、主动提交，结果详情、固定版本题面和状态轮询，以及历史筛选、分页和详情往返。首版桌面浏览器联调已完成，五条真实判题路线、UI-01–UI-09 对应关系和实际检查范围见[联调记录](../docs/06-frontend-development-plan.md#57-f07首版浏览器联调与操作说明)。
 
 设计和任务依据见[前端 GUI 设计](../docs/05-frontend-design.md)和[前端开发计划](../docs/06-frontend-development-plan.md)。
 
@@ -60,6 +60,16 @@ pnpm test
 `pnpm format` 可格式化前端文件；锁文件由 pnpm 生成，不手工格式化。`pnpm build` 包含类型检查，产物为 `dist/`。`pnpm test` 单次运行 Vitest，`pnpm test:watch` 用于开发期间监听。当前有 9 个 `src/**/*.test.ts` 文件、51 项测试：F02 的 36 项客户端测试、F03 的 2 项题面测试、F04 的 4 项草稿测试、F05 的 3 项轮询与 4 项结果展示测试，以及 F06 的 2 项历史查询与导航契约测试。浏览器检查复用临时工具，未新增端到端测试依赖。
 
 纯前端变更使用这些检查及相关验证，不重复运行 Rust/Isolate 验收；如果修改 Rust，仍遵守仓库规定的格式、编译、Clippy 和相关测试要求。
+
+## 首次完整判题
+
+1. 按[后端启动说明](../README.md#程序入口)准备题目和配置，启动 Worker 与后端；已有库不重复初始化。实际取得新任务的判题结果需要可用 Worker。
+2. 完成本页的环境安装和本地配置后运行 `pnpm dev`，打开 [题目列表](http://localhost:5173/problems)，进入“两数求和（A + B）”，确认题面、版本和语言限额已加载。
+3. 选择 C 或 Python 3，将 [C AC 源码](../examples/submissions/a-plus-b.c)或 [Python AC 源码](../examples/submissions/a-plus-b.py)粘贴到编辑区。Ctrl+S/Cmd+S 保存本地草稿，切换语言不会覆盖另一语言的草稿。
+4. 点击“提交代码”，创建成功后自动进入结果页。等待 AC，展开“判题版本题面”查看该次固定版本；刷新结果链接仍可查询持久化结果。
+5. 点击“本题提交记录”查看历史，进入记录后可返回原筛选和分页；“返回答题”恢复本地草稿，不代表读取了历史提交源码。
+
+其他正式样例及预期结果见[源码样例说明](../README.md#从源码文件提交并核对结果)。CE、WA、TLE 都是状态为 `finished` 的正常判题结论；`failed` 和 HTTP 请求失败分别展示执行故障与当前请求错误。
 
 ## 题目浏览与题面
 
@@ -161,5 +171,7 @@ server {
 ```
 
 页面路径如 `/submissions/<id>` 必须回退到 `index.html`，才能直接打开和刷新。API 错误由后端返回，不回退成 HTML；不存在的静态资源返回 404。Monaco Worker 必须作为同源构建资源提供。
+
+F07 使用临时本机静态服务提供 `dist/` 并代理真实后端，检查了上述路由规则、1024×900 桌面布局和 Monaco Worker；没有执行 Nginx 或 HTTPS/TLS 部署。临时服务与浏览器脚本只用于本次验收，不是工程依赖，实际证据见[联调记录](../docs/06-frontend-development-plan.md#57-f07首版浏览器联调与操作说明)。
 
 创建提交使用 `crypto.randomUUID()`：本地开发使用 localhost，远程部署配置 HTTPS。上述 HTTP 示例仅说明静态文件与 API 路由，不包含 TLS 配置。当前没有登录或健康观测页面。
