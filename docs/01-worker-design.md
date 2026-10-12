@@ -2,6 +2,8 @@
 
 状态：Worker 首版独立交付点已完成；P01–P05 已实现配置、日志、语言计划、Isolate 阶段执行、串行判题及三个 RPC，P07/P08 已通过后端 Scheduler 和 HTTP 完成集成，P09 已接入后端启动装入、正常停机及故障退出。P10 已通过真实单／双 Worker 联调和独立程序操作验收，样例与命令见[项目说明](../README.md)。
 
+F08 的 H01 已实现只读 Worker 状态 RPC；后端健康采集、HTTP 快照和页面仍待后续步骤接入。实际检查与范围见[H01 实施记录](06-frontend-development-plan.md#58-f08h01worker-状态-rpc)。
+
 ## 1. 目标与范围
 
 Worker 是独立运行的判题进程，提供 unary gRPC 服务。Scheduler 推送任务、轮询进度、获取结果并保存。一个 Worker 同时只执行一个 Job，一个 Job 的全部阶段和测试用例依次执行。
@@ -58,10 +60,11 @@ API 与 Scheduler 在同一后端进程中，通过进程内调用和消息交�
 | `SubmitJob` | 接纳任务并立即返回，不等待执行完成 |
 | `GetJob` | 立即返回阶段、进度或终态，不长轮询 |
 | `AcknowledgeResult` | Scheduler 保存终态后确认获取，允许该记录进入淘汰队列 |
+| `GetWorkerStatus` | 返回执行占用、停机标记及未确认结果数量和容量，不等待当前 Job |
 
-不要求提交前探测 Worker 状态。Scheduler 根据本地分派记录和可用状态缓存选择 Worker，最终以 `SubmitJob` 的接纳或拒绝为准。当前三个 RPC 不提供容量、能力列表或接纳状态查询字段。gRPC 可以复用传输连接，业务不依赖持续在线的连接。
+不要求提交前探测 Worker 状态。Scheduler 根据本地分派记录和可用状态缓存选择 Worker，最终以 `SubmitJob` 的接纳或拒绝为准。gRPC 可以复用传输连接，业务不依赖持续在线的连接。
 
-F08 已确认追加只读 `GetWorkerStatus` RPC，用于展示执行占用、停机标记和未确认结果区数量，不参与分派或接纳决策；协议增量和有限验收统一见[健康观测设计](07-health-observation-design.md#3-worker-状态-rpc)。该增量尚未实现，下节 Proto 代码块及协议源文件仍是当前三个 RPC。
+`GetWorkerStatus` 从现有 `Jobs` 短同步锁内取得一致快照，不获取执行器的异步锁。忙、结果区满、执行位置阻塞和停机中均正常返回成功；查询不改变计数、结果保留或执行占用，不参与分派或接纳决策。返回状态不保证下一次提交能接纳或实际沙箱执行成功，也不提供工具能力列表。字段含义和有限验收见[健康观测设计](07-health-observation-design.md#3-worker-状态-rpc)。
 
 首版不进行调用方鉴权，不要求 token、身份 metadata 或客户端证书。所有调用方使用相同的协议校验与接纳规则。协议版本由 `acorn.worker.v1` 服务名表达，不增加请求版本字段或目标进程身份字段。
 
@@ -75,6 +78,7 @@ service JudgeWorker {
   rpc SubmitJob(SubmitJobRequest) returns (SubmitJobReply);
   rpc GetJob(GetJobRequest) returns (GetJobReply);
   rpc AcknowledgeResult(AcknowledgeResultRequest) returns (AcknowledgeResultReply);
+  rpc GetWorkerStatus(GetWorkerStatusRequest) returns (GetWorkerStatusReply);
 }
 
 message SubmitJobRequest {
@@ -112,6 +116,20 @@ message GetJobReply {
 }
 message AcknowledgeResultRequest { string job_id = 1; }
 message AcknowledgeResultReply {}
+
+message GetWorkerStatusRequest {}
+message GetWorkerStatusReply {
+  bool stopping = 1;
+  WorkerExecutionState execution_state = 2;
+  uint64 unacknowledged_results = 3;
+  uint64 unacknowledged_capacity = 4;
+}
+enum WorkerExecutionState {
+  WORKER_EXECUTION_STATE_UNSPECIFIED = 0;
+  WORKER_EXECUTION_STATE_IDLE = 1;
+  WORKER_EXECUTION_STATE_RUNNING = 2;
+  WORKER_EXECUTION_STATE_BLOCKED = 3;
+}
 
 enum JobState {
   JOB_STATE_UNSPECIFIED = 0;
@@ -216,6 +234,8 @@ Scheduler 取得终态并成功保存后调用 `AcknowledgeResult`。确认将�
 Job 结束时，若本阶段执行进程尚未启动或进程树已确认停止，释放源码、全部测试数据及编译产物的内存引用，尝试删除私有工作文件，只保留状态和有界结果。文件删除失败记录日志，不阻止后续任务。停止未确认时按第 6 节保留可能仍在使用的资源和执行位置。Worker 不持久化任务或结果，退出或崩溃后的记录保留由本协议明确排除。
 
 P05 的 [`WorkerService`](../crates/worker/src/rpc.rs) 将接纳、进度、终态和 ACK 的状态转换放在一个短同步锁内；[`jobs`](../crates/worker/src/jobs.rs) 保存查询记录及已确认 FIFO。执行器在锁外后台运行，接纳时建立绝对期限和内部停止通道，不持有提交 RPC 的生命周期。终态在 Job 收尾后原子发布，随后仅在安全停止时释放执行位置；停止未确认时执行占用独立于结果记录保留，即使 ACK 后记录被淘汰也不释放。
+
+H01 在执行位置保存 `stop_unconfirmed`：接纳时为 false，状态查询返回 `RUNNING`；执行器返回且 `is_available()` 为 false 时，在发布终态的同一次持锁更新中设为 true，返回 `BLOCKED`。安全收尾时删除执行位置，返回 `IDLE`。停机标记直接读取 `Jobs.stopping`，未确认结果数量复用 `Jobs::unacknowledged_count()`，容量来自配置；状态回复不包含 Job ID、源码、测试数据、路径或诊断正文。
 
 ## 4. Scheduler 与通信失败
 

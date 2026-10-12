@@ -5,8 +5,9 @@ mod support;
 use std::{fs, time::Duration};
 
 use acorn_protocol::worker::v1::{
-    AcknowledgeResultRequest, GetJobReply, GetJobRequest, JobPhase, JobState, SubmitJobRequest,
-    Verdict, get_job_reply::Terminal, judge_worker_client::JudgeWorkerClient,
+    AcknowledgeResultRequest, GetJobReply, GetJobRequest, GetWorkerStatusReply,
+    GetWorkerStatusRequest, JobPhase, JobState, SubmitJobRequest, Verdict, WorkerExecutionState,
+    get_job_reply::Terminal, judge_worker_client::JudgeWorkerClient,
 };
 use acorn_worker::{config::Config, rpc::WorkerService};
 use support::{Fixture, job};
@@ -107,6 +108,30 @@ async fn ack(client: &mut JudgeWorkerClient<Channel>, id: &str) {
         .unwrap();
 }
 
+/// Query the generated status RPC and check every field against the current fixture event.
+async fn assert_worker_status(
+    client: &mut JudgeWorkerClient<Channel>,
+    execution_state: WorkerExecutionState,
+    stopping: bool,
+    unacknowledged_results: u64,
+    unacknowledged_capacity: u64,
+) {
+    let reply = client
+        .get_worker_status(request(GetWorkerStatusRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        reply,
+        GetWorkerStatusReply {
+            stopping,
+            execution_state: execution_state as i32,
+            unacknowledged_results,
+            unacknowledged_capacity,
+        }
+    );
+}
+
 /// Assert the stable gRPC status and reason together.
 fn error(status: Status, code: Code, message: &str) {
     assert_eq!(status.code(), code);
@@ -138,6 +163,16 @@ async fn ready(fixture: &Fixture) {
 async fn admission_deduplication_and_connection_independence() {
     let fixture = Fixture::new("normal");
     let mut harness = Harness::start(fixture.config.clone()).await;
+    let capacity = fixture.config.results.max_unacknowledged_results as u64;
+    assert_worker_status(
+        &mut harness.client,
+        WorkerExecutionState::Idle,
+        false,
+        0,
+        capacity,
+    )
+    .await;
+    assert!(fixture.operations().is_empty());
     let submitted = job(
         "same-id",
         "python",
@@ -164,6 +199,14 @@ async fn admission_deduplication_and_connection_independence() {
     }
     assert_eq!(accepted, 1);
     ready(&fixture).await;
+    assert_worker_status(
+        &mut harness.client,
+        WorkerExecutionState::Running,
+        false,
+        0,
+        capacity,
+    )
+    .await;
     let progress = harness
         .client
         .get_job(request(GetJobRequest {
@@ -229,7 +272,23 @@ async fn admission_deduplication_and_connection_independence() {
     };
     assert_eq!(result.verdict, Verdict::Accepted as i32);
     assert_eq!(fixture.operations().matches("--run").count(), 1);
+    assert_worker_status(
+        &mut harness.client,
+        WorkerExecutionState::Idle,
+        false,
+        1,
+        capacity,
+    )
+    .await;
     ack(&mut harness.client, "same-id").await;
+    assert_worker_status(
+        &mut harness.client,
+        WorkerExecutionState::Idle,
+        false,
+        0,
+        capacity,
+    )
+    .await;
     harness.close().await.unwrap();
 }
 
@@ -249,6 +308,9 @@ async fn result_capacity_and_ack_fifo() {
         terminal(&mut harness.client, id).await;
     }
     let a = terminal(&mut harness.client, "a").await;
+    for _ in 0..2 {
+        assert_worker_status(&mut harness.client, WorkerExecutionState::Idle, false, 2, 2).await;
+    }
     assert_eq!(a, terminal(&mut harness.client, "a").await);
     assert!(
         harness
@@ -281,6 +343,7 @@ async fn result_capacity_and_ack_fifo() {
         "JobNotFound",
     );
     ack(&mut harness.client, "a").await;
+    assert_worker_status(&mut harness.client, WorkerExecutionState::Idle, false, 1, 2).await;
     harness
         .client
         .submit_job(request(job("c", "python", "print(42)", &[(b"", b"42")])))
@@ -290,6 +353,7 @@ async fn result_capacity_and_ack_fifo() {
     ack(&mut harness.client, "b").await;
     ack(&mut harness.client, "a").await;
     ack(&mut harness.client, "c").await;
+    assert_worker_status(&mut harness.client, WorkerExecutionState::Idle, false, 0, 2).await;
     error(
         harness
             .client
@@ -319,6 +383,7 @@ async fn unconfirmed_stop_retains_slot_after_ack_and_eviction() {
     let mut fixture = Fixture::new("normal");
     fixture.config.results.acknowledged_queue_length = 1;
     let mut harness = Harness::start(fixture.config.clone()).await;
+    let capacity = fixture.config.results.max_unacknowledged_results as u64;
     harness
         .client
         .submit_job(request(job("old", "python", "print(42)", &[(b"", b"42")])))
@@ -343,8 +408,24 @@ async fn unconfirmed_stop_retains_slot_after_ack_and_eviction() {
     };
     assert_eq!(failure.code, "StopUnconfirmed");
     assert!(failure.diagnostic.len() <= 512);
+    assert_worker_status(
+        &mut harness.client,
+        WorkerExecutionState::Blocked,
+        false,
+        2,
+        capacity,
+    )
+    .await;
     ack(&mut harness.client, "failed").await;
     ack(&mut harness.client, "failed").await;
+    assert_worker_status(
+        &mut harness.client,
+        WorkerExecutionState::Blocked,
+        false,
+        1,
+        capacity,
+    )
+    .await;
     ack(&mut harness.client, "old").await;
     error(
         harness
@@ -357,6 +438,14 @@ async fn unconfirmed_stop_retains_slot_after_ack_and_eviction() {
         Code::NotFound,
         "JobNotFound",
     );
+    assert_worker_status(
+        &mut harness.client,
+        WorkerExecutionState::Blocked,
+        false,
+        0,
+        capacity,
+    )
+    .await;
     error(
         harness
             .client
@@ -383,6 +472,7 @@ async fn unconfirmed_stop_retains_slot_after_ack_and_eviction() {
 async fn shutdown_preserves_failure_and_rejects_new_jobs() {
     let fixture = Fixture::new("normal");
     let mut harness = Harness::start(fixture.config.clone()).await;
+    let capacity = fixture.config.results.max_unacknowledged_results as u64;
     harness
         .client
         .submit_job(request(job(
@@ -395,6 +485,14 @@ async fn shutdown_preserves_failure_and_rejects_new_jobs() {
         .unwrap();
     ready(&fixture).await;
     harness.service.shutdown().await.unwrap();
+    assert_worker_status(
+        &mut harness.client,
+        WorkerExecutionState::Idle,
+        true,
+        1,
+        capacity,
+    )
+    .await;
     let reply = terminal(&mut harness.client, "shutdown").await;
     let Some(Terminal::Failure(failure)) = reply.terminal else {
         panic!("Expected shutdown failure")
@@ -423,6 +521,14 @@ async fn shutdown_preserves_failure_and_rejects_new_jobs() {
         "WorkerUnavailable",
     );
     ack(&mut harness.client, "shutdown").await;
+    assert_worker_status(
+        &mut harness.client,
+        WorkerExecutionState::Idle,
+        true,
+        0,
+        capacity,
+    )
+    .await;
     harness.close().await.unwrap();
 }
 

@@ -1,6 +1,6 @@
 # 前端开发计划
 
-状态：F01–F07 已完成，首版桌面 GUI 联调与操作说明已交付；F08 设计已确认，实现未开始。
+状态：F01–F07 已完成，首版桌面 GUI 联调与操作说明已交付；F08 设计已确认，H01 Worker 状态 RPC 已实现，H02–H04 未开始。
 
 ## 1. 目标与依赖
 
@@ -157,7 +157,7 @@ F05 完成三个必需页面的业务闭环，F07 完成包括历史与草稿的
 
 **完成条件：** 观测契约、后端实现、GUI、独立过期警告和相关文档一致。外部告警、自动修复、服务重启及通用监控平台不由本任务自动扩展。
 
-具体方案见[健康观测设计与实施计划](07-health-observation-design.md)，已通过用户审查；F08 实现仍未开始，启动后按其中 H01–H04 执行。
+具体方案见[健康观测设计与实施计划](07-health-observation-design.md)，已通过用户审查；H01 Worker 状态 RPC 已实现，实际检查见[第 5.8 节](#58-f08h01worker-状态-rpc)，后续按 H02–H04 执行。
 
 ## 4. 验证与交付记录
 
@@ -396,3 +396,19 @@ Vite 原样代理 `/api`，开发目标由仅服务端可见的 `API_PROXY_TARGE
 未修改或重新验收 Rust、Proto、SQL、Worker 和 Isolate，没有重跑后端启动/停机、双 Worker、完整隔离矩阵或其余真实失败 verdict。后端期限测试的既有并发时序敏感性仍按第 3.7.1 节单独保留。本次仅使用一个桌面浏览器，没有移动端、低于 1024 CSS px 或其他浏览器兼容性检查，也没有实际 Nginx/TLS 部署。
 
 F01–F07 首版 GUI 交付完成。当前仍无登录、多用户隔离、历史源码查询和健康观测；F08 设计已确认，实现未开始，下一步按[健康观测设计](07-health-observation-design.md)从 H01 Worker 状态 RPC 开始实施。
+
+### 5.8 F08/H01：Worker 状态 RPC
+
+已在[协议源文件](../proto/acorn/worker/v1/worker.proto)追加 `GetWorkerStatus`、请求、回复和 `WorkerExecutionState`，保留已有消息字段及编号；通过 Cargo 构建生成 Tonic/Prost 客户端和服务端，未手工编辑生成输出。[Worker RPC](../crates/worker/src/rpc.rs) 在现有 `Jobs` 短同步锁内取得执行状态、停机标记和未确认结果数量及容量，忙、结果区满、阻塞和停机中均正常回复，不获取执行器异步锁，不改变结果保留或接纳规则；正常查询日志为 debug。
+
+[执行位置](../crates/worker/src/jobs.rs) 新增 `stop_unconfirmed`，接纳时为 false，执行器返回且无法安全释放时与终态在同一次持锁更新中设为 true。状态从执行位置投影为 `IDLE`、`RUNNING` 或 `BLOCKED`，不依赖可能被 ACK 淘汰的结果记录。[后端受控服务](../crates/backend/tests/support/mod.rs) 补齐新方法，返回固定有效状态，保持现有测试组装可编译；该受控状态不用于证明真实 Worker 的占用情况。
+
+扩展[既有 RPC 测试](../crates/worker/tests/rpc.rs)，通过真实回环 gRPC 及生成客户端验证 HC-01：初始空闲查询不启动执行；执行中可查询 running；正常结束释放位置且未确认数量增加，ACK 后数量减少；结果区满时查询仍成功，重复查询不确认或淘汰结果；停止未确认时为 blocked，ACK 和结果淘汰后仍保持 blocked；停机后 stopping 为 true，状态与结果仍可查询。沿用已有事件同步和调用期限，没有增加毫秒级性能断言或新的测试框架。
+
+已执行：
+
+- `cargo fmt --all -- --check`、`cargo check --workspace --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings`：通过；Clippy 包含更新后的后端受控服务及现有测试目标。
+- `cargo test -p acorn-worker --locked --test rpc`：沙箱首次运行在六个常规测试绑定回环端口时均返回 `Operation not permitted`，没有进入功能断言；随后在宿主权限环境按默认并发执行，六个常规测试通过，一个真实 Isolate 验收按原规则忽略。
+- 六份变更 Markdown 的九十二处本地链接/锚点、代码块闭合、既有标题与编号保留，以及 Worker 设计 Proto 代码块与协议源文件完全一致性检查通过；`git diff --check` 通过。
+
+本阶段只完成 H01。H02 的后端采集与配置、H03 的 HTTP 快照及生命周期、H04 的健康页面仍未实现；当前浏览器仍无健康观测入口。未运行完整 workspace 测试、后端 workflow、真实 Isolate 或浏览器验收；新 RPC 的生成代码和服务行为由上述实际 gRPC 测试验证。前端 F01–F07 和 P01–P10 的原始记录保持不变，既有期限测试并发敏感性未由本阶段宣称解决。

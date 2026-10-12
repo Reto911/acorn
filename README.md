@@ -4,7 +4,7 @@ C 与 Python 3 的单文件源码判题系统。后端包含 HTTP API、Schedule
 
 当前已完成 P01–P10：Worker 独立提供 C/Python 串行判题，后端通过 HTTP 创建提交、进程内 Scheduler 分派、gRPC 取结果、SQLite 持久化和 ACK 完成业务闭环，并已接入启动装入、正常停机及故障退出。首版源码样例、真实单／双 Worker 验收、独立程序从空库启动及重启查询已完成，操作步骤见下文。开发范围、执行契约和实际验证记录见[文档索引](docs/README.md)与[开发计划](docs/04-development-plan.md)。
 
-浏览器 GUI 采用 Vue 3、TypeScript 和 Monaco，已完成 F01–F07：题目浏览、C/Python 编辑、本地草稿、主动提交、结果详情、固定版本题面、状态轮询，以及提交历史筛选、分页和详情往返。首版桌面联调已覆盖 C/Python AC、C CE、Python WA 和 C TLE，实际新增与复用记录、UI-01–UI-09 对应关系及未测范围见[前端开发计划](docs/06-frontend-development-plan.md#57-f07首版浏览器联调与操作说明)。交互依据见[GUI 设计](docs/05-frontend-design.md)，健康观测继续后置。
+浏览器 GUI 采用 Vue 3、TypeScript 和 Monaco，已完成 F01–F07：题目浏览、C/Python 编辑、本地草稿、主动提交、结果详情、固定版本题面、状态轮询，以及提交历史筛选、分页和详情往返。首版桌面联调已覆盖 C/Python AC、C CE、Python WA 和 C TLE，实际新增与复用记录、UI-01–UI-09 对应关系及未测范围见[前端开发计划](docs/06-frontend-development-plan.md#57-f07首版浏览器联调与操作说明)。交互依据见[GUI 设计](docs/05-frontend-design.md)；健康观测已实现 H01 Worker 状态 RPC，后端采集、HTTP 快照和页面待后续接入。
 
 ## 浏览器 GUI
 
@@ -68,7 +68,7 @@ cp config/worker.example.toml /tmp/acorn-worker.toml
 target/debug/acorn-worker --config /tmp/acorn-worker.toml 2>/tmp/acorn-worker.log
 ```
 
-有效 Worker 配置通过校验后启动 gRPC 监听，提供 `SubmitJob`、`GetJob` 和 `AcknowledgeResult`。提交立即返回，后台执行不随提交连接断开而取消；一个 Worker 同时只执行一个 Job，忙时不排队。终态须由调用方保存后 ACK，未确认结果区满时拒绝新任务。请求和结果消息上限从配置应用到 Tonic 服务端。
+有效 Worker 配置通过校验后启动 gRPC 监听，提供 `SubmitJob`、`GetJob`、`AcknowledgeResult` 和 `GetWorkerStatus`。提交立即返回，后台执行不随提交连接断开而取消；一个 Worker 同时只执行一个 Job，忙时不排队。终态须由调用方保存后 ACK，未确认结果区满时拒绝新任务。请求和结果消息上限从配置应用到 Tonic 服务端。`GetWorkerStatus` 只读返回执行状态、停机标记和未确认结果数量及容量，忙时也可查询；该观测不参与调度和接纳，契约与实施范围见[健康观测设计](docs/07-health-observation-design.md)。
 
 Ctrl-C 或 SIGTERM 先停止接纳，再通过共同停止路径结束当前执行，按 `sandbox.shutdown_timeout_ms` 等待收尾。正常停机返回 0；启动、监听、停机超时或停止未确认明确报错并返回 1。停止未确认时，运行中的服务仍可查询和 ACK 失败结果，但保持执行位置占用，由部署端处置。结果只存在本进程内存，重启不恢复。
 

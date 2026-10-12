@@ -6,8 +6,9 @@ use std::{
 };
 
 use acorn_protocol::worker::v1::{
-    AcknowledgeResultReply, AcknowledgeResultRequest, GetJobReply, GetJobRequest, JobPhase,
-    JobState, SubmitJobReply, SubmitJobRequest, get_job_reply::Terminal,
+    AcknowledgeResultReply, AcknowledgeResultRequest, GetJobReply, GetJobRequest,
+    GetWorkerStatusReply, GetWorkerStatusRequest, JobPhase, JobState, SubmitJobReply,
+    SubmitJobRequest, WorkerExecutionState, get_job_reply::Terminal,
 };
 use anyhow::{Context, Result, ensure};
 use tokio::{
@@ -99,7 +100,7 @@ impl WorkerService {
         Ok(())
     }
 
-    /// Validate an opaque ID for all RPCs before looking up a record.
+    /// Validate an opaque ID for Job-scoped RPCs before looking up a record.
     fn validate_id(&self, job_id: &str) -> Result<(), Status> {
         if job_id.is_empty() || job_id.len() > self.shared.config.request.job_id_max_bytes {
             return Err(Status::invalid_argument("InvalidJob"));
@@ -231,6 +232,7 @@ impl JudgeWorker for WorkerService {
         );
         jobs.execution = Some(Execution {
             job_id: job_id.clone(),
+            stop_unconfirmed: false,
             stop,
             task: Some(task),
         });
@@ -275,6 +277,26 @@ impl JudgeWorker for WorkerService {
         tracing::debug!(job = %job_id, "Result acknowledged");
         Ok(Response::new(AcknowledgeResultReply {}))
     }
+
+    /// Snapshot occupancy and retained-result capacity without waiting for the executor.
+    async fn get_worker_status(
+        &self,
+        _request: Request<GetWorkerStatusRequest>,
+    ) -> Result<Response<GetWorkerStatusReply>, Status> {
+        let jobs = self.shared.jobs.lock().expect("Job state lock poisoned");
+        let execution_state = match &jobs.execution {
+            None => WorkerExecutionState::Idle,
+            Some(execution) if execution.stop_unconfirmed => WorkerExecutionState::Blocked,
+            Some(_) => WorkerExecutionState::Running,
+        };
+        tracing::debug!("Worker status queried");
+        Ok(Response::new(GetWorkerStatusReply {
+            stopping: jobs.stopping,
+            execution_state: execution_state as i32,
+            unacknowledged_results: jobs.unacknowledged_count() as u64,
+            unacknowledged_capacity: self.shared.config.results.max_unacknowledged_results as u64,
+        }))
+    }
 }
 
 /// Execute outside admission, publish a terminal, then release only a safe position.
@@ -305,6 +327,10 @@ async fn execute(shared: Arc<Shared>, request: SubmitJobRequest, control: StageC
     if release {
         jobs.execution = None;
     } else {
+        jobs.execution
+            .as_mut()
+            .expect("occupied execution slot")
+            .stop_unconfirmed = true;
         tracing::error!(job = %job_id, "Execution slot retained after unconfirmed stop; deployment intervention required");
     }
 }

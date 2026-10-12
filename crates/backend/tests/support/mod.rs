@@ -398,6 +398,19 @@ impl JudgeWorker for Mock {
         }
         Ok(Response::new(proto::AcknowledgeResultReply {}))
     }
+
+    /// Return a fixed valid observation independent of the controlled judging scenario.
+    async fn get_worker_status(
+        &self,
+        _request: RpcRequest<proto::GetWorkerStatusRequest>,
+    ) -> Result<Response<proto::GetWorkerStatusReply>, Status> {
+        Ok(Response::new(proto::GetWorkerStatusReply {
+            stopping: false,
+            execution_state: proto::WorkerExecutionState::Idle as i32,
+            unacknowledged_results: 0,
+            unacknowledged_capacity: 128,
+        }))
+    }
 }
 
 /// Actual gRPC server lifecycle with a controlled service implementation.

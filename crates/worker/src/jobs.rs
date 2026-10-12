@@ -20,6 +20,8 @@ pub(crate) struct JobRecord {
 pub(crate) struct Execution {
     /// Current or unconfirmed-stop Job, even after its result is evicted.
     pub job_id: String,
+    /// Whether execution returned without confirming a safe stop of its process tree.
+    pub stop_unconfirmed: bool,
     /// Internal stop sender, independent of the submit connection.
     pub stop: watch::Sender<Option<StopReason>>,
     /// Background execution handle taken only to await normal shutdown.

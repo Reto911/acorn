@@ -5,6 +5,7 @@ service JudgeWorker {
   rpc SubmitJob(SubmitJobRequest) returns (SubmitJobReply);
   rpc GetJob(GetJobRequest) returns (GetJobReply);
   rpc AcknowledgeResult(AcknowledgeResultRequest) returns (AcknowledgeResultReply);
+  rpc GetWorkerStatus(GetWorkerStatusRequest) returns (GetWorkerStatusReply);
 }
 
 message SubmitJobRequest {
@@ -42,6 +43,20 @@ message GetJobReply {
 }
 message AcknowledgeResultRequest { string job_id = 1; }
 message AcknowledgeResultReply {}
+
+message GetWorkerStatusRequest {}
+message GetWorkerStatusReply {
+  bool stopping = 1;
+  WorkerExecutionState execution_state = 2;
+  uint64 unacknowledged_results = 3;
+  uint64 unacknowledged_capacity = 4;
+}
+enum WorkerExecutionState {
+  WORKER_EXECUTION_STATE_UNSPECIFIED = 0;
+  WORKER_EXECUTION_STATE_IDLE = 1;
+  WORKER_EXECUTION_STATE_RUNNING = 2;
+  WORKER_EXECUTION_STATE_BLOCKED = 3;
+}
 
 enum JobState {
   JOB_STATE_UNSPECIFIED = 0;
