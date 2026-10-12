@@ -9,3 +9,4 @@
 - [Worker 与后端开发计划](04-development-plan.md)：十个开发步骤、工程产物、前置依赖、完成条件与首版交付检查。
 - [前端 GUI 设计](05-frontend-design.md)：Vue 3/TypeScript/Monaco 选型、题目与答题、提交结果和历史、本地草稿、HTTP 接入及健康观测边界。
 - [前端开发计划](06-frontend-development-plan.md)：F01–F07 首版 GUI 任务、接口依赖与验收，F08 后续健康观测。
+- [健康观测设计与实施计划](07-health-observation-design.md)：已确认、尚未实现的 F08 契约，包含只读 HTTP、Worker 状态 RPC、共享探测、过期警告、实施步骤与有限验收。

@@ -59,7 +59,9 @@ API 与 Scheduler 在同一后端进程中，通过进程内调用和消息交�
 | `GetJob` | 立即返回阶段、进度或终态，不长轮询 |
 | `AcknowledgeResult` | Scheduler 保存终态后确认获取，允许该记录进入淘汰队列 |
 
-不要求提交前探测 Worker 状态。Scheduler 根据本地分派记录和可用状态缓存选择 Worker，最终以 `SubmitJob` 的接纳或拒绝为准。不提供容量、能力列表或接纳状态查询字段。gRPC 可以复用传输连接，业务不依赖持续在线的连接。
+不要求提交前探测 Worker 状态。Scheduler 根据本地分派记录和可用状态缓存选择 Worker，最终以 `SubmitJob` 的接纳或拒绝为准。当前三个 RPC 不提供容量、能力列表或接纳状态查询字段。gRPC 可以复用传输连接，业务不依赖持续在线的连接。
+
+F08 已确认追加只读 `GetWorkerStatus` RPC，用于展示执行占用、停机标记和未确认结果区数量，不参与分派或接纳决策；协议增量和有限验收统一见[健康观测设计](07-health-observation-design.md#3-worker-状态-rpc)。该增量尚未实现，下节 Proto 代码块及协议源文件仍是当前三个 RPC。
 
 首版不进行调用方鉴权，不要求 token、身份 metadata 或客户端证书。所有调用方使用相同的协议校验与接纳规则。协议版本由 `acorn.worker.v1` 服务名表达，不增加请求版本字段或目标进程身份字段。
 
