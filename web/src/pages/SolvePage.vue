@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { defineAsyncComponent } from 'vue'
 import { ElButton } from 'element-plus'
 import { RouterLink, useRoute } from 'vue-router'
 import { getProblem } from '../api'
 import PendingSubmissionNotice from '../components/PendingSubmissionNotice.vue'
 import ProblemStatement from '../components/ProblemStatement.vue'
 import RequestFeedback from '../components/RequestFeedback.vue'
+import SubmissionEditor from '../components/SubmissionEditor.vue'
 import { useQuery } from '../composables/useQuery'
 import 'element-plus/es/components/button/style/css'
 
@@ -18,9 +18,6 @@ const {
 } = useQuery(
   () => route.params.problemId,
   (id, signal) => getProblem(Number(id), { signal }),
-)
-const CodeEditor = defineAsyncComponent(
-  () => import('../components/CodeEditor.vue'),
 )
 </script>
 
@@ -71,38 +68,11 @@ const CodeEditor = defineAsyncComponent(
           <ProblemStatement :statement="problem.statement" />
         </div>
       </section>
-      <section class="surface editor-panel" aria-labelledby="editor-title">
-        <div class="panel-heading">
-          <h2 id="editor-title">代码编辑区</h2>
-          <span class="muted">暂未开放编辑与提交</span>
-        </div>
-        <div class="language-limits">
-          <h3>允许语言与单用例限额</h3>
-          <div
-            v-for="language in problem.languages"
-            :key="language.language_id"
-            class="language-limit"
-          >
-            <h4>{{ language.language_id === 'c' ? 'C' : 'Python 3' }}</h4>
-            <dl>
-              <div>
-                <dt>CPU 时间</dt>
-                <dd>{{ language.cpu_time_ms }} ms</dd>
-              </div>
-              <div>
-                <dt>墙钟时间</dt>
-                <dd>{{ language.wall_time_ms }} ms</dd>
-              </div>
-              <div>
-                <dt>内存</dt>
-                <dd>{{ language.memory_kib / 1024 }} MiB</dd>
-              </div>
-            </dl>
-          </div>
-          <p>提交时将使用创建时的最新发布版本。</p>
-        </div>
-        <CodeEditor />
-      </section>
+      <SubmissionEditor
+        :key="problem.problem_id"
+        :problem="problem"
+        :submission-disabled="loading || !!error"
+      />
     </div>
   </section>
 </template>

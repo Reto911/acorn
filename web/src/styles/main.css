@@ -382,6 +382,54 @@ h1 {
   line-height: 1.8;
 }
 
+.editor-language,
+.draft-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.editor-language {
+  font-size: 14px;
+}
+
+.editor-language .el-select {
+  width: 140px;
+}
+
+.draft-notices,
+.editor-actions {
+  display: grid;
+  gap: 12px;
+  padding: 20px;
+}
+
+.editor-actions {
+  border-top: 1px solid #edf0eb;
+}
+
+.draft-actions {
+  flex-wrap: wrap;
+}
+
+.draft-actions .el-button + .el-button {
+  margin-left: 0;
+}
+
+.draft-status,
+.source-size,
+.submission-guidance {
+  color: #68756c;
+  font-size: 13px;
+  line-height: 1.8;
+}
+
+.source-error {
+  color: #b34437;
+  font-size: 13px;
+  line-height: 1.8;
+}
+
 @media (min-width: 1024px) {
   .statement-scroll {
     max-height: max(480px, calc(100vh - 300px));

@@ -123,7 +123,7 @@ async function confirmAbandon() {
     </section>
     <RequestFeedback
       :loading="sending"
-      loading-text="正在重试原提交，请稍候…"
+      loading-text="正在发送提交请求，请稍候…"
       :error="error"
       operation="create"
       :retryable="false"
