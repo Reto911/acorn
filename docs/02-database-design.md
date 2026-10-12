@@ -24,7 +24,7 @@ API 与 Scheduler 属于同一后端进程，见[后端设计](03-backend-design
 
 一个 Submission 最多执行一次，Submission ID 同时作为 Job ID。源码、题面、测试输入和期望输出保存在数据库；编译产物、沙箱工作文件和运行日志不入库。日志使用英文。
 
-新提交和普通题目查询一律使用当前最新发布版本。历史提交固定引用创建时选定的版本；额外提供显式版本查询接口，前端不默认接入。旧版本继续支持历史提交执行、题面与结果展示。不存在题目可见性或逐题访问权限配置。
+新提交和普通题目查询一律使用当前最新发布版本。历史提交固定引用创建时选定的版本；显式版本查询接口供 GUI 在提交记录中展示该次提交对应的题面，不提供题目历史版本列表或切换入口。旧版本继续支持历史提交执行、题面与结果展示。不存在题目可见性或逐题访问权限配置。
 
 ## 2. 字段表示
 
@@ -83,7 +83,7 @@ API 与 Scheduler 属于同一后端进程，见[后端设计](03-backend-design
 | `problem_id` | 外键关联 `problems(id)`，与 `version_no` 构成联合主键 |
 | `version_no` | 题目内从 1 递增的正整数 |
 | `title` | 版本标题 |
-| `statement` | 版本题面正文 |
+| `statement` | 版本题面的 Markdown 源文；原文保存，浏览器按[前端设计](05-frontend-design.md#32-答题页面)禁用内嵌 HTML 渲染 |
 | `comparison_mode` | 比较规则保留字段，默认 `trim_trailing_ascii_whitespace` |
 | `published_at_ms` | 发布时刻 |
 
