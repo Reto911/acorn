@@ -2,7 +2,7 @@
 
 状态：Worker 首版独立交付点已完成；P01–P05 已实现配置、日志、语言计划、Isolate 阶段执行、串行判题及三个 RPC，P07/P08 已通过后端 Scheduler 和 HTTP 完成集成，P09 已接入后端启动装入、正常停机及故障退出。P10 已通过真实单／双 Worker 联调和独立程序操作验收，样例与命令见[项目说明](../README.md)。
 
-F08 的 H01 已实现只读 Worker 状态 RPC；后端健康采集、HTTP 快照和页面仍待后续步骤接入。实际检查与范围见[H01 实施记录](06-frontend-development-plan.md#58-f08h01worker-状态-rpc)。
+F08 的 H01 已实现只读 Worker 状态 RPC，H02 已实现后端共享采集模块；程序入口、HTTP 快照和页面仍待后续步骤接入。Worker RPC 的实际检查与范围见[H01 实施记录](06-frontend-development-plan.md#58-f08h01worker-状态-rpc)。
 
 ## 1. 目标与范围
 

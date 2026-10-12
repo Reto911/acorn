@@ -10,6 +10,7 @@ use tonic::{Code, Request, Response, Status, transport::Channel};
 
 use crate::{
     config::{GrpcConfig, ResultsConfig},
+    health::{ExecutionState, ProbeError, ProbeErrorCode, WorkerStatus},
     submissions::TerminalOutcome,
 };
 
@@ -159,6 +160,64 @@ impl WorkerClient {
         .await?;
         Ok(())
     }
+
+    /// Query status on the dispatch channel with an independent health budget and deadline.
+    pub async fn status(&self, duration: Duration) -> Result<WorkerStatus, ProbeError> {
+        let mut client = self.client.clone();
+        let call = client.get_worker_status(request(proto::GetWorkerStatusRequest {}, duration));
+        let reply = match tokio::time::timeout(duration, call).await {
+            Ok(Ok(response)) => response.into_inner(),
+            Ok(Err(status)) => {
+                let code = match status.code() {
+                    Code::DeadlineExceeded => ProbeErrorCode::ProbeTimeout,
+                    // Tonic reports its typed transport timeout as Cancelled. A remote
+                    // cancellation without that source remains an ordinary RPC failure.
+                    Code::Cancelled
+                        if std::iter::successors(std::error::Error::source(&status), |error| {
+                            error.source()
+                        })
+                        .any(|error| error.is::<tonic::TimeoutExpired>()) =>
+                    {
+                        ProbeErrorCode::ProbeTimeout
+                    }
+                    Code::Unimplemented => ProbeErrorCode::WorkerStatusUnsupported,
+                    _ => ProbeErrorCode::WorkerRpcFailed,
+                };
+                return Err(ProbeError::new(code, status));
+            }
+            Err(error) => return Err(ProbeError::new(ProbeErrorCode::ProbeTimeout, error)),
+        };
+        validate_status(reply)
+    }
+}
+
+/// Accept only defined occupancy, positive capacity and counts within that capacity.
+fn validate_status(reply: proto::GetWorkerStatusReply) -> Result<WorkerStatus, ProbeError> {
+    let execution_state = match proto::WorkerExecutionState::try_from(reply.execution_state) {
+        Ok(proto::WorkerExecutionState::Idle) => ExecutionState::Idle,
+        Ok(proto::WorkerExecutionState::Running) => ExecutionState::Running,
+        Ok(proto::WorkerExecutionState::Blocked) => ExecutionState::Blocked,
+        _ => {
+            return Err(ProbeError::new(
+                ProbeErrorCode::InvalidWorkerStatus,
+                "GetWorkerStatus returned an undefined execution state",
+            ));
+        }
+    };
+    if reply.unacknowledged_capacity == 0
+        || reply.unacknowledged_results > reply.unacknowledged_capacity
+    {
+        return Err(ProbeError::new(
+            ProbeErrorCode::InvalidWorkerStatus,
+            "GetWorkerStatus returned an invalid result count or capacity",
+        ));
+    }
+    Ok(WorkerStatus {
+        stopping: reply.stopping,
+        execution_state,
+        unacknowledged_results: reply.unacknowledged_results,
+        unacknowledged_capacity: reply.unacknowledged_capacity,
+    })
 }
 
 /// Attach the server-visible deadline as well as the local bounded wait.
@@ -250,6 +309,48 @@ mod tests {
     //! Contract checks for transient progress and terminal correspondence.
 
     use super::*;
+
+    /// Occupancy and counts accept only the three status conditions agreed at the boundary.
+    #[test]
+    fn worker_status_contract() {
+        let valid = proto::GetWorkerStatusReply {
+            stopping: true,
+            execution_state: proto::WorkerExecutionState::Idle as i32,
+            unacknowledged_results: 1,
+            unacknowledged_capacity: 1,
+        };
+        for (state, capacity, count) in [(0, 1, 0), (99, 1, 0), (-1, 1, 0), (1, 0, 0), (1, 1, 2)] {
+            let error = validate_status(proto::GetWorkerStatusReply {
+                execution_state: state,
+                unacknowledged_capacity: capacity,
+                unacknowledged_results: count,
+                ..valid
+            })
+            .unwrap_err();
+            assert_eq!(error.code, ProbeErrorCode::InvalidWorkerStatus);
+        }
+        for (state, expected) in [
+            (proto::WorkerExecutionState::Idle, ExecutionState::Idle),
+            (
+                proto::WorkerExecutionState::Running,
+                ExecutionState::Running,
+            ),
+            (
+                proto::WorkerExecutionState::Blocked,
+                ExecutionState::Blocked,
+            ),
+        ] {
+            let status = validate_status(proto::GetWorkerStatusReply {
+                execution_state: state as i32,
+                ..valid
+            })
+            .unwrap();
+            assert_eq!(status.execution_state, expected);
+            assert!(status.stopping);
+            assert_eq!(status.unacknowledged_results, 1);
+            assert_eq!(status.unacknowledged_capacity, 1);
+        }
+    }
 
     /// Valid progress stays transient; mismatched phases and completed counts fail validation.
     #[test]

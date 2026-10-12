@@ -123,6 +123,17 @@ impl Database {
         anyhow::anyhow!(error)
     }
 
+    /// Read an actual table through the shared pool and ordinary read-error boundary.
+    pub async fn probe_read(&self) -> Result<()> {
+        self.observe("Probe database read", false, async {
+            sqlx::query_scalar::<_, i64>("SELECT id FROM users LIMIT 1")
+                .fetch_optional(&self.pool)
+                .await?;
+            Ok(())
+        })
+        .await
+    }
+
     /// Report storage failures at operation boundaries while preserving the original result.
     async fn observe<T>(
         &self,

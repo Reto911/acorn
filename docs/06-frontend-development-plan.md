@@ -1,6 +1,6 @@
 # 前端开发计划
 
-状态：F01–F07 已完成，首版桌面 GUI 联调与操作说明已交付；F08 设计已确认，H01 Worker 状态 RPC 已实现，H02–H04 未开始。
+状态：F01–F07 已完成，首版桌面 GUI 联调与操作说明已交付；F08 设计已确认，H01–H02 已实现，H03–H04 未开始。
 
 ## 1. 目标与依赖
 
@@ -157,7 +157,7 @@ F05 完成三个必需页面的业务闭环，F07 完成包括历史与草稿的
 
 **完成条件：** 观测契约、后端实现、GUI、独立过期警告和相关文档一致。外部告警、自动修复、服务重启及通用监控平台不由本任务自动扩展。
 
-具体方案见[健康观测设计与实施计划](07-health-observation-design.md)，已通过用户审查；H01 Worker 状态 RPC 已实现，实际检查见[第 5.8 节](#58-f08h01worker-状态-rpc)，后续按 H02–H04 执行。
+具体方案见[健康观测设计与实施计划](07-health-observation-design.md)，已通过用户审查；H01–H02 已实现，实际检查见[第 5.8 节](#58-f08h01worker-状态-rpc)和[第 5.9 节](#59-f08h02观测数据与共享采集)，后续按 H03–H04 执行。
 
 ## 4. 验证与交付记录
 
@@ -412,3 +412,23 @@ F01–F07 首版 GUI 交付完成。当前仍无登录、多用户隔离、历�
 - 六份变更 Markdown 的九十二处本地链接/锚点、代码块闭合、既有标题与编号保留，以及 Worker 设计 Proto 代码块与协议源文件完全一致性检查通过；`git diff --check` 通过。
 
 本阶段只完成 H01。H02 的后端采集与配置、H03 的 HTTP 快照及生命周期、H04 的健康页面仍未实现；当前浏览器仍无健康观测入口。未运行完整 workspace 测试、后端 workflow、真实 Isolate 或浏览器验收；新 RPC 的生成代码和服务行为由上述实际 gRPC 测试验证。前端 F01–F07 和 P01–P10 的原始记录保持不变，既有期限测试并发敏感性未由本阶段宣称解决。
+
+### 5.9 F08/H02：观测数据与共享采集
+
+已新增[后端健康模块](../crates/backend/src/health.rs)，提供只读本地接纳快照、数据库及 Worker 最近观测缓存，以及显式停止的共享采集任务。[创建服务](../crates/backend/src/submissions/creation.rs)仅读取既有停止标记；[Scheduler](../crates/backend/src/scheduler/mod.rs)从既有生命周期标记和信号量计算状态及名额使用量，包含已预留、排队和等待接纳确认的名额。查询不预留容量，也不改变分派、Job 或 ACK。
+
+[健康配置](../crates/backend/src/config.rs)与[示例](../config/backend.example.toml)增加 `interval_ms` 和 `timeout_ms`，缺省为 5000 和 1000；兼容旧配置及部分字段缺省，拒绝零值与派生过期阈值计算溢出。[数据库探测](../crates/backend/src/database/mod.rs)通过共享单连接池及原有只读错误观察边界执行可选行查询，空表读取成功。普通错误只降低本次观测，严重存储错误仍经过既有分类及故障通知。
+
+采集立即开始第一轮，并发查询数据库和各 Worker；每项完成后独立更新缓存及后端 UTC 完成时间，本轮全部结束后再等待配置间隔。[Worker 状态调用](../crates/backend/src/scheduler/worker_client.rs)复用 Scheduler 原有 channel，使用独立本地预算及相同 gRPC deadline，校验枚举、正容量和数量上限。失败覆盖旧成功，读取缓存不触发探测；单调年龄达到 `2 * (interval_ms + timeout_ms)` 时投影为 `stale`，不再输出旧状态或错误码。停止信号可中断待完成探测及轮次间隔，调用方须等待任务结束后再关闭数据库；SQLite 底层工作的结束仍受原有有限 busy timeout 约束。
+
+已执行：
+
+- `cargo fmt --all -- --check`、`cargo check --workspace --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings`：通过。
+- `cargo test -p acorn-backend --locked --test config_results`：三项通过，新增健康缺省、正值与溢出校验。
+- `cargo test -p acorn-backend --locked --lib`：四项通过，包含最近结果替换、过期边界、Worker 状态协议条件及既有严重数据库错误分类。
+- `cargo test -p acorn-backend --locked --test workflow`：在可绑定回环端口的宿主权限环境执行，最终二十四项通过，两个真实 Isolate HTTP 验收按原规则忽略。新增检查覆盖独立缓存更新、不额外触发探测、不支持 RPC、无效状态、RPC 失败与恢复、Worker 超时、两个阶段的停止，以及 SQLite 普通读失败、超时和恢复；既有容量测试增加只读接纳及生命周期断言。
+- 变更 Markdown 的本地链接/锚点、代码块闭合、既有标题与编号保留检查，以及 `git diff --check` 通过。
+
+保留本阶段失败来源：首次编译发现 watch 接收器的借用跨越取消任务的 await，导致采集 future 不满足 Send；已让停止等待返回前释放借用。首轮 workflow 二十三项通过、一项失败、两项忽略，原因是当前锁定版本 Tonic 把传输超时报告为 `Cancelled`；现依据其错误链中的 `tonic::TimeoutExpired` 类型映射为 `ProbeTimeout`，普通远端取消仍归为 RPC 失败，四项健康定向 workflow 随后通过。再次运行完整 workflow 时仍有一项失败：测试设置的 25 ms 预算在并发环境下可能早于首次惰性连接建立，未到达受控服务；已改用默认 1000 ms 预算并等待请求事件，再次完整运行得到上述最终结果，没有据此放宽生产配置或增加重试。
+
+本阶段完成 HC-02 及 HC-03、HC-04 的本地状态、缓存与采集部分；健康 HTTP 的对应断言属于 H03。当前程序入口尚未启动健康采集，H03 仍需完成任务监督、停机接线和 `GET /api/v1/health`，H04 接入页面。未运行完整 workspace 测试、真实 Isolate 或浏览器验收，不扩展此前真实判题记录的结论。

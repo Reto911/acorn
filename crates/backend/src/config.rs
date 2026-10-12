@@ -4,6 +4,7 @@ use std::{
     collections::HashSet,
     net::SocketAddr,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use anyhow::{Context, Result, ensure};
@@ -33,6 +34,9 @@ pub struct Config {
     pub scheduler: SchedulerConfig,
     /// Per-call deadlines and binary message ceilings.
     pub grpc: GrpcConfig,
+    /// Independent read-only observation cadence and per-check budget.
+    #[serde(default)]
+    pub health: HealthConfig,
     /// Source, case and per-case execution ceilings.
     pub request: RequestConfig,
     /// Bounded terminal payload settings, aligned with Workers.
@@ -103,6 +107,37 @@ pub struct GrpcConfig {
     pub max_response_bytes: usize,
 }
 
+/// Shared health collection settings, with defaults for existing deployment files.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HealthConfig {
+    /// Positive delay after a completed round, in milliseconds.
+    pub interval_ms: u64,
+    /// Positive budget for one database or Worker check, in milliseconds.
+    pub timeout_ms: u64,
+}
+
+impl Default for HealthConfig {
+    /// Preserve the agreed five-second interval and one-second check budget.
+    fn default() -> Self {
+        Self {
+            interval_ms: 5_000,
+            timeout_ms: 1_000,
+        }
+    }
+}
+
+impl HealthConfig {
+    /// Derive the observation age limit without overflowing the configured milliseconds.
+    pub fn stale_after(&self) -> Result<Duration> {
+        self.interval_ms
+            .checked_add(self.timeout_ms)
+            .and_then(|cycle| cycle.checked_mul(2))
+            .map(Duration::from_millis)
+            .context("Health stale threshold overflows milliseconds")
+    }
+}
+
 /// Raw task ceilings aligned by deployment with the Worker request contract.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -165,6 +200,15 @@ impl Config {
 
     /// Check the configured resource, pagination and endpoint requirements.
     pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.health.interval_ms > 0,
+            "health.interval_ms must be positive"
+        );
+        ensure!(
+            self.health.timeout_ms > 0,
+            "health.timeout_ms must be positive"
+        );
+        self.health.stale_after()?;
         for (name, value) in [
             ("http.max_request_bytes", self.http.max_request_bytes as u64),
             (

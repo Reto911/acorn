@@ -277,6 +277,10 @@ pub struct Mock {
     pub gets: AtomicUsize,
     /// Number of AcknowledgeResult calls, including failed ACKs.
     pub acks: AtomicUsize,
+    /// Number of status checks, distinct from Job queries and ACKs.
+    pub status_calls: AtomicUsize,
+    /// Controlled status outcome; None waits until the caller's deadline or cancellation.
+    pub status_reply: Mutex<Option<Result<proto::GetWorkerStatusReply, Status>>>,
     /// Test-controlled completion or admission gate.
     pub released: AtomicBool,
     /// Real database used to assert commit happens before ACK.
@@ -399,17 +403,17 @@ impl JudgeWorker for Mock {
         Ok(Response::new(proto::AcknowledgeResultReply {}))
     }
 
-    /// Return a fixed valid observation independent of the controlled judging scenario.
+    /// Return the selected health outcome without changing the controlled judging scenario.
     async fn get_worker_status(
         &self,
         _request: RpcRequest<proto::GetWorkerStatusRequest>,
     ) -> Result<Response<proto::GetWorkerStatusReply>, Status> {
-        Ok(Response::new(proto::GetWorkerStatusReply {
-            stopping: false,
-            execution_state: proto::WorkerExecutionState::Idle as i32,
-            unacknowledged_results: 0,
-            unacknowledged_capacity: 128,
-        }))
+        self.status_calls.fetch_add(1, Ordering::SeqCst);
+        let reply = self.status_reply.lock().unwrap().clone();
+        match reply {
+            Some(reply) => reply.map(Response::new),
+            None => std::future::pending().await,
+        }
     }
 }
 
@@ -437,6 +441,13 @@ impl RpcServer {
             submission_order: Mutex::new(Vec::new()),
             gets: AtomicUsize::new(0),
             acks: AtomicUsize::new(0),
+            status_calls: AtomicUsize::new(0),
+            status_reply: Mutex::new(Some(Ok(proto::GetWorkerStatusReply {
+                stopping: false,
+                execution_state: proto::WorkerExecutionState::Idle as i32,
+                unacknowledged_results: 0,
+                unacknowledged_capacity: 128,
+            }))),
             released: AtomicBool::new(false),
             database,
         });

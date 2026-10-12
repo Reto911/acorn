@@ -57,6 +57,10 @@ struct Shared {
     state: Mutex<State>,
     /// Creating, queued and awaiting-admission tasks each own one permit.
     capacity: Arc<Semaphore>,
+    /// Fixed configured ceiling; live usage remains solely in the semaphore.
+    pending_max_count: u32,
+    /// Cheap clones of the same clients used by dispatch, in configuration order.
+    workers: Vec<WorkerClient>,
     /// Wake the dispatcher for handoff, stop or completion.
     changed: Notify,
 }
@@ -66,6 +70,28 @@ struct Shared {
 pub struct Scheduler {
     /// Shared state also owned by the dispatch loop.
     shared: Arc<Shared>,
+}
+
+/// Local dispatcher lifecycle, independent of remote Worker observations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SchedulerState {
+    /// The dispatcher has not stopped or requested shutdown.
+    Running,
+    /// Admission or dispatch has stopped while existing operations drain.
+    Stopping,
+    /// The dispatcher has ended and can no longer accept handoffs.
+    Stopped,
+}
+
+/// Read-only admission capacity and lifecycle at one local observation point.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Snapshot {
+    /// Lifecycle derived from the existing closed and stopping flags.
+    pub state: SchedulerState,
+    /// Permits held by creating, queued and awaiting-admission tasks.
+    pub pending_used: u32,
+    /// Configured waiting-admission ceiling.
+    pub pending_capacity: u32,
 }
 
 /// Local availability cache for one configured endpoint.
@@ -118,6 +144,8 @@ impl Scheduler {
             shared: Arc::new(Shared {
                 state: Mutex::new(State::default()),
                 capacity: Arc::new(Semaphore::new(config.scheduler.pending_max_count as usize)),
+                pending_max_count: config.scheduler.pending_max_count,
+                workers: nodes.iter().map(|node| node.client.clone()).collect(),
                 changed: Notify::new(),
             }),
         };
@@ -132,6 +160,32 @@ impl Scheduler {
             database,
         ));
         Ok((scheduler, task))
+    }
+
+    /// Observe local lifecycle and semaphore usage without reserving any capacity.
+    pub fn snapshot(&self) -> Snapshot {
+        let state = self
+            .shared
+            .state
+            .lock()
+            .expect("Scheduler state lock poisoned");
+        Snapshot {
+            state: if state.closed {
+                SchedulerState::Stopped
+            } else if state.stopping {
+                SchedulerState::Stopping
+            } else {
+                SchedulerState::Running
+            },
+            pending_used: self.shared.pending_max_count
+                - self.shared.capacity.available_permits() as u32,
+            pending_capacity: self.shared.pending_max_count,
+        }
+    }
+
+    /// Share dispatch channels with in-process observation without exposing routing state.
+    pub(crate) fn worker_clients(&self) -> Vec<WorkerClient> {
+        self.shared.workers.clone()
     }
 
     /// Reserve capacity before starting a creation transaction, without waiting.

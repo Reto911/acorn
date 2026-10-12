@@ -21,6 +21,32 @@ fn configuration_relationships() {
     );
 }
 
+/// Old and partial health settings retain defaults; invalid budgets and age overflow fail.
+#[test]
+fn health_configuration_defaults_and_age_limit() {
+    let example = include_str!("../../../config/backend.example.toml");
+    let block = "[health]\ninterval_ms = 5_000\ntimeout_ms = 1_000\n\n";
+    let legacy = example.replace(block, "");
+    let config = Config::parse(&legacy).unwrap();
+    assert_eq!(config.health.interval_ms, 5_000);
+    assert_eq!(config.health.timeout_ms, 1_000);
+    assert_eq!(config.health.stale_after().unwrap().as_millis(), 12_000);
+    let partial = Config::parse(&example.replace(block, "[health]\ninterval_ms = 7\n\n")).unwrap();
+    assert_eq!(partial.health.timeout_ms, 1_000);
+    assert_eq!(partial.health.stale_after().unwrap().as_millis(), 2_014);
+    for (field, value) in [
+        ("interval_ms = 5_000", "interval_ms = 0"),
+        ("timeout_ms = 1_000", "timeout_ms = 0"),
+        ("interval_ms = 5_000", "interval_ms = 18446744073709551615"),
+        ("interval_ms = 5_000", "interval_ms = 9223372036854775807"),
+    ] {
+        assert!(
+            Config::parse(&example.replace(field, value)).is_err(),
+            "{value}"
+        );
+    }
+}
+
 /// Invalid terminal shapes cannot reach database serialization through validated constructors.
 #[test]
 fn malformed_results_are_rejected() {

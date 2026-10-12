@@ -127,6 +127,15 @@ impl CreationService {
             .stopping = true;
     }
 
+    /// Read the admission stop flag without registering a creation operation.
+    pub fn is_stopping(&self) -> bool {
+        self.shared
+            .lifecycle
+            .lock()
+            .expect("Creation lifecycle lock poisoned")
+            .stopping
+    }
+
     /// Wait for independently owned transaction-and-handoff operations to finish.
     pub async fn wait_idle(&self) {
         loop {

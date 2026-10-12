@@ -12,7 +12,7 @@
 
 前后端完全分离，后端仅提供 API，不托管前端静态文件，也不实现 CORS 中间件。HTTP 访问边界和浏览器跨域响应由部署端通过防火墙、反向代理及路由配置安排。
 
-浏览器页面、Monaco 编辑、本地草稿和提交交互见[前端 GUI 设计](05-frontend-design.md)，实施见[前端开发计划](06-frontend-development-plan.md)。核心 GUI 与提交历史使用现有 API；后续 F08 的只读健康接口、共享探测和过期警告已按[健康观测设计](07-health-observation-design.md)确认，尚未实现。
+浏览器页面、Monaco 编辑、本地草稿和提交交互见[前端 GUI 设计](05-frontend-design.md)，实施见[前端开发计划](06-frontend-development-plan.md)。核心 GUI 与提交历史使用现有 API；F08 已按[健康观测设计](07-health-observation-design.md)实现 H01 Worker 状态 RPC 和 H02 观测来源、配置及共享采集模块。当前程序入口尚未启动健康任务，HTTP 快照、入口监督与停机接线留在 H03，页面及过期警告留在 H04。
 
 执行规则以 [Worker 设计](01-worker-design.md)为准，存储结构以[数据库设计](02-database-design.md)和[建表 SQL](../sql/001-initial-schema.sql)为准。Scheduler 只有一个活动实例，与 API 一同启动和退出。
 
@@ -59,8 +59,9 @@ API 与 Scheduler 通过进程内调用和消息交接任务。Worker 客户端�
 | `problems` | 查询已发布题目的最新版本、题面和语言限额 |
 | `submissions` | 创建幂等、固定版本、校验请求、保存源码、将任务交给 Scheduler、查询历史与结果 |
 | `scheduler` | 有界内存队列、Worker 轮转选择、分派、轮询、终态保存和 ACK 编排 |
-| `scheduler::worker_client` | Scheduler 子模块，封装三个 Worker RPC、调用 deadline、Proto 与后端类型转换、传输错误分类 |
+| `scheduler::worker_client` | Scheduler 子模块，封装判题三个 RPC 和只读状态 RPC、调用 deadline、Proto 与后端类型转换、传输错误分类；状态查询使用独立健康预算 |
 | `database` | SQLx 共享连接池、参数绑定、短事务、条件状态更新和查询 |
+| `health` | 本地接纳快照、共享有界探测、最近结果缓存及单调时钟过期投影；不参与业务决策 |
 | `config` / `logging` | 启动配置校验和统一日志初始化 |
 | 程序入口 | 组装共享句柄、完成启动检查、监督后台任务、处理退出 |
 
@@ -72,9 +73,13 @@ HTTP 层通过 `ServiceBuilder` 组合公共中间件，`TraceLayer` 统一记�
 
 HTTP 查询读取数据库中的业务状态和结果。前端轮询不触发 Worker RPC；Worker 的阶段和逐点进度不写库，首版 HTTP 也不提供这些临时信息。
 
+H02 的 [`Health::start`](../crates/backend/src/health.rs) 接受健康配置、共享数据库和 Scheduler 句柄，从 Scheduler 取得现有客户端的廉价克隆；返回缓存句柄和需由入口观察的任务。`Health::snapshot()` 只读缓存，`local_snapshot()` 读取创建服务停止标记及 Scheduler 短锁和信号量。`Health::stop()` 中断当前轮次或间隔，任务取消并等待本轮异步检查结束后返回；实际入口组装、HTTP DTO 和监督由 H03 接入。采集周期、错误码和展示规则统一遵守[健康观测设计第 4 节](07-health-observation-design.md#4-后端观测来源与采集)。
+
 ## 4. 数据库访问与预置数据
 
 API 与 Scheduler 共享一个 SQLx `SqlitePool`，首版固定 `max_connections = 1`，数据库访问依次使用该连接。SQLx 异步调用直接运行在后端已有的 Tokio runtime 内；SQLite 的阻塞调用由 SQLx 内部后台线程处理，见[运行时支持](https://docs.rs/sqlx/latest/sqlx/#runtime-support)和[SQLite 连接说明](https://docs.rs/sqlx/latest/sqlx/sqlite/struct.SqliteConnection.html)。
+
+`Database::probe_read()` 复用该连接池和 `Database::observe` 的只读错误边界，执行 `SELECT id FROM users LIMIT 1` 的可选行查询，空表也成功。采集预算覆盖连接池等待及 SQL；超时不承诺底层 SQLite 同时停止，仍受既有有限 busy timeout 约束。普通读取错误只降低该次观测，实际返回的严重存储错误仍通知既有故障退出流程。
 
 一个数据库操作使用一个连接，完成一次查询或一个短事务后归还；占用连接和事务均不能跨越 gRPC 调用或等待 Scheduler 入队。创建提交仍使用 `BEGIN IMMEDIATE`，表结构和事务规则保持不变。连接显式启用 `foreign_keys` 并配置有限 busy timeout。使用参数绑定的普通 SQL 查询和类型映射。
 
@@ -310,6 +315,7 @@ Scheduler 后台任务意外退出交给程序入口记录错误并触发故障�
 | 测试用户 | 已预置的 `user_id` |
 | Scheduler | 待接纳上限、Worker 地址列表、轮询间隔、拒绝后再次尝试间隔 |
 | gRPC | 提交、查询和 ACK deadline，发送与接收消息上限 |
+| 健康观测 | `[health]` 的 `interval_ms` 和 `timeout_ms`，缺省分别为 5_000 和 1_000；均为正值，派生过期阈值 `2 * (interval_ms + timeout_ms)` 必须不溢出 |
 | 任务校验 | 源码、用例数、单个输入和答案、合计字节、运行时间及内存的允许上限 |
 | 结果与日志 | 有界诊断及输出约定、日志级别 |
 

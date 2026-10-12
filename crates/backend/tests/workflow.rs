@@ -5,10 +5,16 @@ mod support;
 use std::{sync::atomic::Ordering, time::Duration};
 
 use acorn_backend::{
+    config::HealthConfig,
+    database::Database,
+    health::{Health, ProbeErrorCode, ProbeState, SubmissionAdmission, local_snapshot},
     scheduler::AdmissionError,
+    scheduler::{Scheduler, SchedulerState},
     submissions::{CreateSubmission, SubmissionState, TerminalDetails, TerminalOutcome, Verdict},
 };
-use acorn_protocol::worker::v1::{JudgeResult, Verdict as RpcVerdict};
+use acorn_protocol::worker::v1::{
+    GetWorkerStatusReply, JudgeResult, Verdict as RpcVerdict, WorkerExecutionState,
+};
 use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
@@ -227,19 +233,277 @@ async fn ambiguous_submit_queries_once_and_never_resubmits() {
 #[tokio::test]
 async fn awaiting_admission_counts_toward_capacity() {
     let harness = Harness::start(&[Mode::AwaitAdmission], 1).await;
+    assert_eq!(
+        local_snapshot(&harness.creation, &harness.scheduler).submission_admission,
+        SubmissionAdmission::Open
+    );
+    let permit = harness.scheduler.reserve().unwrap();
+    let reserved = local_snapshot(&harness.creation, &harness.scheduler);
+    assert_eq!(reserved.scheduler.pending_used, 1);
+    assert_eq!(reserved.scheduler.pending_capacity, 1);
+    assert_eq!(reserved.submission_admission, SubmissionAdmission::Full);
+    drop(permit);
     let id = harness.submit("python", "ac").await;
     wait_for(|| harness.servers[0].mock.submits.load(Ordering::SeqCst) == 1).await;
     assert!(matches!(
         harness.scheduler.reserve(),
         Err(AdmissionError::QueueFull)
     ));
+    assert_eq!(
+        local_snapshot(&harness.creation, &harness.scheduler).submission_admission,
+        SubmissionAdmission::Full
+    );
     harness.servers[0]
         .mock
         .released
         .store(true, Ordering::SeqCst);
     harness.terminal(&id).await;
     assert!(harness.scheduler.reserve().is_ok());
+    assert_eq!(harness.scheduler.snapshot().pending_used, 0);
+    harness.creation.stop();
+    assert!(harness.creation.is_stopping());
+    assert_eq!(harness.scheduler.snapshot().state, SchedulerState::Running);
+    assert_eq!(
+        local_snapshot(&harness.creation, &harness.scheduler).submission_admission,
+        SubmissionAdmission::Stopping
+    );
+    harness.scheduler.pause();
+    assert_eq!(harness.scheduler.snapshot().state, SchedulerState::Stopping);
+    let creation = harness.creation.clone();
+    let scheduler = harness.scheduler.clone();
     harness.close().await;
+    assert_eq!(scheduler.snapshot().state, SchedulerState::Stopped);
+    assert_eq!(
+        local_snapshot(&creation, &scheduler).submission_admission,
+        SubmissionAdmission::Unavailable
+    );
+}
+
+/// Fast checks update independently, snapshots are passive, and stop cancels a pending round.
+#[tokio::test]
+async fn health_round_updates_independently_and_stops_pending_checks() {
+    let harness = Harness::start(&[Mode::Finish, Mode::Finish], 2).await;
+    *harness.servers[0].mock.status_reply.lock().unwrap() = None;
+    let config = HealthConfig {
+        interval_ms: 60_000,
+        timeout_ms: 60_000,
+    };
+    let (health, task) = Health::start(
+        &config,
+        harness.fixture.database.clone(),
+        &harness.scheduler,
+    )
+    .unwrap();
+    let initial = health.snapshot();
+    assert_eq!(initial.database.state, ProbeState::Unknown);
+    assert!(
+        initial
+            .workers
+            .iter()
+            .all(|worker| worker.probe.state == ProbeState::Unknown)
+    );
+    wait_for(|| {
+        health.snapshot().database.state == ProbeState::Ok
+            && health.snapshot().workers[1].probe.state == ProbeState::Ok
+            && harness
+                .servers
+                .iter()
+                .all(|server| server.mock.status_calls.load(Ordering::SeqCst) == 1)
+    })
+    .await;
+    let snapshot = health.snapshot();
+    assert_eq!(snapshot.workers[0].id, "worker-1");
+    assert_eq!(snapshot.workers[1].id, "worker-2");
+    assert_eq!(snapshot.workers[0].probe.state, ProbeState::Unknown);
+    assert!(snapshot.database.checked_at_ms.unwrap() > 0);
+    for _ in 0..10 {
+        assert_eq!(health.snapshot(), snapshot);
+    }
+    for server in &harness.servers {
+        assert_eq!(server.mock.status_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(server.mock.submits.load(Ordering::SeqCst), 0);
+        assert_eq!(server.mock.gets.load(Ordering::SeqCst), 0);
+        assert_eq!(server.mock.acks.load(Ordering::SeqCst), 0);
+    }
+    health.stop();
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(health.snapshot(), snapshot);
+    harness.close().await;
+}
+
+/// The collector replaces successes with precise failures and later recovers on the same channel.
+#[tokio::test]
+async fn health_status_failures_and_recovery_keep_admission_open() {
+    let harness = Harness::start(&[Mode::Finish], 2).await;
+    let config = HealthConfig {
+        interval_ms: 20,
+        timeout_ms: 1_000,
+    };
+    let (health, task) = Health::start(
+        &config,
+        harness.fixture.database.clone(),
+        &harness.scheduler,
+    )
+    .unwrap();
+    wait_for(|| health.snapshot().workers[0].probe.state == ProbeState::Ok).await;
+    let valid = GetWorkerStatusReply {
+        stopping: true,
+        execution_state: WorkerExecutionState::Blocked as i32,
+        unacknowledged_results: 2,
+        unacknowledged_capacity: 2,
+    };
+    for (reply, expected) in [
+        (
+            Err(tonic::Status::unavailable("Controlled status failure")),
+            ProbeErrorCode::WorkerRpcFailed,
+        ),
+        (
+            Err(tonic::Status::cancelled("Controlled remote cancellation")),
+            ProbeErrorCode::WorkerRpcFailed,
+        ),
+        (
+            Err(tonic::Status::unimplemented("Old Worker")),
+            ProbeErrorCode::WorkerStatusUnsupported,
+        ),
+        (
+            Err(tonic::Status::deadline_exceeded("Controlled deadline")),
+            ProbeErrorCode::ProbeTimeout,
+        ),
+        (
+            Ok(GetWorkerStatusReply {
+                execution_state: 0,
+                ..valid
+            }),
+            ProbeErrorCode::InvalidWorkerStatus,
+        ),
+    ] {
+        *harness.servers[0].mock.status_reply.lock().unwrap() = Some(reply);
+        wait_for(|| health.snapshot().workers[0].probe.error_code == Some(expected)).await;
+        let failed = health.snapshot();
+        assert_eq!(failed.workers[0].probe.state, ProbeState::Failed);
+        assert!(failed.workers[0].probe.value.is_none());
+        assert!(failed.workers[0].probe.checked_at_ms.is_some());
+        assert_eq!(
+            local_snapshot(&harness.creation, &harness.scheduler).submission_admission,
+            SubmissionAdmission::Open
+        );
+        let permit = harness.scheduler.reserve().unwrap();
+        drop(permit);
+        *harness.servers[0].mock.status_reply.lock().unwrap() = Some(Ok(valid));
+        wait_for(|| health.snapshot().workers[0].probe.state == ProbeState::Ok).await;
+        let recovered = health.snapshot().workers[0].probe.value.unwrap();
+        assert!(recovered.stopping);
+        assert_eq!(
+            recovered.execution_state,
+            acorn_backend::health::ExecutionState::Blocked
+        );
+        assert_eq!(recovered.unacknowledged_results, 2);
+        assert_eq!(recovered.unacknowledged_capacity, 2);
+    }
+    assert_eq!(harness.servers[0].mock.submits.load(Ordering::SeqCst), 0);
+    assert_eq!(harness.servers[0].mock.gets.load(Ordering::SeqCst), 0);
+    assert_eq!(harness.servers[0].mock.acks.load(Ordering::SeqCst), 0);
+    health.stop();
+    task.await.unwrap().unwrap();
+    harness.close().await;
+}
+
+/// A nonresponding Worker consumes only the health budget; stop also interrupts the round delay.
+#[tokio::test]
+async fn health_worker_timeout_and_stop_between_rounds() {
+    let harness = Harness::start(&[Mode::Finish], 2).await;
+    *harness.servers[0].mock.status_reply.lock().unwrap() = None;
+    let config = HealthConfig {
+        interval_ms: 60_000,
+        timeout_ms: 1_000,
+    };
+    let (health, task) = Health::start(
+        &config,
+        harness.fixture.database.clone(),
+        &harness.scheduler,
+    )
+    .unwrap();
+    wait_for(|| harness.servers[0].mock.status_calls.load(Ordering::SeqCst) == 1).await;
+    wait_for(|| {
+        health.snapshot().workers[0].probe.error_code == Some(ProbeErrorCode::ProbeTimeout)
+    })
+    .await;
+    assert_eq!(
+        harness.servers[0].mock.status_calls.load(Ordering::SeqCst),
+        1
+    );
+    assert_eq!(health.snapshot().database.state, ProbeState::Ok);
+    health.stop();
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        harness.servers[0].mock.status_calls.load(Ordering::SeqCst),
+        1
+    );
+    harness.close().await;
+}
+
+/// Empty tables succeed; actual read errors and budget expiry affect only the cached observation.
+#[tokio::test]
+async fn health_database_read_failure_and_timeout_recover() {
+    let mut fixture = Fixture::new().await;
+    fixture.database.close().await;
+    fixture.config.database.busy_timeout_ms = 50;
+    fixture.database = Database::open(&fixture.config).await.unwrap();
+    let mut connection = fixture.connection().await;
+    sqlx::query("DELETE FROM users")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    fixture.database.probe_read().await.unwrap();
+    let server = RpcServer::start(Mode::Finish, fixture.database.clone()).await;
+    fixture.config.scheduler.workers = vec![server.address.clone()];
+    let (scheduler, scheduler_task) =
+        Scheduler::start(&fixture.config, fixture.database.clone(), Vec::new()).unwrap();
+    for (timeout_ms, expected) in [
+        (1_000, ProbeErrorCode::DatabaseReadFailed),
+        (10, ProbeErrorCode::ProbeTimeout),
+    ] {
+        let config = HealthConfig {
+            interval_ms: 20,
+            timeout_ms,
+        };
+        let (health, task) = Health::start(&config, fixture.database.clone(), &scheduler).unwrap();
+        wait_for(|| health.snapshot().database.state == ProbeState::Ok).await;
+        sqlx::query("BEGIN EXCLUSIVE")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        wait_for(|| health.snapshot().database.error_code == Some(expected)).await;
+        assert_eq!(health.snapshot().database.state, ProbeState::Failed);
+        assert_eq!(scheduler.snapshot().state, SchedulerState::Running);
+        tokio::select! {
+            biased;
+            error = fixture.database.failure() => panic!("Ordinary health read triggered a fatal error: {error}"),
+            _ = std::future::ready(()) => {},
+        }
+        sqlx::query("ROLLBACK")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        wait_for(|| health.snapshot().database.state == ProbeState::Ok).await;
+        health.stop();
+        task.await.unwrap().unwrap();
+    }
+    scheduler.shutdown();
+    scheduler_task.await.unwrap().unwrap();
+    assert_eq!(server.mock.submits.load(Ordering::SeqCst), 0);
+    assert_eq!(server.mock.acks.load(Ordering::SeqCst), 0);
+    server.close().await;
+    connection.close().await.unwrap();
+    fixture.database.close().await;
 }
 
 /// Full queues reject new records but known queued and terminal keys remain idempotent.

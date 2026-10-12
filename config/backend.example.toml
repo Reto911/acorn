@@ -24,6 +24,10 @@ ack_timeout_ms = 1_000
 max_request_bytes = 16_777_216
 max_response_bytes = 1_048_576
 
+[health]
+interval_ms = 5_000
+timeout_ms = 1_000
+
 [request]
 source_max_bytes = 65_536
 case_max_count = 128
