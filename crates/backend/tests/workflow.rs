@@ -8,9 +8,13 @@ use acorn_backend::{
     config::HealthConfig,
     database::Database,
     health::{Health, ProbeErrorCode, ProbeState, SubmissionAdmission, local_snapshot},
+    http,
     scheduler::AdmissionError,
     scheduler::{Scheduler, SchedulerState},
-    submissions::{CreateSubmission, SubmissionState, TerminalDetails, TerminalOutcome, Verdict},
+    submissions::{
+        CreateSubmission, CreationService, SubmissionState, TerminalDetails, TerminalOutcome,
+        Verdict,
+    },
 };
 use acorn_protocol::worker::v1::{
     GetWorkerStatusReply, JudgeResult, Verdict as RpcVerdict, WorkerExecutionState,
@@ -26,6 +30,15 @@ use support::{
 };
 use tower::ServiceExt;
 use uuid::Uuid;
+
+/// Check the health HTTP envelope and caching header while returning its component fields.
+async fn health_response(app: &axum::Router) -> Value {
+    let (status, headers, body) = call(app, "GET", "/api/v1/health", None, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(headers["cache-control"], "no-store");
+    assert!(body["snapshot_at_ms"].as_i64().unwrap() > 0);
+    body
+}
 
 /// Basic public query shapes exclude private tests and support retained old versions.
 #[tokio::test]
@@ -242,6 +255,12 @@ async fn awaiting_admission_counts_toward_capacity() {
     assert_eq!(reserved.scheduler.pending_used, 1);
     assert_eq!(reserved.scheduler.pending_capacity, 1);
     assert_eq!(reserved.submission_admission, SubmissionAdmission::Full);
+    let body = health_response(&harness.app).await;
+    assert_eq!(body["submission_admission"], "full");
+    assert_eq!(
+        body["scheduler"],
+        json!({"state":"running", "pending_used":1, "pending_capacity":1})
+    );
     drop(permit);
     let id = harness.submit("python", "ac").await;
     wait_for(|| harness.servers[0].mock.submits.load(Ordering::SeqCst) == 1).await;
@@ -252,6 +271,10 @@ async fn awaiting_admission_counts_toward_capacity() {
     assert_eq!(
         local_snapshot(&harness.creation, &harness.scheduler).submission_admission,
         SubmissionAdmission::Full
+    );
+    assert_eq!(
+        health_response(&harness.app).await["scheduler"]["pending_used"],
+        1
     );
     harness.servers[0]
         .mock
@@ -267,33 +290,36 @@ async fn awaiting_admission_counts_toward_capacity() {
         local_snapshot(&harness.creation, &harness.scheduler).submission_admission,
         SubmissionAdmission::Stopping
     );
+    assert_eq!(
+        health_response(&harness.app).await["submission_admission"],
+        "stopping"
+    );
     harness.scheduler.pause();
     assert_eq!(harness.scheduler.snapshot().state, SchedulerState::Stopping);
     let creation = harness.creation.clone();
     let scheduler = harness.scheduler.clone();
+    let app = harness.app.clone();
     harness.close().await;
     assert_eq!(scheduler.snapshot().state, SchedulerState::Stopped);
     assert_eq!(
         local_snapshot(&creation, &scheduler).submission_admission,
         SubmissionAdmission::Unavailable
     );
+    let body = health_response(&app).await;
+    assert_eq!(body["submission_admission"], "unavailable");
+    assert_eq!(body["scheduler"]["state"], "stopped");
 }
 
 /// Fast checks update independently, snapshots are passive, and stop cancels a pending round.
 #[tokio::test]
 async fn health_round_updates_independently_and_stops_pending_checks() {
-    let harness = Harness::start(&[Mode::Finish, Mode::Finish], 2).await;
-    *harness.servers[0].mock.status_reply.lock().unwrap() = None;
     let config = HealthConfig {
         interval_ms: 60_000,
         timeout_ms: 60_000,
     };
-    let (health, task) = Health::start(
-        &config,
-        harness.fixture.database.clone(),
-        &harness.scheduler,
-    )
-    .unwrap();
+    let mut harness = Harness::start_with_health(&[Mode::Finish, Mode::Finish], 2, config).await;
+    *harness.servers[0].mock.status_reply.lock().unwrap() = None;
+    let health = harness.health.clone();
     let initial = health.snapshot();
     assert_eq!(initial.database.state, ProbeState::Unknown);
     assert!(
@@ -301,6 +327,15 @@ async fn health_round_updates_independently_and_stops_pending_checks() {
             .workers
             .iter()
             .all(|worker| worker.probe.state == ProbeState::Unknown)
+    );
+    let initial_http = health_response(&harness.app).await;
+    assert_eq!(
+        initial_http["database"],
+        json!({"state":"unknown", "checked_at_ms":null, "error_code":null})
+    );
+    assert_eq!(
+        initial_http["workers"][0],
+        json!({"id":"worker-1", "state":"unknown", "checked_at_ms":null, "error_code":null, "status":null})
     );
     wait_for(|| {
         health.snapshot().database.state == ProbeState::Ok
@@ -318,6 +353,17 @@ async fn health_round_updates_independently_and_stops_pending_checks() {
     assert!(snapshot.database.checked_at_ms.unwrap() > 0);
     for _ in 0..10 {
         assert_eq!(health.snapshot(), snapshot);
+        let body = health_response(&harness.app).await;
+        assert_eq!(body["database"]["state"], "ok");
+        assert_eq!(
+            body["database"]["checked_at_ms"],
+            snapshot.database.checked_at_ms.unwrap()
+        );
+        assert_eq!(body["workers"][0]["state"], "unknown");
+        assert_eq!(
+            body["workers"][1]["status"],
+            json!({"stopping":false, "execution_state":"idle", "unacknowledged_results":0, "unacknowledged_capacity":128})
+        );
     }
     for server in &harness.servers {
         assert_eq!(server.mock.status_calls.load(Ordering::SeqCst), 1);
@@ -325,12 +371,7 @@ async fn health_round_updates_independently_and_stops_pending_checks() {
         assert_eq!(server.mock.gets.load(Ordering::SeqCst), 0);
         assert_eq!(server.mock.acks.load(Ordering::SeqCst), 0);
     }
-    health.stop();
-    tokio::time::timeout(Duration::from_secs(5), task)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    harness.stop_health().await;
     assert_eq!(health.snapshot(), snapshot);
     harness.close().await;
 }
@@ -338,17 +379,12 @@ async fn health_round_updates_independently_and_stops_pending_checks() {
 /// The collector replaces successes with precise failures and later recovers on the same channel.
 #[tokio::test]
 async fn health_status_failures_and_recovery_keep_admission_open() {
-    let harness = Harness::start(&[Mode::Finish], 2).await;
     let config = HealthConfig {
         interval_ms: 20,
         timeout_ms: 1_000,
     };
-    let (health, task) = Health::start(
-        &config,
-        harness.fixture.database.clone(),
-        &harness.scheduler,
-    )
-    .unwrap();
+    let mut harness = Harness::start_with_health(&[Mode::Finish], 2, config).await;
+    let health = harness.health.clone();
     wait_for(|| health.snapshot().workers[0].probe.state == ProbeState::Ok).await;
     let valid = GetWorkerStatusReply {
         stopping: true,
@@ -391,6 +427,22 @@ async fn health_status_failures_and_recovery_keep_admission_open() {
             local_snapshot(&harness.creation, &harness.scheduler).submission_admission,
             SubmissionAdmission::Open
         );
+        let body = health_response(&harness.app).await;
+        assert_eq!(body["submission_admission"], "open");
+        assert_eq!(body["workers"][0]["state"], "failed");
+        assert!(body["workers"][0]["status"].is_null());
+        let expected_code = match expected {
+            ProbeErrorCode::WorkerRpcFailed => "WorkerRpcFailed",
+            ProbeErrorCode::WorkerStatusUnsupported => "WorkerStatusUnsupported",
+            ProbeErrorCode::ProbeTimeout => "ProbeTimeout",
+            ProbeErrorCode::InvalidWorkerStatus => "InvalidWorkerStatus",
+            ProbeErrorCode::DatabaseReadFailed => unreachable!(),
+        };
+        assert_eq!(body["workers"][0]["error_code"], expected_code);
+        let public = body.to_string();
+        assert!(!public.contains(&harness.servers[0].address));
+        assert!(!public.contains(harness.fixture.config.database.path.to_str().unwrap()));
+        assert!(!public.contains("Controlled"));
         let permit = harness.scheduler.reserve().unwrap();
         drop(permit);
         *harness.servers[0].mock.status_reply.lock().unwrap() = Some(Ok(valid));
@@ -403,30 +455,28 @@ async fn health_status_failures_and_recovery_keep_admission_open() {
         );
         assert_eq!(recovered.unacknowledged_results, 2);
         assert_eq!(recovered.unacknowledged_capacity, 2);
+        assert_eq!(
+            health_response(&harness.app).await["workers"][0]["status"],
+            json!({"stopping":true, "execution_state":"blocked", "unacknowledged_results":2, "unacknowledged_capacity":2})
+        );
     }
     assert_eq!(harness.servers[0].mock.submits.load(Ordering::SeqCst), 0);
     assert_eq!(harness.servers[0].mock.gets.load(Ordering::SeqCst), 0);
     assert_eq!(harness.servers[0].mock.acks.load(Ordering::SeqCst), 0);
-    health.stop();
-    task.await.unwrap().unwrap();
+    harness.stop_health().await;
     harness.close().await;
 }
 
 /// A nonresponding Worker consumes only the health budget; stop also interrupts the round delay.
 #[tokio::test]
 async fn health_worker_timeout_and_stop_between_rounds() {
-    let harness = Harness::start(&[Mode::Finish], 2).await;
-    *harness.servers[0].mock.status_reply.lock().unwrap() = None;
     let config = HealthConfig {
         interval_ms: 60_000,
         timeout_ms: 1_000,
     };
-    let (health, task) = Health::start(
-        &config,
-        harness.fixture.database.clone(),
-        &harness.scheduler,
-    )
-    .unwrap();
+    let mut harness = Harness::start_with_health(&[Mode::Finish], 2, config).await;
+    *harness.servers[0].mock.status_reply.lock().unwrap() = None;
+    let health = harness.health.clone();
     wait_for(|| harness.servers[0].mock.status_calls.load(Ordering::SeqCst) == 1).await;
     wait_for(|| {
         health.snapshot().workers[0].probe.error_code == Some(ProbeErrorCode::ProbeTimeout)
@@ -437,12 +487,10 @@ async fn health_worker_timeout_and_stop_between_rounds() {
         1
     );
     assert_eq!(health.snapshot().database.state, ProbeState::Ok);
-    health.stop();
-    tokio::time::timeout(Duration::from_secs(5), task)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    let body = health_response(&harness.app).await;
+    assert_eq!(body["workers"][0]["error_code"], "ProbeTimeout");
+    assert_eq!(body["submission_admission"], "open");
+    harness.stop_health().await;
     assert_eq!(
         harness.servers[0].mock.status_calls.load(Ordering::SeqCst),
         1
@@ -476,6 +524,15 @@ async fn health_database_read_failure_and_timeout_recover() {
             timeout_ms,
         };
         let (health, task) = Health::start(&config, fixture.database.clone(), &scheduler).unwrap();
+        let creation =
+            CreationService::new(&fixture.config, fixture.database.clone(), scheduler.clone());
+        let app = http::router(
+            &fixture.config,
+            fixture.database.clone(),
+            creation,
+            scheduler.clone(),
+            health.clone(),
+        );
         wait_for(|| health.snapshot().database.state == ProbeState::Ok).await;
         sqlx::query("BEGIN EXCLUSIVE")
             .execute(&mut connection)
@@ -484,6 +541,17 @@ async fn health_database_read_failure_and_timeout_recover() {
         wait_for(|| health.snapshot().database.error_code == Some(expected)).await;
         assert_eq!(health.snapshot().database.state, ProbeState::Failed);
         assert_eq!(scheduler.snapshot().state, SchedulerState::Running);
+        let body = health_response(&app).await;
+        assert_eq!(body["database"]["state"], "failed");
+        assert_eq!(
+            body["database"]["error_code"],
+            if expected == ProbeErrorCode::ProbeTimeout {
+                "ProbeTimeout"
+            } else {
+                "DatabaseReadFailed"
+            }
+        );
+        assert_eq!(body["submission_admission"], "open");
         tokio::select! {
             biased;
             error = fixture.database.failure() => panic!("Ordinary health read triggered a fatal error: {error}"),
@@ -494,6 +562,7 @@ async fn health_database_read_failure_and_timeout_recover() {
             .await
             .unwrap();
         wait_for(|| health.snapshot().database.state == ProbeState::Ok).await;
+        assert_eq!(health_response(&app).await["database"]["state"], "ok");
         health.stop();
         task.await.unwrap().unwrap();
     }
@@ -802,6 +871,12 @@ async fn http_errors_and_body_limits() {
         (
             "DELETE",
             "/api/v1/problems",
+            StatusCode::METHOD_NOT_ALLOWED,
+            "MethodNotAllowed",
+        ),
+        (
+            "POST",
+            "/api/v1/health",
             StatusCode::METHOD_NOT_ALLOWED,
             "MethodNotAllowed",
         ),
@@ -1181,6 +1256,7 @@ async fn process_creation_failure_exits_without_draining_workers() {
 async fn process_shutdown_drains_running_and_restart_loads_queued() {
     let mut fixture = Fixture::new().await;
     fixture.config.scheduler.poll_interval_ms = 10;
+    fixture.config.health.timeout_ms = 60_000;
     fixture.queued("c").await;
     fixture.queued("python").await;
     let expected = fixture
@@ -1192,10 +1268,12 @@ async fn process_shutdown_drains_running_and_restart_loads_queued() {
         .map(|task| task.request.job_id)
         .collect::<Vec<_>>();
     let server = RpcServer::start(Mode::Running, fixture.database.clone()).await;
+    *server.mock.status_reply.lock().unwrap() = None;
     fixture.config.scheduler.workers = vec![server.address.clone()];
     let mut backend = BackendProcess::spawn(&fixture);
     let address = backend.listening().await;
     wait_for(|| server.mock.gets.load(Ordering::SeqCst) > 0).await;
+    wait_for(|| server.mock.status_calls.load(Ordering::SeqCst) == 1).await;
     backend.terminate();
     backend
         .until_log("Backend stopping admission and dispatch")
@@ -1216,9 +1294,18 @@ async fn process_shutdown_drains_running_and_restart_loads_queued() {
             .0,
         200
     );
+    let (status, health) = network_call(address, "GET", "/api/v1/health", None, None).await;
+    assert_eq!(status, 200);
+    assert_eq!(health["submission_admission"], "stopping");
+    assert_eq!(health["scheduler"]["state"], "stopping");
+    assert_eq!(health["workers"][0]["state"], "unknown");
     server.mock.released.store(true, Ordering::SeqCst);
     let (status, logs) = backend.finish().await;
     assert_eq!(status.code(), Some(0), "{logs}");
+    assert!(
+        logs.find("Health collector stopped").unwrap() < logs.find("Backend stopped").unwrap(),
+        "{logs}"
+    );
     assert_eq!(server.mock.submits.load(Ordering::SeqCst), 1);
     assert_eq!(server.mock.acks.load(Ordering::SeqCst), 1);
     let previous_terminal = fixture.database.submission(&expected[0]).await.unwrap();
@@ -1263,15 +1350,21 @@ async fn process_shutdown_drains_running_and_restart_loads_queued() {
 async fn process_fault_during_shutdown_does_not_wait_other_worker() {
     let mut fixture = Fixture::new().await;
     fixture.config.scheduler.poll_interval_ms = 10;
+    fixture.config.health.timeout_ms = 60_000;
     fixture.queued("c").await;
     fixture.queued("python").await;
     let first = RpcServer::start(Mode::Running, fixture.database.clone()).await;
     let second = RpcServer::start(Mode::Running, fixture.database.clone()).await;
+    *first.mock.status_reply.lock().unwrap() = None;
+    *second.mock.status_reply.lock().unwrap() = None;
     fixture.config.scheduler.workers = vec![first.address.clone(), second.address.clone()];
     let mut backend = BackendProcess::spawn(&fixture);
     backend.listening().await;
     wait_for(|| {
-        first.mock.gets.load(Ordering::SeqCst) > 0 && second.mock.gets.load(Ordering::SeqCst) > 0
+        first.mock.gets.load(Ordering::SeqCst) > 0
+            && second.mock.gets.load(Ordering::SeqCst) > 0
+            && first.mock.status_calls.load(Ordering::SeqCst) == 1
+            && second.mock.status_calls.load(Ordering::SeqCst) == 1
     })
     .await;
     let mut connection = fixture.connection().await;
@@ -1285,6 +1378,7 @@ async fn process_fault_during_shutdown_does_not_wait_other_worker() {
     let (status, logs) = backend.finish().await;
     assert_eq!(status.code(), Some(1), "{logs}");
     assert!(logs.contains("Controlled terminal write failure"), "{logs}");
+    assert!(logs.contains("Health collector stopped"), "{logs}");
     assert_eq!(first.mock.acks.load(Ordering::SeqCst), 0);
     assert_eq!(second.mock.acks.load(Ordering::SeqCst), 0);
     for server in [&first, &second] {

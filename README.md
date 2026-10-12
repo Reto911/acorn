@@ -4,7 +4,7 @@ C 与 Python 3 的单文件源码判题系统。后端包含 HTTP API、Schedule
 
 当前已完成 P01–P10：Worker 独立提供 C/Python 串行判题，后端通过 HTTP 创建提交、进程内 Scheduler 分派、gRPC 取结果、SQLite 持久化和 ACK 完成业务闭环，并已接入启动装入、正常停机及故障退出。首版源码样例、真实单／双 Worker 验收、独立程序从空库启动及重启查询已完成，操作步骤见下文。开发范围、执行契约和实际验证记录见[文档索引](docs/README.md)与[开发计划](docs/04-development-plan.md)。
 
-浏览器 GUI 采用 Vue 3、TypeScript 和 Monaco，已完成 F01–F07：题目浏览、C/Python 编辑、本地草稿、主动提交、结果详情、固定版本题面、状态轮询，以及提交历史筛选、分页和详情往返。首版桌面联调已覆盖 C/Python AC、C CE、Python WA 和 C TLE，实际新增与复用记录、UI-01–UI-09 对应关系及未测范围见[前端开发计划](docs/06-frontend-development-plan.md#57-f07首版浏览器联调与操作说明)。交互依据见[GUI 设计](docs/05-frontend-design.md)；健康观测已实现 H01 Worker 状态 RPC 和 H02 后端共享采集模块，程序入口、HTTP 快照和页面待后续接入。
+浏览器 GUI 采用 Vue 3、TypeScript 和 Monaco，已完成 F01–F07：题目浏览、C/Python 编辑、本地草稿、主动提交、结果详情、固定版本题面、状态轮询，以及提交历史筛选、分页和详情往返。首版桌面联调已覆盖 C/Python AC、C CE、Python WA 和 C TLE，实际新增与复用记录、UI-01–UI-09 对应关系及未测范围见[前端开发计划](docs/06-frontend-development-plan.md#57-f07首版浏览器联调与操作说明)。交互依据见[GUI 设计](docs/05-frontend-design.md)；健康观测已完成 H01–H03，提供 Worker 状态 RPC、后端共享采集及只读 HTTP 快照；H04 健康页面待接入。
 
 ## 浏览器 GUI
 
@@ -15,7 +15,7 @@ cd web
 pnpm dev
 ```
 
-打开 [本地题目列表](http://localhost:5173/problems)，进入两数求和题，选择 C 或 Python 3，粘贴对应的 `examples/submissions/a-plus-b.c` 或 `a-plus-b.py` 源码。Ctrl+S 保存本地草稿，点击“提交代码”后进入结果页并取得 AC；“本题提交记录”可重新打开结果。完整操作、检查和静态部署说明见[前端说明](web/README.md)。GUI 支持宽度不小于 1024 CSS px 的桌面浏览器；当前没有登录、历史源码查询或健康观测。
+打开 [本地题目列表](http://localhost:5173/problems)，进入两数求和题，选择 C 或 Python 3，粘贴对应的 `examples/submissions/a-plus-b.c` 或 `a-plus-b.py` 源码。Ctrl+S 保存本地草稿，点击“提交代码”后进入结果页并取得 AC；“本题提交记录”可重新打开结果。完整操作、检查和静态部署说明见[前端说明](web/README.md)。GUI 支持宽度不小于 1024 CSS px 的桌面浏览器；当前没有登录、历史源码查询或健康页面。
 
 ## 构建与检查
 
@@ -74,7 +74,7 @@ Ctrl-C 或 SIGTERM 先停止接纳，再通过共同停止路径结束当前执�
 
 无效配置或不可调用的工具明确报错，不启动监听。工具的 `--version` 检查不能替代真实沙箱验收。
 
-后端读取 [backend.example.toml](config/backend.example.toml)，初始化英文日志，打开已初始化数据库并检查结构版本及预置测试用户，然后启动 Scheduler 和 HTTP 监听。数据库路径相对于启动目录；示例使用 `acorn.db`、用户 1 和 `http://127.0.0.1:50051` Worker endpoint。先启动上文的 Worker，再在另一终端于仓库根目录准备新数据库并启动后端：
+后端读取 [backend.example.toml](config/backend.example.toml)，初始化英文日志，打开已初始化数据库并检查结构版本及预置测试用户，然后启动 Scheduler、共享健康采集和 HTTP 监听。数据库路径相对于启动目录；示例使用 `acorn.db`、用户 1 和 `http://127.0.0.1:50051` Worker endpoint。先启动上文的 Worker，再在另一终端于仓库根目录准备新数据库并启动后端：
 
 ```sh
 sqlite3 -bail acorn.db < sql/001-initial-schema.sql
@@ -88,9 +88,9 @@ target/debug/acorn-backend --config /tmp/acorn-backend.toml 2>/tmp/acorn-backend
 
 后端在开放 HTTP 前将旧 `dispatching/running` 保存为 `failed / SchedulerInterrupted`，按 `created_at_ms, id` 装入 `queued` 的固定版本任务；排队数超出 `scheduler.pending_max_count` 时明确报错退出，提示部署端增大配置上限。启动不联系旧任务的 Worker，也不补发旧 ACK。
 
-后端收到 Ctrl-C 或 SIGTERM 后停止创建接纳和新分派，等待已开始的短创建操作、在途判题、结果保存及一次有 deadline 的 ACK，再关闭 HTTP 和连接池。等待期间查询继续可用，新创建返回 `503 BackendStopping`；未分派任务保持 `queued`，下次启动装入。已开始的创建操作即使尚在幂等查询阶段，也可在正常停机时完成名额预留与本地交接。
+后端收到 Ctrl-C 或 SIGTERM 后停止创建接纳和新分派，等待已开始的短创建操作、在途判题、结果保存及一次有 deadline 的 ACK，再关闭 HTTP，停止并等待健康采集任务，最后关闭连接池。等待期间查询继续可用，新创建返回 `503 BackendStopping`；未分派任务保持 `queued`，下次启动装入。已开始的创建操作即使尚在幂等查询阶段，也可在正常停机时完成名额预留与本地交接。
 
-运行期普通只读失败返回 `500 InternalError` 并记录英文日志，后端继续运行。创建写事务及状态、终态写入失败，明确的 I/O、磁盘满或数据库损坏，以及 Scheduler 异常结束，会使后端停止接纳与分派，收尾短创建操作后尽快退出，不等待其他 Worker 完成；未保存结果不 ACK。具体边界见[后端故障契约](docs/03-backend-design.md#83-数据库及后台故障)。
+运行期普通业务只读失败返回 `500 InternalError` 并记录英文日志，后端继续运行。健康读取探测的普通失败只更新观测缓存，健康接口仍可返回 `200`。创建写事务及状态、终态写入失败，明确的 I/O、磁盘满或数据库损坏，以及 Scheduler 异常结束，会使后端停止接纳与分派，收尾短创建操作后尽快退出，不等待其他 Worker 完成；未保存结果不 ACK。具体边界见[后端故障契约](docs/03-backend-design.md#83-数据库及后台故障)。
 
 查询题目并提交 Python 两数求和源码：
 
@@ -102,7 +102,15 @@ curl -i http://127.0.0.1:8080/api/v1/submissions \
   -d '{"problem_id":1,"language_id":"python","source":"a,b=map(int,input().split());print(a+b)\n"}'
 ```
 
-创建返回 `202`、`submission_id`、`state` 和 `Location`；同键同内容重传返回 `200`，新的主动提交更换 UUID 键。按返回的 `Location` 轮询详情即可取得持久化终态；提交历史为 `GET /api/v1/submissions`。两个列表都返回 `{"items":[...],"limit":20,"offset":0}`，支持 `limit`、`offset`；详情中的终态字节字段使用 Base64。六个路由、筛选和英文错误码见[HTTP 契约](docs/03-backend-design.md#5-http-接口)。
+创建返回 `202`、`submission_id`、`state` 和 `Location`；同键同内容重传返回 `200`，新的主动提交更换 UUID 键。按返回的 `Location` 轮询详情即可取得持久化终态；提交历史为 `GET /api/v1/submissions`。两个列表都返回 `{"items":[...],"limit":20,"offset":0}`，支持 `limit`、`offset`；详情中的终态字节字段使用 Base64。业务路由、健康接口、筛选和英文错误码见[HTTP 契约](docs/03-backend-design.md#5-http-接口)。
+
+后端启动后可查询只读健康快照：
+
+```sh
+curl -i http://127.0.0.1:8080/api/v1/health
+```
+
+该接口返回本地接纳条件、Scheduler 生命周期及名额、数据库与 Worker 最近观测，附带 `Cache-Control: no-store`；请求不触发新探测。默认每轮结束后等待 5 秒，单项预算 1 秒，观测年龄达到 12 秒后显示 `stale`。Worker 失败或数据库普通读取失败时仍返回组件快照，不代表整体可用或保证下一次提交成功。采集任务异常结束时只记录错误，判题服务继续，旧观测随后过期；字段与错误码见[健康契约](docs/07-health-observation-design.md#5-http-契约与可见范围)。
 
 ### 从源码文件提交并核对结果
 

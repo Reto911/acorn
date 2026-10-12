@@ -1,10 +1,151 @@
 //! Public JSON shapes; private source, test data and Worker progress never appear.
 
 use crate::{
-    problems,
+    health, problems, scheduler,
     submissions::{self, SubmissionState, TerminalDetails, Verdict},
 };
 use serde::{Deserialize, Serialize};
+
+/// Public component observations, with no internal endpoints, paths or diagnostics.
+#[derive(Serialize)]
+pub(super) struct HealthSnapshot {
+    /// Backend UTC Unix milliseconds when HTTP assembled the snapshot.
+    snapshot_at_ms: i64,
+    /// Local admission conditions, independent of remote observations.
+    submission_admission: &'static str,
+    /// Actual local dispatcher lifecycle and semaphore usage.
+    scheduler: SchedulerHealth,
+    /// Latest database read observation, excluding its internal unit value.
+    database: Probe,
+    /// Worker observations in configuration order.
+    workers: Vec<WorkerHealth>,
+}
+
+impl HealthSnapshot {
+    /// Map only the agreed public fields from local state and the shared cache.
+    pub fn new(
+        snapshot_at_ms: i64,
+        local: health::LocalSnapshot,
+        cached: health::Snapshot,
+    ) -> Self {
+        Self {
+            snapshot_at_ms,
+            submission_admission: match local.submission_admission {
+                health::SubmissionAdmission::Open => "open",
+                health::SubmissionAdmission::Full => "full",
+                health::SubmissionAdmission::Stopping => "stopping",
+                health::SubmissionAdmission::Unavailable => "unavailable",
+            },
+            scheduler: SchedulerHealth {
+                state: match local.scheduler.state {
+                    scheduler::SchedulerState::Running => "running",
+                    scheduler::SchedulerState::Stopping => "stopping",
+                    scheduler::SchedulerState::Stopped => "stopped",
+                },
+                pending_used: local.scheduler.pending_used,
+                pending_capacity: local.scheduler.pending_capacity,
+            },
+            database: cached.database.into(),
+            workers: cached.workers.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+/// Current local lifecycle and admission permit counts.
+#[derive(Serialize)]
+struct SchedulerHealth {
+    /// Running, stopping or stopped, independently of Worker status.
+    state: &'static str,
+    /// Permits held by reserved, queued or awaiting-admission submissions.
+    pending_used: u32,
+    /// Fixed configured permit ceiling.
+    pending_capacity: u32,
+}
+
+/// Common latest-probe metadata, whose absent fields remain explicit JSON nulls.
+#[derive(Serialize)]
+struct Probe {
+    /// Unknown, ok, failed or stale after the monotonic age projection.
+    state: &'static str,
+    /// Backend UTC check completion time, distinct from HTTP assembly time.
+    checked_at_ms: Option<i64>,
+    /// Stable code for a fresh failure, never its original diagnostic.
+    error_code: Option<&'static str>,
+}
+
+impl<T> From<health::ProbeSnapshot<T>> for Probe {
+    /// Drop the internal value and map the stable observation vocabulary explicitly.
+    fn from(probe: health::ProbeSnapshot<T>) -> Self {
+        Self {
+            state: match probe.state {
+                health::ProbeState::Unknown => "unknown",
+                health::ProbeState::Ok => "ok",
+                health::ProbeState::Failed => "failed",
+                health::ProbeState::Stale => "stale",
+            },
+            checked_at_ms: probe.checked_at_ms,
+            error_code: probe.error_code.map(|code| match code {
+                health::ProbeErrorCode::ProbeTimeout => "ProbeTimeout",
+                health::ProbeErrorCode::DatabaseReadFailed => "DatabaseReadFailed",
+                health::ProbeErrorCode::WorkerRpcFailed => "WorkerRpcFailed",
+                health::ProbeErrorCode::WorkerStatusUnsupported => "WorkerStatusUnsupported",
+                health::ProbeErrorCode::InvalidWorkerStatus => "InvalidWorkerStatus",
+            }),
+        }
+    }
+}
+
+/// One configured Worker with flat probe fields and optional validated status.
+#[derive(Serialize)]
+struct WorkerHealth {
+    /// Configuration-order label such as worker-1, excluding the endpoint.
+    id: String,
+    /// Metadata shared with the database observation.
+    #[serde(flatten)]
+    probe: Probe,
+    /// Fresh validated status, or explicit null for unknown, failed and stale observations.
+    status: Option<WorkerStatus>,
+}
+
+impl From<health::WorkerSnapshot> for WorkerHealth {
+    /// Preserve only the label, projected metadata and validated value.
+    fn from(worker: health::WorkerSnapshot) -> Self {
+        Self {
+            id: worker.id,
+            status: worker.probe.value.map(Into::into),
+            probe: worker.probe.into(),
+        }
+    }
+}
+
+/// Remote execution and result retention, without a synthesized health conclusion.
+#[derive(Serialize)]
+struct WorkerStatus {
+    /// Whether the Worker is stopping admission.
+    stopping: bool,
+    /// Idle, running or blocked execution occupancy.
+    execution_state: &'static str,
+    /// Terminal results awaiting explicit ACK.
+    unacknowledged_results: u64,
+    /// Positive configured result-retention ceiling.
+    unacknowledged_capacity: u64,
+}
+
+impl From<health::WorkerStatus> for WorkerStatus {
+    /// Translate occupancy vocabulary while preserving the reported counters and stop flag.
+    fn from(status: health::WorkerStatus) -> Self {
+        Self {
+            stopping: status.stopping,
+            execution_state: match status.execution_state {
+                health::ExecutionState::Idle => "idle",
+                health::ExecutionState::Running => "running",
+                health::ExecutionState::Blocked => "blocked",
+            },
+            unacknowledged_results: status.unacknowledged_results,
+            unacknowledged_capacity: status.unacknowledged_capacity,
+        }
+    }
+}
 
 /// Allowed create fields only; execution data and owner are server-controlled.
 #[derive(Deserialize)]
@@ -186,4 +327,141 @@ pub(super) struct HistoryQuery {
     pub state: Option<SubmissionState>,
     /// Optional judging conclusion.
     pub verdict: Option<Verdict>,
+}
+
+#[cfg(test)]
+mod tests {
+    //! Public health JSON contract, including fixed null fields and vocabulary.
+
+    use super::*;
+    use serde_json::json;
+
+    /// Unknown and stale values retain explicit nulls; failures expose only stable codes.
+    #[test]
+    fn health_probe_json_contract() {
+        for (state, name, checked_at_ms, error_code) in [
+            (health::ProbeState::Unknown, "unknown", None, None),
+            (health::ProbeState::Ok, "ok", Some(41), None),
+            (
+                health::ProbeState::Failed,
+                "failed",
+                Some(41),
+                Some(health::ProbeErrorCode::WorkerRpcFailed),
+            ),
+            (health::ProbeState::Stale, "stale", Some(41), None),
+        ] {
+            let probe = health::ProbeSnapshot::<health::WorkerStatus> {
+                state,
+                checked_at_ms,
+                error_code,
+                value: (state == health::ProbeState::Ok).then_some(health::WorkerStatus {
+                    stopping: false,
+                    execution_state: health::ExecutionState::Idle,
+                    unacknowledged_results: 0,
+                    unacknowledged_capacity: 128,
+                }),
+            };
+            let worker = WorkerHealth::from(health::WorkerSnapshot {
+                id: "worker-1".into(),
+                probe,
+            });
+            assert_eq!(
+                serde_json::to_value(worker).unwrap(),
+                json!({
+                    "id":"worker-1", "state":name, "checked_at_ms":checked_at_ms,
+                    "error_code":if state == health::ProbeState::Failed {Some("WorkerRpcFailed")} else {None},
+                "status":if state == health::ProbeState::Ok {json!({"stopping":false, "execution_state":"idle", "unacknowledged_results":0, "unacknowledged_capacity":128})} else {serde_json::Value::Null},
+                })
+            );
+        }
+        for (code, name) in [
+            (health::ProbeErrorCode::ProbeTimeout, "ProbeTimeout"),
+            (
+                health::ProbeErrorCode::DatabaseReadFailed,
+                "DatabaseReadFailed",
+            ),
+            (health::ProbeErrorCode::WorkerRpcFailed, "WorkerRpcFailed"),
+            (
+                health::ProbeErrorCode::WorkerStatusUnsupported,
+                "WorkerStatusUnsupported",
+            ),
+            (
+                health::ProbeErrorCode::InvalidWorkerStatus,
+                "InvalidWorkerStatus",
+            ),
+        ] {
+            let probe = Probe::from(health::ProbeSnapshot::<()> {
+                state: health::ProbeState::Failed,
+                checked_at_ms: Some(41),
+                error_code: Some(code),
+                value: None,
+            });
+            assert_eq!(
+                serde_json::to_value(probe).unwrap(),
+                json!({"state":"failed", "checked_at_ms":41, "error_code":name})
+            );
+        }
+    }
+
+    /// Local and execution enum values serialize to the fixed browser-facing vocabulary.
+    #[test]
+    fn health_state_json_contract() {
+        for (admission, name) in [
+            (health::SubmissionAdmission::Open, "open"),
+            (health::SubmissionAdmission::Full, "full"),
+            (health::SubmissionAdmission::Stopping, "stopping"),
+            (health::SubmissionAdmission::Unavailable, "unavailable"),
+        ] {
+            for (lifecycle, lifecycle_name) in [
+                (scheduler::SchedulerState::Running, "running"),
+                (scheduler::SchedulerState::Stopping, "stopping"),
+                (scheduler::SchedulerState::Stopped, "stopped"),
+            ] {
+                let body = HealthSnapshot::new(
+                    42,
+                    health::LocalSnapshot {
+                        submission_admission: admission,
+                        scheduler: scheduler::Snapshot {
+                            state: lifecycle,
+                            pending_used: 1,
+                            pending_capacity: 2,
+                        },
+                    },
+                    health::Snapshot {
+                        database: health::ProbeSnapshot {
+                            state: health::ProbeState::Ok,
+                            checked_at_ms: Some(41),
+                            error_code: None,
+                            value: Some(()),
+                        },
+                        workers: Vec::new(),
+                    },
+                );
+                assert_eq!(
+                    serde_json::to_value(body).unwrap(),
+                    json!({
+                        "snapshot_at_ms":42, "submission_admission":name,
+                        "scheduler":{"state":lifecycle_name, "pending_used":1, "pending_capacity":2},
+                        "database":{"state":"ok", "checked_at_ms":41, "error_code":null}, "workers":[],
+                    })
+                );
+            }
+        }
+        for (execution_state, name) in [
+            (health::ExecutionState::Idle, "idle"),
+            (health::ExecutionState::Running, "running"),
+            (health::ExecutionState::Blocked, "blocked"),
+        ] {
+            let status = WorkerStatus::from(health::WorkerStatus {
+                stopping: true,
+                execution_state,
+                unacknowledged_results: 2,
+                unacknowledged_capacity: 2,
+            });
+            assert_eq!(
+                serde_json::to_value(status).unwrap(),
+                json!({"stopping":true, "execution_state":name, "unacknowledged_results":2, "unacknowledged_capacity":2})
+            );
+        }
+    }
 }

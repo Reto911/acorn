@@ -5,6 +5,7 @@ use std::process::ExitCode;
 use acorn_backend::{
     config::{Cli, Config},
     database::Database,
+    health::Health,
     http, logging,
     scheduler::Scheduler,
     submissions::CreationService,
@@ -35,7 +36,7 @@ async fn run(cli: Cli) -> Result<()> {
     result
 }
 
-/// Supervise both services and drain owned creation operations before stopping tracking.
+/// Supervise business services and health collection, draining owned work before shutdown.
 async fn serve(config: &Config, database: Database) -> Result<()> {
     let interrupted = database.interrupt_in_flight().await?;
     let startup = database.queued_tasks().await?;
@@ -50,7 +51,14 @@ async fn serve(config: &Config, database: Database) -> Result<()> {
     let address = listener.local_addr()?;
     let (scheduler, mut scheduler_task) = Scheduler::start(config, database.clone(), startup)?;
     let creation = CreationService::new(config, database.clone(), scheduler.clone());
-    let router = http::router(config, database.clone(), creation.clone());
+    let (health, mut health_task) = Health::start(&config.health, database.clone(), &scheduler)?;
+    let router = http::router(
+        config,
+        database.clone(),
+        creation.clone(),
+        scheduler.clone(),
+        health.clone(),
+    );
     let (stop, stopped) = oneshot::channel();
     let mut http_task = tokio::spawn(async move {
         axum::serve(listener, router)
@@ -63,13 +71,14 @@ async fn serve(config: &Config, database: Database) -> Result<()> {
     let mut stop = Some(stop);
     let mut scheduler_finished = false;
     let mut http_finished = false;
+    let mut health_finished = false;
     let mut stopping = false;
     let mut creation_drained = false;
     let result = loop {
         tokio::select! {
             biased;
             error = database.failure() => break Err(error),
-            result = &mut scheduler_task => {
+            result = &mut scheduler_task, if !scheduler_finished => {
                 scheduler_finished = true;
                 if !stopping || !creation_drained {
                     break match result {
@@ -82,22 +91,21 @@ async fn serve(config: &Config, database: Database) -> Result<()> {
                     break Err(error);
                 }
                 let _ = stop.take().expect("HTTP stop signal is available").send(());
-                break tokio::select! {
-                    biased;
-                    error = database.failure() => Err(error),
-                    result = &mut http_task => {
-                        http_finished = true;
-                        result.context("HTTP task failed")
-                            .and_then(|result| result.context("HTTP listener failed"))
-                    },
-                };
             },
             result = &mut http_task => {
                 http_finished = true;
+                if stopping && scheduler_finished {
+                    break result.context("HTTP task failed")
+                        .and_then(|result| result.context("HTTP listener failed"));
+                }
                 break match result {
                     Ok(Err(error)) => Err(error.into()),
                     other => Err(anyhow::anyhow!("HTTP service stopped unexpectedly: {other:?}")),
                 };
+            },
+            result = &mut health_task, if !health_finished => {
+                health_finished = true;
+                observe_health_completion(result, false);
             },
             signal = stop_signal(), if !stopping => {
                 if let Err(error) = signal {
@@ -114,10 +122,11 @@ async fn serve(config: &Config, database: Database) -> Result<()> {
             },
         }
     };
-    if let Err(error) = result {
+    if let Err(error) = &result {
         tracing::error!(error = %error, "Backend fault; stopping admission and dispatch");
         creation.stop();
         scheduler.pause();
+        health.stop();
         if let Some(stop) = stop.take() {
             let _ = stop.send(());
         }
@@ -128,10 +137,28 @@ async fn serve(config: &Config, database: Database) -> Result<()> {
         if !http_finished {
             abort_task(&mut http_task, "HTTP").await;
         }
-        return Err(error);
     }
-    tracing::info!("Backend stopped");
-    Ok(())
+    health.stop();
+    if !health_finished {
+        observe_health_completion(health_task.await, true);
+    }
+    if result.is_ok() {
+        tracing::info!("Backend stopped");
+    }
+    result
+}
+
+/// Log collector completion without making an observation-task failure a business fault.
+fn observe_health_completion(
+    result: std::result::Result<Result<()>, tokio::task::JoinError>,
+    stopping: bool,
+) {
+    match result {
+        Ok(Ok(())) if stopping => tracing::info!("Health collector stopped"),
+        Ok(Ok(())) => tracing::error!("Health collector stopped unexpectedly"),
+        Ok(Err(error)) => tracing::error!(error = %error, "Health collector failed"),
+        Err(error) => tracing::error!(error = %error, "Health collector task failed"),
+    }
 }
 
 /// End local service tracking after a fatal fault, preserving secondary failure logs.

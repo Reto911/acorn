@@ -12,7 +12,7 @@
 
 前后端完全分离，后端仅提供 API，不托管前端静态文件，也不实现 CORS 中间件。HTTP 访问边界和浏览器跨域响应由部署端通过防火墙、反向代理及路由配置安排。
 
-浏览器页面、Monaco 编辑、本地草稿和提交交互见[前端 GUI 设计](05-frontend-design.md)，实施见[前端开发计划](06-frontend-development-plan.md)。核心 GUI 与提交历史使用现有 API；F08 已按[健康观测设计](07-health-observation-design.md)实现 H01 Worker 状态 RPC 和 H02 观测来源、配置及共享采集模块。当前程序入口尚未启动健康任务，HTTP 快照、入口监督与停机接线留在 H03，页面及过期警告留在 H04。
+浏览器页面、Monaco 编辑、本地草稿和提交交互见[前端 GUI 设计](05-frontend-design.md)，实施见[前端开发计划](06-frontend-development-plan.md)。核心 GUI 与提交历史使用现有 API；F08 已按[健康观测设计](07-health-observation-design.md)完成 H01–H03 的 Worker 状态 RPC、共享采集、只读 HTTP 快照、入口监督及停机接线，页面及过期警告留在 H04。
 
 执行规则以 [Worker 设计](01-worker-design.md)为准，存储结构以[数据库设计](02-database-design.md)和[建表 SQL](../sql/001-initial-schema.sql)为准。Scheduler 只有一个活动实例，与 API 一同启动和退出。
 
@@ -71,9 +71,9 @@ HTTP 层通过 `ServiceBuilder` 组合公共中间件，`TraceLayer` 统一记�
 
 完整任务包含 Submission ID、固定题目版本、语言、源码字节、有序用例和限额。源码从 HTTP 字符串按 UTF-8 编码，不调整换行、不裁剪内容；入库字节与发送给 Worker 的字节一致。
 
-HTTP 查询读取数据库中的业务状态和结果。前端轮询不触发 Worker RPC；Worker 的阶段和逐点进度不写库，首版 HTTP 也不提供这些临时信息。
+业务 HTTP 查询读取数据库中的业务状态和结果。前端轮询不触发 Worker RPC；Worker 的阶段和逐点进度不写库，首版 HTTP 也不提供这些临时信息。
 
-H02 的 [`Health::start`](../crates/backend/src/health.rs) 接受健康配置、共享数据库和 Scheduler 句柄，从 Scheduler 取得现有客户端的廉价克隆；返回缓存句柄和需由入口观察的任务。`Health::snapshot()` 只读缓存，`local_snapshot()` 读取创建服务停止标记及 Scheduler 短锁和信号量。`Health::stop()` 中断当前轮次或间隔，任务取消并等待本轮异步检查结束后返回；实际入口组装、HTTP DTO 和监督由 H03 接入。采集周期、错误码和展示规则统一遵守[健康观测设计第 4 节](07-health-observation-design.md#4-后端观测来源与采集)。
+[`Health::start`](../crates/backend/src/health.rs) 接受健康配置、共享数据库和 Scheduler 句柄，从 Scheduler 取得现有客户端的廉价克隆；返回缓存句柄和由入口监督的任务。`Health::snapshot()` 只读缓存，`local_snapshot()` 读取创建服务停止标记及 Scheduler 短锁和信号量。`Health::stop()` 中断当前轮次或间隔，任务取消并等待本轮异步检查结束后返回；H03 已在入口启动唯一采集任务，并向 HTTP 共享创建服务、Scheduler 和 Health 句柄；受控及真实 Worker 测试夹具采用同一组装契约。采集周期、错误码和展示规则统一遵守[健康观测设计第 4 节](07-health-observation-design.md#4-后端观测来源与采集)。
 
 ## 4. 数据库访问与预置数据
 
@@ -97,7 +97,7 @@ P06 的 [`Database`](../crates/backend/src/database/mod.rs) 提供题目列表�
 
 终态先由 [`TerminalOutcome`](../crates/backend/src/submissions.rs) 按已知用例数和原始字节预算校验结果形状，再执行单条条件 UPDATE，同时原子提交状态、独立 verdict、JSON 详情和终态时间。P07 的 Worker 客户端校验完整响应的 Job ID、运行状态、阶段及进度与终态消息对应关系。数据库错误保留 SQLx 原始原因，业务查重与校验错误使用独立类型；P09 在数据库操作边界区分普通只读、关键写入与严重存储故障，通过共享通知保留首个致命错误并交给入口监督，通知不依赖 HTTP 等待者的生命周期。
 
-配置示例见 [backend.example.toml](../config/backend.example.toml)。`scheduler.workers` 使用 Tonic endpoint URI；数据库路径相对于进程工作目录。HTTP 体积按源码最坏 JSON 转义开销预留，gRPC 门限按原始任务／结果另加协议空间校验，Base64 JSON 长度不复用二进制消息门限。入口完成配置、结构版本、预置用户检查和启动任务处理后，启动 Scheduler 及 HTTP 服务，不要求 Worker 启动时即可连接；新任务的实际接纳和失联仍按第 7 节处理。
+配置示例见 [backend.example.toml](../config/backend.example.toml)。`scheduler.workers` 使用 Tonic endpoint URI；数据库路径相对于进程工作目录。HTTP 体积按源码最坏 JSON 转义开销预留，gRPC 门限按原始任务／结果另加协议空间校验，Base64 JSON 长度不复用二进制消息门限。入口完成配置、结构版本、预置用户检查和启动任务处理后，启动 Scheduler、共享健康采集及 HTTP 服务，不要求 Worker 启动时即可连接；新任务的实际接纳和失联仍按第 7 节处理。
 
 ## 5. HTTP 接口
 
@@ -113,6 +113,9 @@ P06 的 [`Database`](../crates/backend/src/database/mod.rs) 提供题目列表�
 | `POST /api/v1/submissions` | 创建提交，或取得同键的已有提交 |
 | `GET /api/v1/submissions/{id}` | 返回提交身份、固定版本、语言、业务状态、判题结论、终态详情与时间戳 |
 | `GET /api/v1/submissions` | 返回配置测试用户的提交历史，可按题号、状态和 verdict 筛选 |
+| `GET /api/v1/health` | 读取本地接纳、Scheduler 及共享数据库与 Worker 观测缓存，返回 `200` 和 `Cache-Control: no-store`；字段见[健康契约](07-health-observation-design.md#5-http-契约与可见范围) |
+
+健康 GET 不执行 SQL 或 Worker RPC；`failed`、`stale`、`full` 和 `stopping` 均作为响应中的组件状态，组装失败沿用 `500 InternalError`。返回后端 UTC 组装时间及各项实际完成时间，不包含内部地址、数据库路径或原始异常。
 
 列表使用 `limit`、`offset`，默认页长和最大页长由配置提供。题目按题号排序，历史按 `created_at_ms DESC, id DESC` 排序；列表不附带源码、题面正文或终态诊断。题目查询不返回测试输入和答案。
 
@@ -274,7 +277,7 @@ gRPC deadline 覆盖单次提交、查询或 ACK；不启用应用层自动重�
 2. 打开已初始化的数据库，检查结构版本，启用外键和数据库连接配置。
 3. 将 `dispatching` 和 `running` 记录保存为 `failed / SchedulerInterrupted`，已有终态不变。
 4. 检查现有 `queued` 数量不超过待接纳上限，按 `created_at_ms, id` 装入完整任务；超限报错退出，由部署端调整上限。
-5. 创建 Worker 客户端句柄，启动 Scheduler 和 HTTP 服务；全部启动检查成功后才接纳 HTTP 提交。
+5. 创建 Worker 客户端句柄，启动 Scheduler、共享健康采集和 HTTP 服务；全部启动检查成功后才接纳 HTTP 提交。健康缓存初始可为 `unknown`，无需等待首轮探测成功。
 
 排队任务继续调度；在途旧任务不恢复、不重交、不补发 ACK。没有 Worker 可立即接纳时，排队任务留在内存等待候选地址下次可用。
 
@@ -284,13 +287,13 @@ gRPC deadline 覆盖单次提交、查询或 ACK；不启用应用层自动重�
 
 创建服务在启动短操作时登记接纳边界。已登记的操作即使尚在写事务前的幂等查询，也允许在停止新接纳后继续尝试预留名额并交接；队列容量限制仍然生效。等待期间 HTTP 查询继续可用，新创建请求返回 `503 BackendStopping`。
 
-等待已经分派的任务完成正常跟踪、结果保存和一次有 deadline 的 ACK 调用，再关闭 HTTP、SQLx 连接池和日志。明确未接纳而退回队列的任务不再分派。停止后端不向 Worker 发送远程取消请求。
+等待已经分派的任务完成正常跟踪、结果保存和一次有 deadline 的 ACK 调用，再关闭 HTTP，通知健康采集停止并等待其结束，最后关闭 SQLx 连接池和日志。等待业务收尾期间，健康采集及健康 HTTP 查询继续可用。明确未接纳而退回队列的任务不再分派。停止后端不向 Worker 发送远程取消请求。
 
 被强制终止时，下次启动仍按第 8.1 节处理，不承诺这一次等待完成。
 
 ### 8.3 数据库及后台故障
 
-连接配置有限 `busy_timeout_ms`，对 SQLite 支持的锁竞争先有限等待。运行期普通只读操作失败时，记录英文错误，当前 HTTP 操作返回 `500 InternalError`，后端继续运行。此规则覆盖题目、提交历史和结果查询，以及创建写事务开始前的幂等查询；例如查询锁等待耗尽或连接池等待超时。这类失败可能随锁释放或负载回落而恢复，单次失败不作为进程退出依据。
+连接配置有限 `busy_timeout_ms`，对 SQLite 支持的锁竞争先有限等待。运行期普通只读操作失败时，记录英文错误，当前 HTTP 操作返回 `500 InternalError`，后端继续运行。此规则覆盖题目、提交历史和结果查询，以及创建写事务开始前的幂等查询；例如查询锁等待耗尽或连接池等待超时。这类失败可能随锁释放或负载回落而恢复，单次失败不作为进程退出依据。健康读取探测的普通失败只更新缓存，健康 HTTP 读取该缓存仍返回 `200`。
 
 关键写入包括创建提交的写事务开始、执行和提交，业务状态转换、终态保存，以及启动时旧在途记录的中断写入。上述操作发生数据库错误，经过适用的有限锁等待仍无法完成时，记录英文错误并触发故障退出；未成功保存的结果不 ACK，也不能声称已将任务保存为失败。预期的查重与业务校验错误正常返回，不触发进程退出。
 
@@ -298,9 +301,9 @@ gRPC deadline 覆盖单次提交、查询或 ACK；不启用应用层自动重�
 
 有限等待是 SQLite 的连接机制，不是重新执行判题。其行为及与其他错误的区别见 [busy timeout](https://www.sqlite.org/c3ref/busy_timeout.html)与[结果码说明](https://www.sqlite.org/rescode.html)。
 
-Scheduler 后台任务意外退出交给程序入口记录错误并触发故障退出，避免 HTTP 继续接纳而没有实际调度。SQLx 操作错误按上述操作类型和故障性质处理，不将所有 SQLx 错误统一视为致命故障。
+Scheduler 后台任务意外退出交给程序入口记录错误并触发故障退出，避免 HTTP 继续接纳而没有实际调度。SQLx 操作错误按上述操作类型和故障性质处理，不将所有 SQLx 错误统一视为致命故障。健康采集任务本身异常结束时，入口记录错误而继续判题服务，不自动重建任务，已有观测随后按单调年龄投影为 `stale`；严重数据库故障仍遵守既有退出规则。
 
-故障退出时立即停止接纳新提交和启动新分派；等待已开始的短创建操作完成事务处理及收尾后，结束其余本地任务跟踪并退出后端，不等待其他 Worker 完成判题。未成功保存的结果不 ACK，Worker 侧仍可能继续执行并受其本地限额约束。该路径与第 8.2 节正常停机的完整在途等待区分。
+故障退出时立即停止接纳新提交和启动新分派，同时通知健康采集停止；等待已开始的短创建操作完成事务处理及收尾后，结束其余本地任务跟踪，等待健康采集结束后退出后端，不等待其他 Worker 完成判题。未成功保存的结果不 ACK，Worker 侧仍可能继续执行并受其本地限额约束。该路径与第 8.2 节正常停机的完整在途等待区分。
 
 故障退出不进入通用自动重试或修复循环。部署修复并重启后按第 8.1 节处理已有记录。此策略定义首版错误边界，后续改变恢复要求时单独设计。
 

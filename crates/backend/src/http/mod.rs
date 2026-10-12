@@ -1,9 +1,12 @@
-//! Six JSON API routes, bounded extraction and explicit public response DTOs.
+//! Business and health JSON routes, bounded extraction and explicit public response DTOs.
 
 mod dto;
 mod error;
 
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use axum::{
     Json, Router,
@@ -22,11 +25,13 @@ use uuid::Uuid;
 use crate::{
     config::Config,
     database::Database,
+    health::{self, Health},
+    scheduler::Scheduler,
     submissions::{CreateSubmission, CreationService, SubmissionFilter},
 };
 use error::ApiError;
 
-/// Shared request state; queries read only the persisted database view.
+/// Shared request state for persisted business data and passive health observations.
 #[derive(Clone)]
 struct AppState {
     /// Deployment settings, not request-controlled execution parameters.
@@ -35,16 +40,29 @@ struct AppState {
     database: Database,
     /// Independently owned transaction-and-handoff service.
     creation: CreationService,
+    /// Local lifecycle and capacity, shared with dispatch and creation.
+    scheduler: Scheduler,
+    /// The single collector's cache; HTTP never initiates a probe.
+    health: Health,
 }
 
 /// Build the API with common body limits, English JSON errors and request tracing.
-pub fn router(config: &Config, database: Database, creation: CreationService) -> Router {
+pub fn router(
+    config: &Config,
+    database: Database,
+    creation: CreationService,
+    scheduler: Scheduler,
+    health: Health,
+) -> Router {
     let state = AppState {
         config: Arc::new(config.clone()),
         database,
         creation,
+        scheduler,
+        health,
     };
     Router::new()
+        .route("/api/v1/health", get(get_health))
         .route("/api/v1/problems", get(list_problems))
         .route("/api/v1/problems/{id}", get(problem))
         .route("/api/v1/problems/{id}/versions/{version_no}", get(problem_version))
@@ -59,6 +77,28 @@ pub fn router(config: &Config, database: Database, creation: CreationService) ->
             })
             .on_response(DefaultOnResponse::new().level(tracing::Level::INFO))))
         .with_state(state)
+}
+
+/// Return passive component observations with no-store even if response assembly fails.
+async fn get_health(State(state): State<AppState>) -> Response {
+    (
+        [(header::CACHE_CONTROL, "no-store")],
+        health_snapshot(&state).map(Json),
+    )
+        .into_response()
+}
+
+/// Assemble the documented public fields with a real backend UTC snapshot timestamp.
+fn health_snapshot(state: &AppState) -> Result<dto::HealthSnapshot, ApiError> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(ApiError::internal)?;
+    let snapshot_at_ms = i64::try_from(elapsed.as_millis()).map_err(ApiError::internal)?;
+    Ok(dto::HealthSnapshot::new(
+        snapshot_at_ms,
+        health::local_snapshot(&state.creation, &state.scheduler),
+        state.health.snapshot(),
+    ))
 }
 
 /// Apply the configured default and reject invalid explicit pagination values.

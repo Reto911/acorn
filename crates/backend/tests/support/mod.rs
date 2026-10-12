@@ -14,8 +14,9 @@ use std::{
 };
 
 use acorn_backend::{
-    config::Config,
+    config::{Config, HealthConfig},
     database::Database,
+    health::Health,
     http,
     scheduler::Scheduler,
     submissions::{CreateSubmission, CreationService, Submission, SubmissionState},
@@ -162,6 +163,8 @@ impl BackendProcess {
             (fixture.config.scheduler.poll_interval_ms as i64).into();
         config["scheduler"]["retry_interval_ms"] =
             (fixture.config.scheduler.retry_interval_ms as i64).into();
+        config["health"]["interval_ms"] = (fixture.config.health.interval_ms as i64).into();
+        config["health"]["timeout_ms"] = (fixture.config.health.timeout_ms as i64).into();
         let path = fixture
             .directory
             .path()
@@ -486,18 +489,32 @@ pub struct Harness {
     pub scheduler: Scheduler,
     /// Production owned creation service.
     pub creation: CreationService,
+    /// The same passive cache exposed by the production router.
+    pub health: Health,
     /// Production HTTP routes invoked as Tower requests.
     pub app: Router,
     /// Independently controlled Worker endpoints.
     pub servers: Vec<RpcServer>,
     /// Production dispatcher task, observed at cleanup.
     task: JoinHandle<anyhow::Result<()>>,
+    /// Collector observed once, including tests that stop it before full teardown.
+    health_task: Option<JoinHandle<anyhow::Result<()>>>,
 }
 
 impl Harness {
     /// Assemble all services with slow retry so busy-refusal assertions stay deterministic.
     pub async fn start(modes: &[Mode], capacity: u32) -> Self {
+        Self::start_with_health(modes, capacity, HealthConfig::default()).await
+    }
+
+    /// Assemble the same services with a test-selected collection cadence and budget.
+    pub async fn start_with_health(
+        modes: &[Mode],
+        capacity: u32,
+        health_config: HealthConfig,
+    ) -> Self {
         let mut fixture = Fixture::new().await;
+        fixture.config.health = health_config;
         fixture.config.scheduler.pending_max_count = capacity;
         fixture.config.scheduler.retry_interval_ms = 60_000;
         fixture.config.scheduler.poll_interval_ms = 10;
@@ -513,14 +530,24 @@ impl Harness {
             Scheduler::start(&fixture.config, fixture.database.clone(), Vec::new()).unwrap();
         let creation =
             CreationService::new(&fixture.config, fixture.database.clone(), scheduler.clone());
-        let app = http::router(&fixture.config, fixture.database.clone(), creation.clone());
+        let (health, health_task) =
+            Health::start(&fixture.config.health, fixture.database.clone(), &scheduler).unwrap();
+        let app = http::router(
+            &fixture.config,
+            fixture.database.clone(),
+            creation.clone(),
+            scheduler.clone(),
+            health.clone(),
+        );
         Self {
             fixture,
             scheduler,
             creation,
+            health,
             app,
             servers,
             task,
+            health_task: Some(health_task),
         }
     }
 
@@ -567,7 +594,7 @@ impl Harness {
     }
 
     /// Drain owned creation and tracking before closing transport and database.
-    pub async fn close(self) {
+    pub async fn close(mut self) {
         self.creation.stop();
         self.scheduler.pause();
         self.creation.wait_idle().await;
@@ -575,11 +602,12 @@ impl Harness {
             server.mock.released.store(true, Ordering::SeqCst);
         }
         self.scheduler.shutdown();
-        tokio::time::timeout(Duration::from_secs(5), self.task)
+        tokio::time::timeout(Duration::from_secs(5), &mut self.task)
             .await
             .unwrap()
             .unwrap()
             .unwrap();
+        self.stop_health().await;
         for server in self.servers {
             server.close().await;
         }
@@ -587,18 +615,32 @@ impl Harness {
     }
 
     /// Observe an expected fatal dispatcher error rather than claiming normal shutdown.
-    pub async fn close_failed(self) {
+    pub async fn close_failed(mut self) {
         self.creation.stop();
+        self.health.stop();
         self.creation.wait_idle().await;
         assert!(
-            tokio::time::timeout(Duration::from_secs(5), self.task)
+            tokio::time::timeout(Duration::from_secs(5), &mut self.task)
                 .await
                 .unwrap()
                 .unwrap()
                 .is_err()
         );
+        self.stop_health().await;
         for server in self.servers {
             server.close().await;
+        }
+    }
+
+    /// Stop and observe the collector before closing its shared database or endpoints.
+    pub async fn stop_health(&mut self) {
+        self.health.stop();
+        if let Some(task) = self.health_task.take() {
+            tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
         }
     }
 }

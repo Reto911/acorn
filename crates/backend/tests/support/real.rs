@@ -2,7 +2,7 @@
 
 use std::{net::SocketAddr, time::Duration};
 
-use acorn_backend::{http, scheduler::Scheduler, submissions::CreationService};
+use acorn_backend::{health::Health, http, scheduler::Scheduler, submissions::CreationService};
 use acorn_protocol::worker::v1::judge_worker_client::JudgeWorkerClient;
 use acorn_worker::{config::Config as WorkerConfig, rpc::WorkerService};
 use serde_json::{Value, json};
@@ -91,6 +91,10 @@ pub struct RealHarness {
     creation: CreationService,
     /// Dispatcher task observed at teardown.
     scheduler_task: JoinHandle<anyhow::Result<()>>,
+    /// Shared collector exposed by the actual HTTP listener.
+    health: Health,
+    /// Collector joined after HTTP ends and before database closure.
+    health_task: JoinHandle<anyhow::Result<()>>,
     /// Stop HTTP after all business operations finish.
     http_stop: oneshot::Sender<()>,
     /// Observe HTTP transport failures during teardown.
@@ -111,7 +115,15 @@ impl RealHarness {
             Scheduler::start(&fixture.config, fixture.database.clone(), Vec::new()).unwrap();
         let creation =
             CreationService::new(&fixture.config, fixture.database.clone(), scheduler.clone());
-        let app = http::router(&fixture.config, fixture.database.clone(), creation.clone());
+        let (health, health_task) =
+            Health::start(&fixture.config.health, fixture.database.clone(), &scheduler).unwrap();
+        let app = http::router(
+            &fixture.config,
+            fixture.database.clone(),
+            creation.clone(),
+            scheduler.clone(),
+            health.clone(),
+        );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (http_stop, stopped) = oneshot::channel();
@@ -129,6 +141,8 @@ impl RealHarness {
             address,
             creation,
             scheduler_task,
+            health,
+            health_task,
             http_stop,
             http_task,
         }
@@ -190,6 +204,8 @@ impl RealHarness {
         self.scheduler_task.await.unwrap().unwrap();
         self.http_stop.send(()).unwrap();
         self.http_task.await.unwrap().unwrap();
+        self.health.stop();
+        self.health_task.await.unwrap().unwrap();
         for worker in self.workers {
             worker.close().await;
         }
