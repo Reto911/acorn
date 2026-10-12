@@ -226,6 +226,71 @@ h1 {
   text-align: center;
 }
 
+.runtime-error,
+.pending-submission {
+  margin-bottom: 24px;
+}
+
+.pending-submission {
+  display: grid;
+  gap: 16px;
+}
+
+.pending-request {
+  padding: 20px;
+  background: #fff8e9;
+  border: 1px solid #ecd8ad;
+  border-radius: 8px;
+}
+
+.pending-request h2 {
+  font-size: 16px;
+}
+
+.pending-request p,
+.request-error p {
+  margin-top: 8px;
+  line-height: 1.8;
+}
+
+.pending-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+  font-size: 14px;
+}
+
+.pending-actions .el-button + .el-button {
+  margin-left: 0;
+}
+
+.request-loading {
+  padding: 24px;
+  color: #68756c;
+  text-align: center;
+}
+
+.request-empty > p {
+  padding: 0 20px 24px;
+  color: #758178;
+  text-align: center;
+}
+
+.request-details {
+  margin-top: 8px;
+  overflow-wrap: anywhere;
+}
+
+.request-details summary {
+  cursor: pointer;
+}
+
+.feedback-action {
+  margin-top: 12px;
+}
+
 @media (max-width: 1023px) {
   .solve-layout {
     grid-template-columns: minmax(0, 1fr);

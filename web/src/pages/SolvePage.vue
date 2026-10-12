@@ -2,6 +2,7 @@
 import { defineAsyncComponent } from 'vue'
 import { ElEmpty } from 'element-plus'
 import { RouterLink, useRoute } from 'vue-router'
+import PendingSubmissionNotice from '../components/PendingSubmissionNotice.vue'
 import 'element-plus/es/components/empty/style/css'
 
 const route = useRoute()
@@ -17,6 +18,7 @@ const CodeEditor = defineAsyncComponent(
       <h1 id="page-title">题目 #{{ route.params.problemId }}</h1>
       <p>题面、语言选择与提交功能正在接入。</p>
     </div>
+    <PendingSubmissionNotice />
     <div class="solve-layout">
       <section class="surface" aria-labelledby="statement-title">
         <div class="panel-heading"><h2 id="statement-title">题面</h2></div>

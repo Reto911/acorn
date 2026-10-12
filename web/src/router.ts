@@ -21,6 +21,7 @@ export const router = createRouter({
     },
     {
       path: '/submissions/:submissionId',
+      name: 'result',
       component: () => import('./pages/ResultPage.vue'),
       meta: { title: '提交结果' },
     },

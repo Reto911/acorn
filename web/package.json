@@ -16,7 +16,7 @@
     "lint": "eslint . --max-warnings 0",
     "typecheck": "vue-tsc --noEmit",
     "build": "pnpm typecheck && vite build",
-    "test": "vitest run --passWithNoTests",
+    "test": "vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {

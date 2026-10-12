@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { ElConfigProvider } from 'element-plus'
+import { ElAlert, ElConfigProvider } from 'element-plus'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import { RouterLink, RouterView, useRoute } from 'vue-router'
+import { dismissRuntimeError, runtimeErrorVisible } from './utils/browserErrors'
+import 'element-plus/es/components/alert/style/css'
 
 const route = useRoute()
 </script>
@@ -39,6 +41,15 @@ const route = useRoute()
       </div>
     </header>
     <main id="main-content" class="main-content" tabindex="-1">
+      <ElAlert
+        v-if="runtimeErrorVisible"
+        class="runtime-error"
+        title="页面遇到错误，部分操作可能未完成"
+        description="请先保留当前编辑内容，再重试刚才的操作；若持续出现，请联系维护者。"
+        type="error"
+        show-icon
+        @close="dismissRuntimeError"
+      />
       <RouterView />
     </main>
     <footer class="app-footer">Acorn · C / Python 3 单文件判题</footer>
