@@ -291,6 +291,104 @@ h1 {
   margin-top: 12px;
 }
 
+.query-feedback {
+  padding: 20px;
+}
+
+.query-feedback:empty {
+  display: none;
+}
+
+.solve-feedback {
+  margin-bottom: 24px;
+}
+
+.stale-notice {
+  margin: 16px 0;
+  color: #8a641f;
+  font-size: 14px;
+  line-height: 1.8;
+}
+
+.problem-title {
+  overflow-wrap: anywhere;
+}
+
+.list-pagination {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px;
+  border-top: 1px solid #edf0eb;
+}
+
+.problem-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  margin-top: 12px;
+  font-size: 14px;
+}
+
+.version-label {
+  color: #68756c;
+}
+
+.language-limits {
+  padding: 20px;
+  border-bottom: 1px solid #edf0eb;
+}
+
+.language-limits h3 {
+  margin: 0 0 16px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.language-limit + .language-limit {
+  margin-top: 16px;
+}
+
+.language-limit h4 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+
+.language-limit dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0;
+  font-size: 13px;
+}
+
+.language-limit dt {
+  margin-bottom: 4px;
+  color: #758178;
+}
+
+.language-limit dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.language-limits > p {
+  margin-top: 16px;
+  color: #758178;
+  font-size: 12px;
+  line-height: 1.8;
+}
+
+@media (min-width: 1024px) {
+  .statement-scroll {
+    max-height: max(480px, calc(100vh - 300px));
+    overflow-y: auto;
+  }
+}
+
 @media (max-width: 1023px) {
   .solve-layout {
     grid-template-columns: minmax(0, 1fr);

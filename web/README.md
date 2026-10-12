@@ -1,14 +1,16 @@
 # Acorn 前端
 
-独立的 Vue 3 + TypeScript 浏览器工程。当前完成 F01–F02：中文浅色页面骨架、路由懒加载、本地 Monaco 和编辑器 Worker，以及 HTTP 客户端、查询生命周期、中文错误、浏览器日志和待完成提交请求的恢复/重试/放弃入口。编辑器暂为只读；题目展示、主动提交、草稿与结果轮询分别在 F03–F06 接入，页面不使用模拟业务数据。
+独立的 Vue 3 + TypeScript 浏览器工程。当前完成 F01–F03：中文浅色页面骨架、路由懒加载、本地 Monaco 和编辑器 Worker，HTTP 客户端与提交请求恢复/重试/放弃入口，以及真实题目列表、分页、Markdown 题面和语言限额。编辑器暂为只读；主动提交、草稿、结果轮询与历史在 F04–F06 接入，页面不使用模拟业务数据。
 
 设计和任务依据见[前端 GUI 设计](../docs/05-frontend-design.md)和[前端开发计划](../docs/06-frontend-development-plan.md)。
+
+GUI 仅面向桌面浏览器，支持与验收视口宽度不小于 1024 CSS px。移动端及更窄视口不在适配、测试或交付范围，无需检查手机竖屏效果；已有窄屏样式不构成支持承诺或后续维护要求。
 
 ## 环境与安装
 
 - Node.js：24.x，至少 24.21.0；本任务使用 24.21.0，`.nvmrc` 固定该版本。
 - pnpm：12.11.2，`package.json` 的 `packageManager` 固定版本。
-- Vue 3.5.43、Vue Router 4.6.4、Element Plus 2.14.7、Monaco 0.57.0、Vite 8.3.4、TypeScript 6.0.3、Vitest 5.0.4；完整依赖版本见 `package.json` 和 `pnpm-lock.yaml`。
+- Vue 3.5.43、Vue Router 4.6.4、Element Plus 2.14.7、Monaco 0.57.0、markdown-it 15.0.2、Vite 8.3.4、TypeScript 6.0.3、Vitest 5.0.4；完整依赖版本见 `package.json` 和 `pnpm-lock.yaml`。
 
 在本目录执行：
 
@@ -39,7 +41,7 @@ pnpm dev
 curl --fail-with-body http://localhost:5173/api/v1/problems
 ```
 
-应取得真实后端的 `items`、`limit`、`offset` 分页 JSON。题目列表界面在 F03 接入；目前页面骨架可用与 API 连通分别检查。此请求只证明题目 API 可访问，不代表 Worker 健康。
+应取得真实后端的 `items`、`limit`、`offset` 分页 JSON。打开 `/problems` 可浏览真实题目，再点击标题读取题面和语言限额；这些只读功能不需要 Worker。题目 API 可访问不代表 Worker 健康。
 
 `VITE_` 变量属于公开构建配置，不能放入秘密。源码上限需与后端 `[request].source_max_bytes` 对齐；生产配置必须在构建时提供，部署后修改 `.env.local` 不会改变已有产物。后端始终执行最终校验。
 
@@ -55,9 +57,17 @@ pnpm build
 pnpm test
 ```
 
-`pnpm format` 可格式化前端文件；锁文件由 pnpm 生成，不手工格式化。`pnpm build` 包含类型检查，产物为 `dist/`。`pnpm test` 单次运行 Vitest，`pnpm test:watch` 用于开发期间监听。F02 已有 4 个 `src/**/*.test.ts` 文件、36 项 HTTP、请求快照、查询生命周期与日志测试，不再允许空测试集作为成功检查；草稿和结果轮询测试随对应任务加入。
+`pnpm format` 可格式化前端文件；锁文件由 pnpm 生成，不手工格式化。`pnpm build` 包含类型检查，产物为 `dist/`。`pnpm test` 单次运行 Vitest，`pnpm test:watch` 用于开发期间监听。当前有 5 个 `src/**/*.test.ts` 文件、38 项测试：F02 的 36 项 HTTP、请求快照、查询生命周期与日志测试，以及 F03 的 2 项题面格式和展示安全测试。草稿和结果轮询测试随对应任务加入。
 
 纯前端变更使用这些检查及相关验证，不重复运行 Rust/Isolate 验收；如果修改 Rust，仍遵守仓库规定的格式、编译、Clippy 和相关测试要求。
+
+## 题目浏览与题面
+
+`/problems` 显示题号、标题和最新版本，使用后端分页，不依赖总条数。直接进入时省略未指定的分页参数，采用后端默认值；上一页/下一页将生效的 `limit` 和目标 `offset` 写入 URL，刷新和前进后退可恢复位置。恰好整页后的空页保留上一页入口，空题库与请求失败分别提示。刷新失败保留最近成功数据并标明可能过期，用户可手动重试。
+
+`/problems/:problemId` 读取最新题面，展示当前版本和接口返回的允许语言及单用例 CPU、墙钟、内存限额，时间显示 ms，内存由 KiB 换算为 MiB。题面由 `ProblemStatement.vue` 使用 markdown-it 解析，禁用原始 HTML，保留默认危险链接过滤，不编译其中的 Vue 表达式。桌面采用双栏布局，题面区可独立滚动。题目不存在或首次读取失败时不显示编辑区。
+
+“本题提交记录”入口携带 `problem_id`，历史页面业务在 F06 接入。当前编辑器只读，语言选择、草稿和主动提交在 F04 实现；提交请求仍由后端在创建时选择最新版本，页面展示版本不锁定执行版本。
 
 ## HTTP 与待完成的提交请求
 
