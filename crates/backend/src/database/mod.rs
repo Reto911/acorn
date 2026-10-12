@@ -4,6 +4,7 @@ mod problems;
 mod submissions;
 
 use std::{
+    future::Future,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -12,6 +13,7 @@ use sqlx::{
     SqlitePool,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
 };
+use tokio::sync::watch;
 
 use crate::config::Config;
 
@@ -57,6 +59,8 @@ pub struct Database {
     pool: SqlitePool,
     /// Fixed owner and deployment resource ceilings.
     config: Arc<Config>,
+    /// First fatal storage error, retained for process supervision beyond HTTP disconnects.
+    failure: watch::Sender<Option<String>>,
 }
 
 impl Database {
@@ -102,7 +106,45 @@ impl Database {
         Ok(Self {
             pool,
             config: Arc::new(config.clone()),
+            failure: watch::channel(None).0,
         })
+    }
+
+    /// Wait for the first fatal operation, including one reported before subscribing.
+    pub async fn failure(&self) -> anyhow::Error {
+        let mut receiver = self.failure.subscribe();
+        let error = receiver
+            .wait_for(Option::is_some)
+            .await
+            .expect("Database retains the failure sender")
+            .as_ref()
+            .expect("Failure notification contains an error")
+            .clone();
+        anyhow::anyhow!(error)
+    }
+
+    /// Report storage failures at operation boundaries while preserving the original result.
+    async fn observe<T>(
+        &self,
+        operation: &'static str,
+        critical_write: bool,
+        future: impl Future<Output = Result<T>>,
+    ) -> Result<T> {
+        let result = future.await;
+        if let Err(Error::Sql(error)) = &result {
+            let fatal = critical_write || severe_storage_error(error);
+            tracing::error!(operation, fatal, error = %error, "Database operation failed");
+            if fatal {
+                self.failure.send_if_modified(|failure| {
+                    if failure.is_some() {
+                        return false;
+                    }
+                    *failure = Some(format!("{operation}: {error}"));
+                    true
+                });
+            }
+        }
+        result
     }
 
     /// Await release and closure of the shared connection at process shutdown.
@@ -125,10 +167,73 @@ impl Database {
     }
 }
 
+/// Recognize direct SQLx I/O errors and SQLite I/O, corruption, disk-full or invalid-file codes.
+///
+/// Extended SQLite codes retain the primary code in their least significant byte.
+fn severe_storage_error(error: &sqlx::Error) -> bool {
+    matches!(error, sqlx::Error::Io(_))
+        || error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .and_then(|code| code.parse::<i32>().ok())
+            .is_some_and(|code| matches!(code & 0xff, 10 | 11 | 13 | 26))
+}
+
 /// Current UTC Unix milliseconds, with no fabricated fallback timestamp.
 fn now_ms() -> Result<i64> {
     let elapsed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| Error::Data(error.into()))?;
     i64::try_from(elapsed.as_millis()).map_err(|error| Error::Data(error.into()))
+}
+
+#[cfg(test)]
+mod tests {
+    //! Fatal storage classification uses a real SQLite invalid-file error.
+
+    use super::*;
+
+    /// A read encountering a corrupt database notifies supervision and preserves its error.
+    #[tokio::test]
+    async fn severe_read_failure_notifies_supervision() {
+        let directory = tempfile::tempdir().unwrap();
+        let corrupt = directory.path().join("corrupt.db");
+        std::fs::write(&corrupt, [0xff; 4096]).unwrap();
+        let database = Database {
+            pool: SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(
+                    SqliteConnectOptions::new()
+                        .filename(directory.path().join("healthy.db"))
+                        .create_if_missing(true),
+                )
+                .await
+                .unwrap(),
+            config: Arc::new(
+                Config::parse(include_str!("../../../../config/backend.example.toml")).unwrap(),
+            ),
+            failure: watch::channel(None).0,
+        };
+        let result = database
+            .observe("Read corrupt database", false, async {
+                sqlx::query("ATTACH DATABASE ? AS corrupt")
+                    .bind(corrupt.to_str().unwrap())
+                    .execute(&database.pool)
+                    .await?;
+                sqlx::query("SELECT * FROM corrupt.sqlite_schema")
+                    .fetch_all(&database.pool)
+                    .await?;
+                Ok(())
+            })
+            .await;
+        assert!(
+            matches!(&result, Err(Error::Sql(error)) if severe_storage_error(error)),
+            "{result:?}"
+        );
+        let error = tokio::time::timeout(Duration::from_secs(1), database.failure())
+            .await
+            .unwrap();
+        assert!(error.to_string().contains("not a database"), "{error}");
+        database.close().await;
+    }
 }

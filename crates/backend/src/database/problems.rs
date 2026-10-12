@@ -10,10 +10,13 @@ use super::{Database, Error, Result};
 impl Database {
     /// List only published current versions in problem-number order.
     pub async fn list_problems(&self, limit: u32, offset: u64) -> Result<Vec<ProblemSummary>> {
-        let (limit, offset) = self.page(limit, offset)?;
-        let rows = sqlx::query("SELECT p.id AS problem_id, v.version_no, v.title FROM problems p JOIN problem_versions v ON v.problem_id = p.id AND v.version_no = p.current_version_no ORDER BY p.id LIMIT ? OFFSET ?")
-            .bind(limit).bind(offset).fetch_all(&self.pool).await?;
-        rows.iter().map(summary).collect()
+        self.observe("Read problem list", false, async {
+            let (limit, offset) = self.page(limit, offset)?;
+            let rows = sqlx::query("SELECT p.id AS problem_id, v.version_no, v.title FROM problems p JOIN problem_versions v ON v.problem_id = p.id AND v.version_no = p.current_version_no ORDER BY p.id LIMIT ? OFFSET ?")
+                .bind(limit).bind(offset).fetch_all(&self.pool).await?;
+            rows.iter().map(summary).collect()
+        })
+        .await
     }
 
     /// Read the current published version without exposing its private test data.
@@ -36,21 +39,24 @@ impl Database {
         problem_id: i64,
         version: Option<i64>,
     ) -> Result<Option<ProblemVersion>> {
-        let mut connection = self.pool.acquire().await?;
-        let row = sqlx::query("SELECT v.problem_id, v.version_no, v.title, v.statement, v.comparison_mode, v.published_at_ms FROM problems p JOIN problem_versions v ON v.problem_id = p.id AND v.version_no = COALESCE(?, p.current_version_no) WHERE p.id = ?")
-            .bind(version).bind(problem_id).fetch_optional(&mut *connection).await?;
-        let Some(row) = row else {
-            return Ok(None);
-        };
-        let summary = summary(&row)?;
-        let languages = language_limits(&mut connection, problem_id, summary.version_no).await?;
-        Ok(Some(ProblemVersion {
-            summary,
-            statement: row.try_get("statement")?,
-            comparison_mode: row.try_get("comparison_mode")?,
-            published_at_ms: row.try_get("published_at_ms")?,
-            languages,
-        }))
+        self.observe("Read problem version", false, async {
+            let mut connection = self.pool.acquire().await?;
+            let row = sqlx::query("SELECT v.problem_id, v.version_no, v.title, v.statement, v.comparison_mode, v.published_at_ms FROM problems p JOIN problem_versions v ON v.problem_id = p.id AND v.version_no = COALESCE(?, p.current_version_no) WHERE p.id = ?")
+                .bind(version).bind(problem_id).fetch_optional(&mut *connection).await?;
+            let Some(row) = row else {
+                return Ok(None);
+            };
+            let summary = summary(&row)?;
+            let languages = language_limits(&mut connection, problem_id, summary.version_no).await?;
+            Ok(Some(ProblemVersion {
+                summary,
+                statement: row.try_get("statement")?,
+                comparison_mode: row.try_get("comparison_mode")?,
+                published_at_ms: row.try_get("published_at_ms")?,
+                languages,
+            }))
+        })
+        .await
     }
 }
 

@@ -177,13 +177,13 @@ impl CreationService {
                 });
             }
         }
-        let permit = self
-            .scheduler
-            .reserve()
-            .map_err(|cause| CreationError::Admission {
-                cause,
-                submission_id: existing.as_ref().map(|existing| existing.info.id.clone()),
-            })?;
+        let permit =
+            self.scheduler
+                .reserve_started()
+                .map_err(|cause| CreationError::Admission {
+                    cause,
+                    submission_id: existing.as_ref().map(|existing| existing.info.id.clone()),
+                })?;
         let mut created = self.database.create_submission(request).await?;
         if let Some(task) = created.task.take() {
             self.scheduler

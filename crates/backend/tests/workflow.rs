@@ -1,4 +1,4 @@
-//! P07/P08 contracts over real SQLite, production HTTP routes and controlled gRPC.
+//! P07–P09 contracts over real SQLite, backend processes, HTTP routes and controlled gRPC.
 
 mod support;
 
@@ -15,7 +15,9 @@ use axum::{
 };
 use serde_json::{Value, json};
 use sqlx::Connection;
-use support::{Harness, Mode, call, create, wait_for};
+use support::{
+    BackendProcess, Fixture, Harness, Mode, RpcServer, call, create, network_call, wait_for,
+};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -706,6 +708,375 @@ async fn database_failure_ends_tracking_without_ack() {
     harness.close_failed().await;
 }
 
+/// Startup loads fixed-version tasks in order, accounts for permits and never contacts old work.
+#[tokio::test]
+async fn process_startup_loads_queue_and_interrupts_in_flight() {
+    let mut fixture = Fixture::new().await;
+    fixture.config.scheduler.pending_max_count = 2;
+    fixture.config.scheduler.poll_interval_ms = 10;
+    let dispatching = fixture.queued("c").await;
+    let running = fixture.queued("python").await;
+    let finished = fixture.queued("c").await;
+    for id in [&dispatching, &running, &finished] {
+        assert!(fixture.database.mark_dispatching(id).await.unwrap());
+    }
+    assert!(fixture.database.mark_running(&running).await.unwrap());
+    let terminal = TerminalOutcome::judged(
+        &JudgeResult {
+            verdict: RpcVerdict::Accepted as i32,
+            ..Default::default()
+        },
+        4,
+        &fixture.config.results,
+    )
+    .unwrap();
+    fixture
+        .database
+        .save_terminal(&finished, &terminal)
+        .await
+        .unwrap();
+    let previous_terminal = fixture.database.submission(&finished).await.unwrap();
+    let first = fixture.queued("c").await;
+    let second = fixture.queued("python").await;
+    let expected = fixture
+        .database
+        .queued_tasks()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|task| task.request.job_id)
+        .collect::<Vec<_>>();
+    fixture.publish_next().await;
+    let server = RpcServer::start(Mode::AwaitAdmission, fixture.database.clone()).await;
+    fixture.config.scheduler.workers = vec![server.address.clone()];
+    let mut backend = BackendProcess::spawn(&fixture);
+    let address = backend.listening().await;
+    wait_for(|| server.mock.submits.load(Ordering::SeqCst) == 1).await;
+    let (status, body) = network_call(
+        address,
+        "POST",
+        "/api/v1/submissions",
+        Some(json!({"problem_id":1,"language_id":"c","source":"ac"})),
+        Some(Uuid::new_v4()),
+    )
+    .await;
+    assert_eq!(status, 503);
+    assert_eq!(body["error"]["code"], "QueueFull");
+    for id in [&dispatching, &running] {
+        let stored = fixture.database.submission(id).await.unwrap().unwrap();
+        assert_eq!(stored.info.state, SubmissionState::Failed);
+        let Some(TerminalDetails::Failure(failure)) = stored.terminal_details else {
+            panic!("Expected startup interruption");
+        };
+        assert_eq!(failure.code, "SchedulerInterrupted");
+    }
+    assert_eq!(
+        fixture.database.submission(&finished).await.unwrap(),
+        previous_terminal
+    );
+    server.mock.released.store(true, Ordering::SeqCst);
+    wait_for(|| server.mock.acks.load(Ordering::SeqCst) == 2).await;
+    assert_eq!(*server.mock.submission_order.lock().unwrap(), expected);
+    {
+        let submitted = server.mock.submitted.lock().unwrap();
+        assert_eq!(submitted.len(), 2);
+        for (id, cpu_time_ms) in [(&first, 1000), (&second, 2000)] {
+            assert_eq!(
+                submitted[id].run_limits.as_ref().unwrap().cpu_time_ms,
+                cpu_time_ms
+            );
+        }
+    }
+    backend.terminate();
+    let (status, logs) = backend.finish().await;
+    assert_eq!(status.code(), Some(0), "{logs}");
+    server.close().await;
+    fixture.database.close().await;
+}
+
+/// Excess queued work aborts startup before HTTP or any Worker RPC can begin.
+#[tokio::test]
+async fn process_rejects_startup_queue_overflow() {
+    let mut fixture = Fixture::new().await;
+    fixture.queued("c").await;
+    fixture.queued("python").await;
+    fixture.config.scheduler.pending_max_count = 1;
+    let server = RpcServer::start(Mode::Finish, fixture.database.clone()).await;
+    fixture.config.scheduler.workers = vec![server.address.clone()];
+    let (status, logs) = BackendProcess::spawn(&fixture).finish().await;
+    assert_eq!(status.code(), Some(1), "{logs}");
+    assert!(logs.contains("increase the configured limit"), "{logs}");
+    assert!(!logs.contains("Backend HTTP listening"));
+    assert_eq!(server.mock.submits.load(Ordering::SeqCst), 0);
+    server.close().await;
+    fixture.database.close().await;
+}
+
+/// Ordinary query and preflight lock failures return 500 and recover after the external unlock.
+#[tokio::test]
+async fn process_read_failures_keep_serving() {
+    let mut fixture = Fixture::new().await;
+    fixture.config.database.busy_timeout_ms = 75;
+    let mut backend = BackendProcess::spawn(&fixture);
+    let address = backend.listening().await;
+    let mut connection = fixture.connection().await;
+    sqlx::query("BEGIN EXCLUSIVE")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    let (status, body) = network_call(address, "GET", "/api/v1/problems", None, None).await;
+    assert_eq!(status, 500);
+    assert_eq!(body["error"]["code"], "InternalError");
+    let (status, body) = network_call(
+        address,
+        "POST",
+        "/api/v1/submissions",
+        Some(json!({"problem_id":1,"language_id":"python","source":"ac"})),
+        Some(Uuid::new_v4()),
+    )
+    .await;
+    assert_eq!(status, 500);
+    assert_eq!(body["error"]["code"], "InternalError");
+    sqlx::query("ROLLBACK")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(
+        network_call(address, "GET", "/api/v1/problems", None, None)
+            .await
+            .0,
+        200
+    );
+    backend.terminate();
+    let (status, logs) = backend.finish().await;
+    assert_eq!(status.code(), Some(0), "{logs}");
+    assert!(logs.contains("Read problem list"));
+    assert!(logs.contains("Read creation key"));
+    connection.close().await.unwrap();
+    fixture.database.close().await;
+}
+
+/// Failed creation writes exit promptly even while an unrelated Worker remains running.
+#[tokio::test]
+async fn process_creation_failure_exits_without_draining_workers() {
+    use tokio::io::AsyncWriteExt;
+    let mut fixture = Fixture::new().await;
+    fixture.config.database.busy_timeout_ms = 75;
+    let running = fixture.queued("python").await;
+    let server = RpcServer::start(Mode::Running, fixture.database.clone()).await;
+    fixture.config.scheduler.workers = vec![server.address.clone()];
+    let mut backend = BackendProcess::spawn(&fixture);
+    let address = backend.listening().await;
+    wait_for(|| server.mock.gets.load(Ordering::SeqCst) > 0).await;
+    let mut connection = fixture.connection().await;
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    let key = Uuid::new_v4();
+    let body = json!({"problem_id":1,"language_id":"c","source":"ac"}).to_string();
+    let request = format!(
+        "POST /api/v1/submissions HTTP/1.0\r\nContent-Type: application/json\r\nIdempotency-Key: {key}\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let (status, logs) = backend.finish().await;
+    assert_eq!(status.code(), Some(1), "{logs}");
+    assert!(logs.contains("Create submission transaction"), "{logs}");
+    assert!(logs.contains("Backend fault"), "{logs}");
+    assert_eq!(server.mock.acks.load(Ordering::SeqCst), 0);
+    sqlx::query("ROLLBACK")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    assert!(
+        fixture
+            .database
+            .submission_by_key(key)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let stored = fixture
+        .database
+        .submission(&running)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.info.state, SubmissionState::Running);
+    assert!(stored.info.terminal_at_ms.is_none());
+    connection.close().await.unwrap();
+    drop(stream);
+    server.close().await;
+    fixture.database.close().await;
+}
+
+/// Normal shutdown saves in-flight work, keeps queries available and resumes queued work on restart.
+#[tokio::test]
+async fn process_shutdown_drains_running_and_restart_loads_queued() {
+    let mut fixture = Fixture::new().await;
+    fixture.config.scheduler.poll_interval_ms = 10;
+    fixture.queued("c").await;
+    fixture.queued("python").await;
+    let expected = fixture
+        .database
+        .queued_tasks()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|task| task.request.job_id)
+        .collect::<Vec<_>>();
+    let server = RpcServer::start(Mode::Running, fixture.database.clone()).await;
+    fixture.config.scheduler.workers = vec![server.address.clone()];
+    let mut backend = BackendProcess::spawn(&fixture);
+    let address = backend.listening().await;
+    wait_for(|| server.mock.gets.load(Ordering::SeqCst) > 0).await;
+    backend.terminate();
+    backend
+        .until_log("Backend stopping admission and dispatch")
+        .await;
+    let (status, body) = network_call(
+        address,
+        "POST",
+        "/api/v1/submissions",
+        Some(json!({"problem_id":1,"language_id":"c","source":"ac"})),
+        Some(Uuid::new_v4()),
+    )
+    .await;
+    assert_eq!(status, 503);
+    assert_eq!(body["error"]["code"], "BackendStopping");
+    assert_eq!(
+        network_call(address, "GET", "/api/v1/problems", None, None)
+            .await
+            .0,
+        200
+    );
+    server.mock.released.store(true, Ordering::SeqCst);
+    let (status, logs) = backend.finish().await;
+    assert_eq!(status.code(), Some(0), "{logs}");
+    assert_eq!(server.mock.submits.load(Ordering::SeqCst), 1);
+    assert_eq!(server.mock.acks.load(Ordering::SeqCst), 1);
+    let previous_terminal = fixture.database.submission(&expected[0]).await.unwrap();
+    assert_eq!(
+        previous_terminal.as_ref().unwrap().info.verdict,
+        Some(Verdict::AC)
+    );
+    assert_eq!(
+        fixture
+            .database
+            .submission(&expected[1])
+            .await
+            .unwrap()
+            .unwrap()
+            .info
+            .state,
+        SubmissionState::Queued
+    );
+    server.close().await;
+    let restarted_server = RpcServer::start(Mode::Finish, fixture.database.clone()).await;
+    fixture.config.scheduler.workers = vec![restarted_server.address.clone()];
+    let mut restarted = BackendProcess::spawn(&fixture);
+    restarted.listening().await;
+    wait_for(|| restarted_server.mock.acks.load(Ordering::SeqCst) == 1).await;
+    assert_eq!(
+        *restarted_server.mock.submission_order.lock().unwrap(),
+        [expected[1].clone()]
+    );
+    assert_eq!(
+        fixture.database.submission(&expected[0]).await.unwrap(),
+        previous_terminal
+    );
+    restarted.terminate();
+    let (status, logs) = restarted.finish().await;
+    assert_eq!(status.code(), Some(0), "{logs}");
+    restarted_server.close().await;
+    fixture.database.close().await;
+}
+
+/// A terminal-write fault overrides an ongoing normal shutdown without ACK or waiting other work.
+#[tokio::test]
+async fn process_fault_during_shutdown_does_not_wait_other_worker() {
+    let mut fixture = Fixture::new().await;
+    fixture.config.scheduler.poll_interval_ms = 10;
+    fixture.queued("c").await;
+    fixture.queued("python").await;
+    let first = RpcServer::start(Mode::Running, fixture.database.clone()).await;
+    let second = RpcServer::start(Mode::Running, fixture.database.clone()).await;
+    fixture.config.scheduler.workers = vec![first.address.clone(), second.address.clone()];
+    let mut backend = BackendProcess::spawn(&fixture);
+    backend.listening().await;
+    wait_for(|| {
+        first.mock.gets.load(Ordering::SeqCst) > 0 && second.mock.gets.load(Ordering::SeqCst) > 0
+    })
+    .await;
+    let mut connection = fixture.connection().await;
+    sqlx::query("CREATE TRIGGER reject_terminal BEFORE UPDATE ON submissions WHEN NEW.state = 'finished' BEGIN SELECT RAISE(ABORT, 'Controlled terminal write failure'); END")
+        .execute(&mut connection).await.unwrap();
+    backend.terminate();
+    backend
+        .until_log("Backend stopping admission and dispatch")
+        .await;
+    first.mock.released.store(true, Ordering::SeqCst);
+    let (status, logs) = backend.finish().await;
+    assert_eq!(status.code(), Some(1), "{logs}");
+    assert!(logs.contains("Controlled terminal write failure"), "{logs}");
+    assert_eq!(first.mock.acks.load(Ordering::SeqCst), 0);
+    assert_eq!(second.mock.acks.load(Ordering::SeqCst), 0);
+    for server in [&first, &second] {
+        let ids = server.mock.submission_order.lock().unwrap().clone();
+        let stored = fixture.database.submission(&ids[0]).await.unwrap().unwrap();
+        assert_eq!(stored.info.state, SubmissionState::Running);
+        assert!(stored.info.terminal_at_ms.is_none());
+    }
+    connection.close().await.unwrap();
+    first.close().await;
+    second.close().await;
+    fixture.database.close().await;
+}
+
+/// A creation admitted before stopping may reserve after its preflight and finish local handoff.
+#[tokio::test]
+async fn stopping_preserves_creation_started_before_preflight() {
+    use std::{
+        future::{Future, poll_fn},
+        task::Poll,
+    };
+    let harness = Harness::start(&[Mode::Finish], 1).await;
+    let creation = harness.creation.clone();
+    let creating = creation.create(CreateSubmission {
+        problem_id: 1,
+        language_id: "python".into(),
+        source: b"ac".to_vec(),
+        request_key: Uuid::new_v4(),
+    });
+    tokio::pin!(creating);
+    poll_fn(|context| {
+        assert!(creating.as_mut().poll(context).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    harness.creation.stop();
+    harness.scheduler.pause();
+    let created = creating.await.unwrap();
+    harness.creation.wait_idle().await;
+    assert!(harness.scheduler.contains(&created.info.id));
+    assert_eq!(
+        harness
+            .fixture
+            .database
+            .submission(&created.info.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .info
+            .state,
+        SubmissionState::Queued
+    );
+    assert_eq!(harness.servers[0].mock.submits.load(Ordering::SeqCst), 0);
+    harness.close().await;
+}
+
 /// HTTP handlers through real gRPC and Isolate; requires a dedicated deployment box.
 #[tokio::test]
 #[ignore = "Requires host Isolate privileges, cgroups, quotas and ACORN_ISOLATE_BOX_ID"]
@@ -736,7 +1107,7 @@ async fn real_http_worker_acceptance() {
             }),
     );
     let (scheduler, scheduler_task) =
-        Scheduler::start(&fixture.config, fixture.database.clone()).unwrap();
+        Scheduler::start(&fixture.config, fixture.database.clone(), Vec::new()).unwrap();
     let creation =
         CreationService::new(&fixture.config, fixture.database.clone(), scheduler.clone());
     let app = http::router(&fixture.config, fixture.database.clone(), creation.clone());

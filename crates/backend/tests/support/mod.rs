@@ -2,6 +2,8 @@
 
 use std::{
     collections::HashMap,
+    net::SocketAddr,
+    process::{ExitStatus, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -27,7 +29,13 @@ use axum::{
 };
 use serde_json::{Value, json};
 use sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
-use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
+use tokio::{
+    io::{AsyncBufReadExt, BufReader, Lines},
+    net::TcpListener,
+    process::{Child, ChildStderr},
+    sync::oneshot,
+    task::JoinHandle,
+};
 use tonic::{
     Request as RpcRequest, Response, Status, codegen::tokio_stream::wrappers::TcpListenerStream,
     transport::Server,
@@ -95,10 +103,136 @@ impl Fixture {
         let mut connection = self.connection().await;
         sqlx::raw_sql("BEGIN IMMEDIATE;
             INSERT INTO problem_versions SELECT problem_id, 2, 'New title', statement, comparison_mode, published_at_ms + 1 FROM problem_versions WHERE problem_id = 1 AND version_no = 1;
-            INSERT INTO problem_version_languages SELECT problem_id, 2, language_id, cpu_time_ms, wall_time_ms, memory_kib FROM problem_version_languages WHERE problem_id = 1 AND version_no = 1;
+            INSERT INTO problem_version_languages SELECT problem_id, 2, language_id, cpu_time_ms + 1, wall_time_ms, memory_kib FROM problem_version_languages WHERE problem_id = 1 AND version_no = 1;
             INSERT INTO test_cases SELECT problem_id, 2, case_index, input, expected_output FROM test_cases WHERE problem_id = 1 AND version_no = 1;
             UPDATE problems SET current_version_no = 2 WHERE id = 1; COMMIT;").execute(&mut connection).await.unwrap();
         connection.close().await.unwrap();
+    }
+
+    /// Persist a queued task without handing it to a running Scheduler.
+    pub async fn queued(&self, language: &str) -> String {
+        self.database
+            .create_submission(CreateSubmission {
+                problem_id: 1,
+                language_id: language.into(),
+                source: b"ac".to_vec(),
+                request_key: Uuid::new_v4(),
+            })
+            .await
+            .unwrap()
+            .info
+            .id
+    }
+}
+
+/// Real backend executable with captured logs and deployment-style termination.
+pub struct BackendProcess {
+    /// Child is killed if a test fails before explicit cleanup.
+    child: Child,
+    /// Pipe drained during event waits and final process collection.
+    lines: Lines<BufReader<ChildStderr>>,
+    /// All collected startup, shutdown and error messages.
+    captured: String,
+}
+
+impl BackendProcess {
+    /// Write a temporary deployment config and start the actual backend executable.
+    pub fn spawn(fixture: &Fixture) -> Self {
+        let mut config: toml::Value =
+            toml::from_str(include_str!("../../../../config/backend.example.toml")).unwrap();
+        config["http"]["listen"] = "127.0.0.1:0".into();
+        config["database"]["path"] = fixture.config.database.path.to_str().unwrap().into();
+        config["database"]["busy_timeout_ms"] =
+            (fixture.config.database.busy_timeout_ms as i64).into();
+        config["scheduler"]["pending_max_count"] =
+            i64::from(fixture.config.scheduler.pending_max_count).into();
+        config["scheduler"]["workers"] = toml::Value::Array(
+            fixture
+                .config
+                .scheduler
+                .workers
+                .iter()
+                .cloned()
+                .map(Into::into)
+                .collect(),
+        );
+        config["scheduler"]["poll_interval_ms"] =
+            (fixture.config.scheduler.poll_interval_ms as i64).into();
+        config["scheduler"]["retry_interval_ms"] =
+            (fixture.config.scheduler.retry_interval_ms as i64).into();
+        let path = fixture
+            .directory
+            .path()
+            .join(format!("backend-{}.toml", Uuid::new_v4()));
+        std::fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
+        let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_acorn-backend"))
+            .arg("--config")
+            .arg(path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let lines = BufReader::new(child.stderr.take().unwrap()).lines();
+        Self {
+            child,
+            lines,
+            captured: String::new(),
+        }
+    }
+
+    /// Observe a process event without relying on a fixed sleep.
+    pub async fn until_log(&mut self, event: &str) -> String {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(line) = self.lines.next_line().await.unwrap() {
+                self.captured.push_str(&line);
+                self.captured.push('\n');
+                if line.contains(event) {
+                    return line;
+                }
+            }
+            panic!("Backend exited before {event}: {}", self.captured);
+        })
+        .await
+        .unwrap()
+    }
+
+    /// Return the actual random HTTP address after all startup checks finish.
+    pub async fn listening(&mut self) -> SocketAddr {
+        self.until_log("Backend HTTP listening")
+            .await
+            .split("listen=")
+            .nth(1)
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+
+    /// Send the deployment service manager's normal shutdown signal.
+    pub fn terminate(&self) {
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(self.child.id().unwrap() as i32),
+            nix::sys::signal::Signal::SIGTERM,
+        )
+        .unwrap();
+    }
+
+    /// Collect exit status and all remaining logs while draining the stderr pipe.
+    pub async fn finish(mut self) -> (ExitStatus, String) {
+        let (status, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(self.child.wait(), async {
+                while let Some(line) = self.lines.next_line().await.unwrap() {
+                    self.captured.push_str(&line);
+                    self.captured.push('\n');
+                }
+            })
+        })
+        .await
+        .unwrap();
+        (status.unwrap(), self.captured)
     }
 }
 
@@ -135,6 +269,8 @@ pub struct Mock {
     pub submitted: Mutex<HashMap<String, proto::SubmitJobRequest>>,
     /// Number of SubmitJob calls, including refusals.
     pub submits: AtomicUsize,
+    /// Accepted Job IDs in observed submission order, for startup FIFO assertions.
+    pub submission_order: Mutex<Vec<String>>,
     /// Number of GetJob calls, including failures.
     pub gets: AtomicUsize,
     /// Number of AcknowledgeResult calls, including failed ACKs.
@@ -161,6 +297,7 @@ impl JudgeWorker for Mock {
         }
         let task = request.into_inner();
         let id = task.job_id.clone();
+        self.submission_order.lock().unwrap().push(id.clone());
         self.submitted.lock().unwrap().insert(id.clone(), task);
         if matches!(self.mode, Mode::AmbiguousFound | Mode::AmbiguousMissing) {
             return Err(Status::unavailable("Controlled ambiguous submit"));
@@ -282,6 +419,7 @@ impl RpcServer {
             mode,
             submitted: Mutex::new(HashMap::new()),
             submits: AtomicUsize::new(0),
+            submission_order: Mutex::new(Vec::new()),
             gets: AtomicUsize::new(0),
             acks: AtomicUsize::new(0),
             released: AtomicBool::new(false),
@@ -346,7 +484,7 @@ impl Harness {
             .map(|server| server.address.clone())
             .collect();
         let (scheduler, task) =
-            Scheduler::start(&fixture.config, fixture.database.clone()).unwrap();
+            Scheduler::start(&fixture.config, fixture.database.clone(), Vec::new()).unwrap();
         let creation =
             CreationService::new(&fixture.config, fixture.database.clone(), scheduler.clone());
         let app = http::router(&fixture.config, fixture.database.clone(), creation.clone());

@@ -21,20 +21,26 @@ const INFO_COLUMNS: &str =
 impl Database {
     /// Look up a creation key scoped to the deployment-configured test user.
     pub async fn submission_by_key(&self, key: Uuid) -> Result<Option<Submission>> {
-        let mut connection = self.pool.acquire().await?;
-        by_key(
-            &mut connection,
-            self.config.test_user.user_id,
-            &key.to_string(),
-        )
+        self.observe("Read creation key", false, async {
+            let mut connection = self.pool.acquire().await?;
+            by_key(
+                &mut connection,
+                self.config.test_user.user_id,
+                &key.to_string(),
+            )
+            .await
+        })
         .await
     }
 
     /// Read one stored submission and its parsed terminal details.
     pub async fn submission(&self, id: &str) -> Result<Option<Submission>> {
-        let row = sqlx::query(&format!("SELECT {INFO_COLUMNS}, user_id, source, create_request_key, terminal_details_json FROM submissions WHERE id = ?"))
-            .bind(id).fetch_optional(&self.pool).await?;
-        row.as_ref().map(stored_submission).transpose()
+        self.observe("Read submission", false, async {
+            let row = sqlx::query(&format!("SELECT {INFO_COLUMNS}, user_id, source, create_request_key, terminal_details_json FROM submissions WHERE id = ?"))
+                .bind(id).fetch_optional(&self.pool).await?;
+            row.as_ref().map(stored_submission).transpose()
+        })
+        .await
     }
 
     /// Read configured-user history without source or terminal diagnostic payloads.
@@ -44,14 +50,17 @@ impl Database {
         limit: u32,
         offset: u64,
     ) -> Result<Vec<SubmissionInfo>> {
-        let (limit, offset) = self.page(limit, offset)?;
-        let state = filter.state.map(SubmissionState::as_str);
-        let verdict = filter.verdict.map(Verdict::as_str);
-        let rows = sqlx::query(&format!("SELECT {INFO_COLUMNS} FROM submissions WHERE user_id = ? AND (? IS NULL OR problem_id = ?) AND (? IS NULL OR state = ?) AND (? IS NULL OR verdict = ?) ORDER BY created_at_ms DESC, id DESC LIMIT ? OFFSET ?"))
-            .bind(self.config.test_user.user_id).bind(filter.problem_id).bind(filter.problem_id)
-            .bind(state).bind(state).bind(verdict).bind(verdict).bind(limit).bind(offset)
-            .fetch_all(&self.pool).await?;
-        rows.iter().map(info).collect()
+        self.observe("Read submission history", false, async {
+            let (limit, offset) = self.page(limit, offset)?;
+            let state = filter.state.map(SubmissionState::as_str);
+            let verdict = filter.verdict.map(Verdict::as_str);
+            let rows = sqlx::query(&format!("SELECT {INFO_COLUMNS} FROM submissions WHERE user_id = ? AND (? IS NULL OR problem_id = ?) AND (? IS NULL OR state = ?) AND (? IS NULL OR verdict = ?) ORDER BY created_at_ms DESC, id DESC LIMIT ? OFFSET ?"))
+                .bind(self.config.test_user.user_id).bind(filter.problem_id).bind(filter.problem_id)
+                .bind(state).bind(state).bind(verdict).bind(verdict).bind(limit).bind(offset)
+                .fetch_all(&self.pool).await?;
+            rows.iter().map(info).collect()
+        })
+        .await
     }
 
     /// Fix the latest version and create at most one record per owner/key transaction.
@@ -59,104 +68,85 @@ impl Database {
     /// The creation service owns the Scheduler reservation; this method never waits
     /// for queue capacity or holds its transaction across task handoff.
     pub async fn create_submission(&self, request: CreateSubmission) -> Result<CreatedSubmission> {
-        validate_source(&request.source, &self.config)?;
-        let key = request.request_key.to_string();
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        if let Some(existing) =
-            by_key(&mut transaction, self.config.test_user.user_id, &key).await?
-        {
-            if existing.info.problem_id != request.problem_id
-                || existing.info.language_id != request.language_id
-                || existing.source != request.source
+        self.observe("Create submission transaction", true, async {
+            validate_source(&request.source, &self.config)?;
+            let key = request.request_key.to_string();
+            let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+            if let Some(existing) =
+                by_key(&mut transaction, self.config.test_user.user_id, &key).await?
             {
-                return Err(Error::IdempotencyConflict);
-            }
-            let task = if existing.info.state == SubmissionState::Queued {
-                Some(
-                    load_task(
-                        &mut transaction,
-                        &existing.info,
-                        request.source,
-                        &self.config,
+                if existing.info.problem_id != request.problem_id
+                    || existing.info.language_id != request.language_id
+                    || existing.source != request.source
+                {
+                    return Err(Error::IdempotencyConflict);
+                }
+                let task = if existing.info.state == SubmissionState::Queued {
+                    Some(
+                        load_task(
+                            &mut transaction,
+                            &existing.info,
+                            request.source,
+                            &self.config,
+                        )
+                        .await?,
                     )
-                    .await?,
-                )
-            } else {
-                None
+                } else {
+                    None
+                };
+                transaction.commit().await?;
+                return Ok(CreatedSubmission {
+                    info: existing.info,
+                    created: false,
+                    task,
+                });
+            }
+            if !matches!(request.language_id.as_str(), "c" | "python") {
+                return Err(Error::UnsupportedLanguage);
+            }
+            let version: Option<i64> = sqlx::query_scalar("SELECT current_version_no FROM problems WHERE id = ? AND current_version_no IS NOT NULL")
+                .bind(request.problem_id).fetch_optional(&mut *transaction).await?;
+            let version = version.ok_or(Error::ProblemNotFound)?;
+            let info = SubmissionInfo {
+                id: Uuid::new_v4().to_string(),
+                problem_id: request.problem_id,
+                version_no: version,
+                language_id: request.language_id,
+                state: SubmissionState::Queued,
+                verdict: None,
+                created_at_ms: now_ms()?,
+                terminal_at_ms: None,
             };
+            let task = load_task(&mut transaction, &info, request.source, &self.config).await?;
+            sqlx::query("INSERT INTO submissions (id, user_id, problem_id, version_no, language_id, source, create_request_key, state, created_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?)")
+                .bind(&info.id).bind(self.config.test_user.user_id).bind(info.problem_id).bind(info.version_no)
+                .bind(&info.language_id).bind(&task.request.source).bind(key).bind(info.created_at_ms)
+                .execute(&mut *transaction).await?;
             transaction.commit().await?;
-            return Ok(CreatedSubmission {
-                info: existing.info,
-                created: false,
-                task,
-            });
-        }
-        if !matches!(request.language_id.as_str(), "c" | "python") {
-            return Err(Error::UnsupportedLanguage);
-        }
-        let version: Option<i64> = sqlx::query_scalar("SELECT current_version_no FROM problems WHERE id = ? AND current_version_no IS NOT NULL")
-            .bind(request.problem_id).fetch_optional(&mut *transaction).await?;
-        let version = version.ok_or(Error::ProblemNotFound)?;
-        let info = SubmissionInfo {
-            id: Uuid::new_v4().to_string(),
-            problem_id: request.problem_id,
-            version_no: version,
-            language_id: request.language_id,
-            state: SubmissionState::Queued,
-            verdict: None,
-            created_at_ms: now_ms()?,
-            terminal_at_ms: None,
-        };
-        let task = load_task(&mut transaction, &info, request.source, &self.config).await?;
-        sqlx::query("INSERT INTO submissions (id, user_id, problem_id, version_no, language_id, source, create_request_key, state, created_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?)")
-            .bind(&info.id).bind(self.config.test_user.user_id).bind(info.problem_id).bind(info.version_no)
-            .bind(&info.language_id).bind(&task.request.source).bind(key).bind(info.created_at_ms)
-            .execute(&mut *transaction).await?;
-        transaction.commit().await?;
-        tracing::info!(submission = %info.id, problem = info.problem_id, version = info.version_no, language = %info.language_id, "Submission saved");
-        Ok(CreatedSubmission {
-            info,
-            created: true,
-            task: Some(task),
+            tracing::info!(submission = %info.id, problem = info.problem_id, version = info.version_no, language = %info.language_id, "Submission saved");
+            Ok(CreatedSubmission {
+                info,
+                created: true,
+                task: Some(task),
         })
+        })
+        .await
     }
 
     /// Assemble the original fixed-version task only if the record is still queued.
     pub async fn queued_task(&self, id: &str) -> Result<Option<JudgingTask>> {
-        let mut connection = self.pool.acquire().await?;
-        let row = sqlx::query(&format!(
-            "SELECT {INFO_COLUMNS}, source FROM submissions WHERE id = ? AND state = 'queued'"
-        ))
-        .bind(id)
-        .fetch_optional(&mut *connection)
-        .await?;
-        let Some(row) = row else {
-            return Ok(None);
-        };
-        Ok(Some(
-            load_task(
-                &mut connection,
-                &info(&row)?,
-                row.try_get("source")?,
-                &self.config,
-            )
-            .await?,
-        ))
-    }
-
-    /// Read startup queued tasks in stable creation order, bounded by admission capacity.
-    pub async fn queued_tasks(&self) -> Result<Vec<JudgingTask>> {
-        let mut connection = self.pool.acquire().await?;
-        let rows = sqlx::query(&format!("SELECT {INFO_COLUMNS}, source FROM submissions WHERE state = 'queued' ORDER BY created_at_ms, id LIMIT ?"))
-            .bind(i64::from(self.config.scheduler.pending_max_count) + 1).fetch_all(&mut *connection).await?;
-        if rows.len() > self.config.scheduler.pending_max_count as usize {
-            return Err(Error::Data(anyhow::anyhow!(
-                "Queued submissions exceed scheduler.pending_max_count; increase the configured limit before restarting"
-            )));
-        }
-        let mut tasks = Vec::with_capacity(rows.len());
-        for row in rows {
-            tasks.push(
+        self.observe("Read queued submission", false, async {
+            let mut connection = self.pool.acquire().await?;
+            let row = sqlx::query(&format!(
+                "SELECT {INFO_COLUMNS}, source FROM submissions WHERE id = ? AND state = 'queued'"
+            ))
+            .bind(id)
+            .fetch_optional(&mut *connection)
+            .await?;
+            let Some(row) = row else {
+                return Ok(None);
+            };
+            Ok(Some(
                 load_task(
                     &mut connection,
                     &info(&row)?,
@@ -164,9 +154,37 @@ impl Database {
                     &self.config,
                 )
                 .await?,
-            );
-        }
-        Ok(tasks)
+            ))
+        })
+        .await
+    }
+
+    /// Read startup queued tasks in stable creation order, bounded by admission capacity.
+    pub async fn queued_tasks(&self) -> Result<Vec<JudgingTask>> {
+        self.observe("Load startup queue", false, async {
+            let mut connection = self.pool.acquire().await?;
+            let rows = sqlx::query(&format!("SELECT {INFO_COLUMNS}, source FROM submissions WHERE state = 'queued' ORDER BY created_at_ms, id LIMIT ?"))
+                .bind(i64::from(self.config.scheduler.pending_max_count) + 1).fetch_all(&mut *connection).await?;
+            if rows.len() > self.config.scheduler.pending_max_count as usize {
+                return Err(Error::Data(anyhow::anyhow!(
+                    "Queued submissions exceed scheduler.pending_max_count; increase the configured limit before restarting"
+                )));
+            }
+            let mut tasks = Vec::with_capacity(rows.len());
+            for row in rows {
+                tasks.push(
+                    load_task(
+                        &mut connection,
+                        &info(&row)?,
+                        row.try_get("source")?,
+                        &self.config,
+                    )
+                    .await?,
+                );
+            }
+            Ok(tasks)
+        })
+        .await
     }
 
     /// Claim a queued submission before making any Worker submission RPC.
@@ -189,31 +207,37 @@ impl Database {
 
     /// Commit all terminal columns atomically; false means the previous state disallowed it.
     pub async fn save_terminal(&self, id: &str, terminal: &TerminalOutcome) -> Result<bool> {
-        let details = terminal
-            .details
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()
-            .map_err(|error| Error::Data(error.into()))?;
-        let changed = sqlx::query("UPDATE submissions SET state = ?, verdict = ?, terminal_details_json = ?, terminal_at_ms = ? WHERE id = ? AND state IN ('dispatching', 'running')")
-            .bind(terminal.state.as_str()).bind(terminal.verdict.map(Verdict::as_str)).bind(details)
-            .bind(now_ms()?).bind(id).execute(&self.pool).await?;
-        Ok(changed.rows_affected() == 1)
+        self.observe("Save submission terminal", true, async {
+            let details = terminal
+                .details
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|error| Error::Data(error.into()))?;
+            let changed = sqlx::query("UPDATE submissions SET state = ?, verdict = ?, terminal_details_json = ?, terminal_at_ms = ? WHERE id = ? AND state IN ('dispatching', 'running')")
+                .bind(terminal.state.as_str()).bind(terminal.verdict.map(Verdict::as_str)).bind(details)
+                .bind(now_ms()?).bind(id).execute(&self.pool).await?;
+            Ok(changed.rows_affected() == 1)
+        })
+        .await
     }
 
     /// Provide the later startup flow's single atomic interruption write, without contacting Workers.
     pub async fn interrupt_in_flight(&self) -> Result<u64> {
-        let terminal = TerminalOutcome::failed(
-            &JobFailure {
-                code: "SchedulerInterrupted".into(),
-                diagnostic: "Backend restarted while submission was in flight".into(),
-            },
-            &self.config.results,
-        )?;
-        let details =
-            serde_json::to_string(&terminal.details).map_err(|error| Error::Data(error.into()))?;
-        Ok(sqlx::query("UPDATE submissions SET state = 'failed', verdict = NULL, terminal_details_json = ?, terminal_at_ms = ? WHERE state IN ('dispatching', 'running')")
-            .bind(details).bind(now_ms()?).execute(&self.pool).await?.rows_affected())
+        self.observe("Interrupt old in-flight submissions", true, async {
+            let terminal = TerminalOutcome::failed(
+                &JobFailure {
+                    code: "SchedulerInterrupted".into(),
+                    diagnostic: "Backend restarted while submission was in flight".into(),
+                },
+                &self.config.results,
+            )?;
+            let details =
+                serde_json::to_string(&terminal.details).map_err(|error| Error::Data(error.into()))?;
+            Ok(sqlx::query("UPDATE submissions SET state = 'failed', verdict = NULL, terminal_details_json = ?, terminal_at_ms = ? WHERE state IN ('dispatching', 'running')")
+                .bind(details).bind(now_ms()?).execute(&self.pool).await?.rows_affected())
+        })
+        .await
     }
 
     /// Share the three allowed nonterminal transitions using one conditional atomic UPDATE.
@@ -223,16 +247,19 @@ impl Database {
         from: SubmissionState,
         to: SubmissionState,
     ) -> Result<bool> {
-        Ok(
-            sqlx::query("UPDATE submissions SET state = ? WHERE id = ? AND state = ?")
-                .bind(to.as_str())
-                .bind(id)
-                .bind(from.as_str())
-                .execute(&self.pool)
-                .await?
-                .rows_affected()
-                == 1,
-        )
+        self.observe("Update submission state", true, async {
+            Ok(
+                sqlx::query("UPDATE submissions SET state = ? WHERE id = ? AND state = ?")
+                    .bind(to.as_str())
+                    .bind(id)
+                    .bind(from.as_str())
+                    .execute(&self.pool)
+                    .await?
+                    .rows_affected()
+                    == 1,
+            )
+        })
+        .await
     }
 }
 

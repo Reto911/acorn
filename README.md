@@ -2,7 +2,7 @@
 
 C 与 Python 3 的单文件源码判题系统。后端包含 HTTP API、Scheduler 和 SQLite 访问模块，通过 gRPC 调用独立 Worker。
 
-当前已完成 P01–P08：Worker 独立提供 C/Python 串行判题，后端通过 HTTP 创建提交、进程内 Scheduler 分派、gRPC 取结果、SQLite 持久化和 ACK 完成业务闭环。下一步 P09 补齐启动装入及故障边界。开发范围、执行契约和后续步骤见[文档索引](docs/README.md)与[开发计划](docs/04-development-plan.md)。
+当前已完成 P01–P09：Worker 独立提供 C/Python 串行判题，后端通过 HTTP 创建提交、进程内 Scheduler 分派、gRPC 取结果、SQLite 持久化和 ACK 完成业务闭环，并已接入启动装入、正常停机及故障退出。下一步 P10 完成整体联调、源码样例与操作说明。开发范围、执行契约和后续步骤见[文档索引](docs/README.md)与[开发计划](docs/04-development-plan.md)。
 
 ## 构建与检查
 
@@ -63,7 +63,11 @@ cargo run --locked -p acorn-backend -- --config config/backend.example.toml
 
 三个 SQL 脚本仅在新库执行一次。应用不会创建数据库、装入 SQL 或执行升级。测试用户脚本仅供开发，Argon2id 哈希来自已丢弃的随机密码；当前没有登录功能或可用登录凭据。示例题仍随正式发布保留。
 
-后端收到 Ctrl-C 或 SIGTERM 后停止创建接纳和新分派，等待已开始的短创建操作、在途判题、结果保存及一次有 deadline 的 ACK，再关闭连接池。Scheduler 异常结束会使后端退出。当前入口从空内存队列开始，已有 `queued` 可由同键重传重新交接；启动自动装入、旧 `dispatching/running` 中断写入和创建关键写入故障的完整退出编排仍在 P09 接入。
+后端在开放 HTTP 前将旧 `dispatching/running` 保存为 `failed / SchedulerInterrupted`，按 `created_at_ms, id` 装入 `queued` 的固定版本任务；排队数超出 `scheduler.pending_max_count` 时明确报错退出，提示部署端增大配置上限。启动不联系旧任务的 Worker，也不补发旧 ACK。
+
+后端收到 Ctrl-C 或 SIGTERM 后停止创建接纳和新分派，等待已开始的短创建操作、在途判题、结果保存及一次有 deadline 的 ACK，再关闭 HTTP 和连接池。等待期间查询继续可用，新创建返回 `503 BackendStopping`；未分派任务保持 `queued`，下次启动装入。已开始的创建操作即使尚在幂等查询阶段，也可在正常停机时完成名额预留与本地交接。
+
+运行期普通只读失败返回 `500 InternalError` 并记录英文日志，后端继续运行。创建写事务及状态、终态写入失败，明确的 I/O、磁盘满或数据库损坏，以及 Scheduler 异常结束，会使后端停止接纳与分派，收尾短创建操作后尽快退出，不等待其他 Worker 完成；未保存结果不 ACK。具体边界见[后端故障契约](docs/03-backend-design.md#83-数据库及后台故障)。
 
 查询题目并提交 Python 两数求和源码：
 
@@ -79,7 +83,7 @@ curl -i http://127.0.0.1:8080/api/v1/submissions \
 
 内存限额和 Isolate 单文件／磁盘空间限额统一使用 KiB（1 KiB = 1024 字节），配置字段明确以 `_kib` 结尾；实际资源统计、输出保留和产物导出大小仍按字节计量。数据库结构版本为 2，内存列为 `memory_kib`；旧配置与旧数据库需更新，后端与 Worker 按当前 KiB 协议同步构建运行。已有数据库由部署端离线转换或另建新库，详见 [SQL 使用说明](sql/README.md)。
 
-P06–P08 的数据库、Scheduler 和 HTTP 常规测试：
+P06–P09 的数据库、Scheduler、HTTP 和进程生命周期常规测试：
 
 ```sh
 cargo test -p acorn-backend --locked

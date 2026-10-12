@@ -95,10 +95,11 @@ impl Drop for CloseOnDrop {
 }
 
 impl Scheduler {
-    /// Start an initially empty dispatcher; startup database loading belongs to P09.
+    /// Load ordered startup tasks and their permits before starting the dispatcher.
     pub fn start(
         config: &Config,
         database: Database,
+        startup: Vec<JudgingTask>,
     ) -> anyhow::Result<(Self, JoinHandle<anyhow::Result<()>>)> {
         let nodes = config
             .scheduler
@@ -120,6 +121,10 @@ impl Scheduler {
                 changed: Notify::new(),
             }),
         };
+        for task in startup {
+            let permit = scheduler.reserve()?;
+            scheduler.enqueue(task, permit)?;
+        }
         let task = tokio::spawn(run(
             scheduler.clone(),
             nodes,
@@ -131,12 +136,22 @@ impl Scheduler {
 
     /// Reserve capacity before starting a creation transaction, without waiting.
     pub fn reserve(&self) -> Result<OwnedSemaphorePermit, AdmissionError> {
+        self.reserve_inner(false)
+    }
+
+    /// Let a creation operation admitted before shutdown finish reserving and handing off.
+    pub(crate) fn reserve_started(&self) -> Result<OwnedSemaphorePermit, AdmissionError> {
+        self.reserve_inner(true)
+    }
+
+    /// Share capacity accounting while distinguishing new and already admitted operations.
+    fn reserve_inner(&self, started: bool) -> Result<OwnedSemaphorePermit, AdmissionError> {
         let state = self
             .shared
             .state
             .lock()
             .expect("Scheduler state lock poisoned");
-        if state.stopping || state.closed {
+        if state.closed || (state.stopping && !started) {
             return Err(AdmissionError::Stopping);
         }
         self.shared
