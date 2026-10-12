@@ -112,3 +112,5 @@ in the relevant design documents and must not be maintained here in duplicate.
 - Commit only when explicitly requested by the user, on a `codex/` branch, using
   Conventional Commits. Verify the branch before committing and keep each
   commit focused.
+- Describe the concrete change in commit messages. Do not include development
+  task identifiers such as `P01` or `F01` in commit subjects or bodies.
