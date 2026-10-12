@@ -1,4 +1,4 @@
-//! P07–P09 contracts over real SQLite, backend processes, HTTP routes and controlled gRPC.
+//! Contracts over SQLite, backend processes, HTTP and controlled or real Workers.
 
 mod support;
 
@@ -1077,121 +1077,252 @@ async fn stopping_preserves_creation_started_before_preflight() {
     harness.close().await;
 }
 
-/// HTTP handlers through real gRPC and Isolate; requires a dedicated deployment box.
+/// Shared source samples through real HTTP, gRPC and Isolate, including ACK retention.
 #[tokio::test]
 #[ignore = "Requires host Isolate privileges, cgroups, quotas and ACORN_ISOLATE_BOX_ID"]
 async fn real_http_worker_acceptance() {
-    use acorn_backend::{http, scheduler::Scheduler, submissions::CreationService};
-    use acorn_worker::{config::Config as WorkerConfig, rpc::WorkerService};
-    use tokio::{net::TcpListener, sync::oneshot};
-    use tonic::{codegen::tokio_stream::wrappers::TcpListenerStream, transport::Server};
+    use acorn_protocol::worker::v1::{GetJobRequest, get_job_reply::Terminal};
+    use base64::Engine;
+    use support::real::{RealHarness, box_id};
 
-    let mut fixture = support::Fixture::new().await;
-    let mut worker_config =
-        WorkerConfig::parse(include_str!("../../../config/worker.example.toml")).unwrap();
-    worker_config.sandbox.box_id = std::env::var("ACORN_ISOLATE_BOX_ID")
-        .expect("Choose a dedicated Isolate box ID")
-        .parse()
-        .unwrap();
-    worker_config.results.max_unacknowledged_results = 1;
-    worker_config.results.acknowledged_queue_length = 1;
-    let worker = WorkerService::new(worker_config);
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    fixture.config.scheduler.workers = vec![format!("http://{}", listener.local_addr().unwrap())];
-    let (stop, stopped) = oneshot::channel();
-    let server = tokio::spawn(
-        Server::builder()
-            .add_service(worker.clone().into_server())
-            .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
-                let _ = stopped.await;
-            }),
-    );
-    let (scheduler, scheduler_task) =
-        Scheduler::start(&fixture.config, fixture.database.clone(), Vec::new()).unwrap();
-    let creation =
-        CreationService::new(&fixture.config, fixture.database.clone(), scheduler.clone());
-    let app = http::router(&fixture.config, fixture.database.clone(), creation.clone());
-    let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let http_address = http_listener.local_addr().unwrap();
-    let (http_stop, http_stopped) = oneshot::channel();
-    let http_task = tokio::spawn(async move {
-        axum::serve(http_listener, app)
-            .with_graceful_shutdown(async {
-                let _ = http_stopped.await;
-            })
-            .await
-    });
+    let harness = RealHarness::start(&[box_id("ACORN_ISOLATE_BOX_ID")]).await;
+    let mut client = harness.workers[0].client().await;
     let mut first_id = None;
-    for (language, source, verdict) in [
+    for (language, source, verdict, completed) in [
         (
             "c",
-            "#include <stdio.h>\nint main(void) { long long a,b; if(scanf(\"%lld%lld\",&a,&b)==2) printf(\"%lld\\n\",a+b); return 0; }",
+            include_str!("../../../examples/submissions/a-plus-b.c"),
             "AC",
+            4,
         ),
-        ("python", "a,b=map(int,input().split());print(a+b)", "AC"),
-        ("c", "invalid C source", "CE"),
-        ("python", "print(0)", "WA"),
+        (
+            "python",
+            include_str!("../../../examples/submissions/a-plus-b.py"),
+            "AC",
+            4,
+        ),
+        (
+            "c",
+            include_str!("../../../examples/submissions/compile-error.c"),
+            "CE",
+            0,
+        ),
+        (
+            "python",
+            include_str!("../../../examples/submissions/wrong-answer.py"),
+            "WA",
+            1,
+        ),
+        (
+            "c",
+            include_str!("../../../examples/submissions/time-limit.c"),
+            "TLE",
+            1,
+        ),
     ] {
-        let (status, created) = support::network_call(
-            http_address,
-            "POST",
-            "/api/v1/submissions",
-            Some(json!({"problem_id":1,"language_id":language,"source":source})),
-            Some(Uuid::new_v4()),
-        )
-        .await;
-        assert_eq!(status, 202);
-        let id = created["submission_id"].as_str().unwrap().to_owned();
+        let id = harness.submit(language, source).await;
         if first_id.is_none() {
             first_id = Some(id.clone());
         }
-        let body = tokio::time::timeout(Duration::from_secs(30), async {
-            loop {
-                let (_, body) = support::network_call(
-                    http_address,
-                    "GET",
-                    &format!("/api/v1/submissions/{id}"),
-                    None,
-                    None,
-                )
-                .await;
-                if matches!(body["state"].as_str(), Some("finished" | "failed"))
-                    && !scheduler.contains(&id)
-                {
-                    break body;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
+        let body = harness.terminal(&id, verdict).await;
+        let job = client
+            .get_job(GetJobRequest { job_id: id.clone() })
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(job.completed_cases, completed);
+        assert_eq!(job.total_cases, 4);
+        assert!(matches!(job.terminal, Some(Terminal::Result(_))));
+        match verdict {
+            "CE" => {
+                let diagnostic = body["terminal_details"]["compile_diagnostic_base64"]
+                    .as_str()
+                    .unwrap();
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(diagnostic)
+                    .unwrap();
+                assert!(!bytes.is_empty());
+                assert!(
+                    String::from_utf8_lossy(&bytes).contains("Intentional compilation failure")
+                );
             }
-        })
-        .await
-        .unwrap();
-        assert_eq!(body["state"], "finished", "{body}");
-        assert_eq!(body["verdict"], verdict, "{body}");
-        if verdict == "WA" {
-            assert_eq!(body["terminal_details"]["failed_case"]["case_index"], 1);
+            "WA" | "TLE" => {
+                let case = &body["terminal_details"]["failed_case"];
+                assert_eq!(case["case_index"], 1);
+                assert_eq!(case["stdout_truncated"], false);
+                assert_eq!(case["stderr_base64"], "");
+                if verdict == "WA" {
+                    assert_eq!(case["stdout_base64"], "MAo=");
+                    assert_eq!(case["exit_code"], 0);
+                } else {
+                    assert_eq!(case["stdout_base64"], "");
+                    assert!(case["resources"]["wall_time_us"].is_u64());
+                }
+            }
+            _ => assert!(body["terminal_details"].is_null()),
         }
+        eprintln!(
+            "Real sample: submission={id} language={language} verdict={verdict} completed={completed}"
+        );
     }
-    let mut worker_client =
-        acorn_protocol::worker::v1::judge_worker_client::JudgeWorkerClient::connect(
-            fixture.config.scheduler.workers[0].clone(),
-        )
-        .await
-        .unwrap();
-    let removed = worker_client
-        .get_job(acorn_protocol::worker::v1::GetJobRequest {
+    let removed = client
+        .get_job(GetJobRequest {
             job_id: first_id.unwrap(),
         })
         .await
         .unwrap_err();
     assert_eq!(removed.code(), tonic::Code::NotFound);
-    http_stop.send(()).unwrap();
-    http_task.await.unwrap().unwrap();
-    creation.stop();
-    creation.wait_idle().await;
-    scheduler.shutdown();
-    scheduler_task.await.unwrap().unwrap();
-    worker.shutdown().await.unwrap();
-    stop.send(()).unwrap();
-    server.await.unwrap().unwrap();
-    fixture.database.close().await;
+    harness.close().await;
+}
+
+/// Two real Isolate boxes execute independently and explicitly busy admission redispatches.
+#[tokio::test]
+#[ignore = "Requires two dedicated boxes in ACORN_ISOLATE_BOX_ID and ACORN_ISOLATE_BOX_ID_2"]
+async fn real_two_workers_acceptance() {
+    use acorn_protocol::worker::v1::{
+        AcknowledgeResultRequest, GetJobRequest, JobPhase, JobState, RunLimits, SubmitJobRequest,
+        TestCase,
+    };
+    use support::real::{RealHarness, box_id};
+
+    let boxes = [
+        box_id("ACORN_ISOLATE_BOX_ID"),
+        box_id("ACORN_ISOLATE_BOX_ID_2"),
+    ];
+    assert_ne!(boxes[0], boxes[1], "Workers must own different boxes");
+    let harness = RealHarness::start(&boxes).await;
+    let mut a = harness.workers[0].client().await;
+    let mut b = harness.workers[1].client().await;
+    let source = include_str!("../../../examples/submissions/time-limit.c");
+    let first = harness.submit("c", source).await;
+    let second = harness.submit("c", source).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let left = a
+                .get_job(GetJobRequest {
+                    job_id: first.clone(),
+                })
+                .await;
+            let right = b
+                .get_job(GetJobRequest {
+                    job_id: second.clone(),
+                })
+                .await;
+            if let (Ok(left), Ok(right)) = (left, right) {
+                let (left, right) = (left.into_inner(), right.into_inner());
+                assert_eq!(
+                    left.state,
+                    JobState::Running as i32,
+                    "First Job finished before overlap"
+                );
+                assert_eq!(
+                    right.state,
+                    JobState::Running as i32,
+                    "Second Job finished before overlap"
+                );
+                if left.phase == JobPhase::RunningCase as i32
+                    && right.phase == JobPhase::RunningCase as i32
+                {
+                    assert_eq!(left.completed_cases, 0);
+                    assert_eq!(right.completed_cases, 0);
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    harness.terminal(&first, "TLE").await;
+    harness.terminal(&second, "TLE").await;
+    eprintln!(
+        "Real overlap: submissions={first},{second} boxes={},{}",
+        boxes[0], boxes[1]
+    );
+
+    // The dispatcher has selected both nodes once, so its next candidate is A again.
+    let occupant = SubmitJobRequest {
+        job_id: Uuid::new_v4().to_string(),
+        language_id: "c".into(),
+        source: source.as_bytes().to_vec(),
+        cases: vec![TestCase {
+            input: Vec::new(),
+            expected_output: Vec::new(),
+        }],
+        run_limits: Some(RunLimits {
+            cpu_time_ms: 5_000,
+            wall_time_ms: 10_000,
+            memory_kib: 262_144,
+        }),
+    };
+    a.submit_job(occupant.clone()).await.unwrap();
+    let mut probe = occupant.clone();
+    probe.job_id = Uuid::new_v4().to_string();
+    let busy = a.submit_job(probe).await.unwrap_err();
+    assert_eq!(busy.code(), tonic::Code::ResourceExhausted);
+    assert_eq!(busy.message(), "WorkerBusy");
+    let moved = harness
+        .submit(
+            "c",
+            include_str!("../../../examples/submissions/a-plus-b.c"),
+        )
+        .await;
+    harness.terminal(&moved, "AC").await;
+    assert_eq!(
+        a.get_job(GetJobRequest {
+            job_id: moved.clone()
+        })
+        .await
+        .unwrap_err()
+        .code(),
+        tonic::Code::NotFound
+    );
+    assert_eq!(
+        b.get_job(GetJobRequest {
+            job_id: moved.clone()
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .state,
+        JobState::Finished as i32
+    );
+    assert_eq!(
+        a.get_job(GetJobRequest {
+            job_id: occupant.job_id.clone()
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .state,
+        JobState::Running as i32
+    );
+    eprintln!(
+        "Real busy redispatch: submission={moved} worker={} occupant={}",
+        harness.workers[1].address, occupant.job_id
+    );
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let job = a
+                .get_job(GetJobRequest {
+                    job_id: occupant.job_id.clone(),
+                })
+                .await
+                .unwrap()
+                .into_inner();
+            if job.state != JobState::Running as i32 {
+                assert_eq!(job.state, JobState::Finished as i32, "{job:?}");
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    a.acknowledge_result(AcknowledgeResultRequest {
+        job_id: occupant.job_id,
+    })
+    .await
+    .unwrap();
+    harness.close().await;
 }

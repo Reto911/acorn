@@ -2,7 +2,7 @@
 
 C 与 Python 3 的单文件源码判题系统。后端包含 HTTP API、Scheduler 和 SQLite 访问模块，通过 gRPC 调用独立 Worker。
 
-当前已完成 P01–P09：Worker 独立提供 C/Python 串行判题，后端通过 HTTP 创建提交、进程内 Scheduler 分派、gRPC 取结果、SQLite 持久化和 ACK 完成业务闭环，并已接入启动装入、正常停机及故障退出。下一步 P10 完成整体联调、源码样例与操作说明。开发范围、执行契约和后续步骤见[文档索引](docs/README.md)与[开发计划](docs/04-development-plan.md)。
+当前已完成 P01–P10：Worker 独立提供 C/Python 串行判题，后端通过 HTTP 创建提交、进程内 Scheduler 分派、gRPC 取结果、SQLite 持久化和 ACK 完成业务闭环，并已接入启动装入、正常停机及故障退出。首版源码样例、真实单／双 Worker 验收、独立程序从空库启动及重启查询已完成，操作步骤见下文。开发范围、执行契约和实际验证记录见[文档索引](docs/README.md)与[开发计划](docs/04-development-plan.md)。
 
 ## 构建与检查
 
@@ -43,7 +43,16 @@ cargo run --locked -p acorn-backend -- --help
 两个入口均要求 `--config <PATH>`，并支持 `--version`。Worker 读取并校验 [worker.example.toml](config/worker.example.toml) 同形的 TOML 配置，初始化英文 stderr 日志，检查 Isolate/GCC/Python 的可调用性并生成语言计划：
 
 ```sh
-cargo run --locked -p acorn-worker -- --config config/worker.example.toml
+cargo build --workspace --locked
+cp config/worker.example.toml /tmp/acorn-worker.toml
+```
+
+真实运行需要 Linux、Isolate、GCC、Python 3、控制组及沙箱文件系统用户配额，准备方式见下文 [Isolate 阶段验收](#isolate-阶段验收)。初始化数据库和发送请求另需 `sqlite3`（3.38.0 或更新版本）及 `curl`。编辑 `/tmp/acorn-worker.toml`，填写实际工具路径，并将 `sandbox.box_id` 设为本机专用于此次运行的空闲 ID，例如 210。每个运行中的 Worker 独占一个 ID。
+
+在仓库根目录的终端 A 启动 Worker，保留英文日志：
+
+```sh
+target/debug/acorn-worker --config /tmp/acorn-worker.toml 2>/tmp/acorn-worker.log
 ```
 
 有效 Worker 配置通过校验后启动 gRPC 监听，提供 `SubmitJob`、`GetJob` 和 `AcknowledgeResult`。提交立即返回，后台执行不随提交连接断开而取消；一个 Worker 同时只执行一个 Job，忙时不排队。终态须由调用方保存后 ACK，未确认结果区满时拒绝新任务。请求和结果消息上限从配置应用到 Tonic 服务端。
@@ -58,7 +67,8 @@ Ctrl-C 或 SIGTERM 先停止接纳，再通过共同停止路径结束当前执�
 sqlite3 -bail acorn.db < sql/001-initial-schema.sql
 sqlite3 -bail acorn.db < examples/seed-user.sql
 sqlite3 -bail acorn.db < sql/002-example-problem.sql
-cargo run --locked -p acorn-backend -- --config config/backend.example.toml
+cp config/backend.example.toml /tmp/acorn-backend.toml
+target/debug/acorn-backend --config /tmp/acorn-backend.toml 2>/tmp/acorn-backend.log
 ```
 
 三个 SQL 脚本仅在新库执行一次。应用不会创建数据库、装入 SQL 或执行升级。测试用户脚本仅供开发，Argon2id 哈希来自已丢弃的随机密码；当前没有登录功能或可用登录凭据。示例题仍随正式发布保留。
@@ -81,6 +91,90 @@ curl -i http://127.0.0.1:8080/api/v1/submissions \
 
 创建返回 `202`、`submission_id`、`state` 和 `Location`；同键同内容重传返回 `200`，新的主动提交更换 UUID 键。按返回的 `Location` 轮询详情即可取得持久化终态；提交历史为 `GET /api/v1/submissions`。两个列表都返回 `{"items":[...],"limit":20,"offset":0}`，支持 `limit`、`offset`；详情中的终态字节字段使用 Base64。六个路由、筛选和英文错误码见[HTTP 契约](docs/03-backend-design.md#5-http-接口)。
 
+### 从源码文件提交并核对结果
+
+以下文件均用于题号 1、版本 1 的两数求和题；错误和超限样例是有意构造的判题输入：
+
+| 源码 | `language_id` | 预期结果 |
+| --- | --- | --- |
+| [a-plus-b.c](examples/submissions/a-plus-b.c) | `c` | `finished / AC`，四个用例通过 |
+| [a-plus-b.py](examples/submissions/a-plus-b.py) | `python` | `finished / AC`，四个用例通过 |
+| [compile-error.c](examples/submissions/compile-error.c) | `c` | `finished / CE`，有编译诊断，不运行用例 |
+| [wrong-answer.py](examples/submissions/wrong-answer.py) | `python` | `finished / WA`，失败用例序号为 1，stdout 解码为 `0\n` |
+| [time-limit.c](examples/submissions/time-limit.c) | `c` | `finished / TLE`，失败用例序号为 1 |
+
+在终端 C 从 C 文件生成请求 JSON。Python 标准库负责保留源码换行和 JSON 转义：
+
+```sh
+python3 - c examples/submissions/a-plus-b.c > /tmp/acorn-request.json <<'PY'
+import json
+from pathlib import Path
+import sys
+
+print(json.dumps({
+    "problem_id": 1,
+    "language_id": sys.argv[1],
+    "source": Path(sys.argv[2]).read_text(encoding="utf-8"),
+}))
+PY
+ACORN_REQUEST_KEY=$(python3 -c 'import uuid; print(uuid.uuid4())')
+curl --fail-with-body --silent --show-error \
+  http://127.0.0.1:8080/api/v1/submissions \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $ACORN_REQUEST_KEY" \
+  --data-binary @/tmp/acorn-request.json \
+  --dump-header /tmp/acorn-create.headers \
+  --output /tmp/acorn-create.json
+cat /tmp/acorn-create.json
+```
+
+请求成功后按响应的 `Location` 轮询，最多等待 60 秒：
+
+```sh
+python3 - <<'PY'
+import json
+from pathlib import Path
+import time
+from urllib.request import urlopen
+
+headers = Path("/tmp/acorn-create.headers").read_text().splitlines()
+location = next(line.split(":", 1)[1].strip() for line in headers
+                if line.lower().startswith("location:"))
+deadline = time.monotonic() + 60
+while time.monotonic() < deadline:
+    with urlopen("http://127.0.0.1:8080" + location, timeout=5) as response:
+        result = json.load(response)
+    if result["state"] in ("finished", "failed"):
+        text = json.dumps(result, ensure_ascii=False, indent=2)
+        Path("/tmp/acorn-result.json").write_text(text + "\n")
+        print(text)
+        break
+    time.sleep(0.5)
+else:
+    raise SystemExit("Timed out waiting for a terminal submission")
+PY
+curl --fail-with-body --silent --show-error \
+  'http://127.0.0.1:8080/api/v1/submissions?problem_id=1&limit=20'
+```
+
+对 Python 重复上述步骤，将生成请求的命令参数改为 `python examples/submissions/a-plus-b.py`，并生成新的键。C/Python 均应返回 `finished / AC`；保留两个 `submission_id` 供重启后查询。其他三个文件使用表中的语言和相同步骤提交。CE/WA/TLE 属于正常判题结论，状态为 `finished`；`failed` 表示执行或跟踪故障，应检查 `terminal_details` 和日志。CE 诊断、失败用例 stdout/stderr 使用标准 Base64；缺失资源统计保持缺失。
+
+需要重传同一请求时，保留 `/tmp/acorn-request.json` 和原 `ACORN_REQUEST_KEY`，只重复 `curl`，预期返回 `200` 和原 Submission ID。主动重新判题时生成新键；相同键更换源码会返回 `409 IdempotencyConflict`。
+
+### 双 Worker 配置、日志与停止
+
+第二个 Worker 复制同一示例配置，修改 `server.listen` 为 `127.0.0.1:50052`，`sandbox.box_id` 为另一个专用 ID，例如 211。后端 `/tmp/acorn-backend.toml` 中的 `[scheduler]` 使用：
+
+```toml
+workers = ["http://127.0.0.1:50051", "http://127.0.0.1:50052"]
+```
+
+两个 Worker 采用相同载荷、输出和资源门限；后端配置的最大任务／结果不得超出任一节点的能力。先启动两个 Worker，再启动后端。两个提交可分布执行；每个 Worker 同时只执行一个 Job，Job 内编译和各用例串行。真实忙拒绝与并行执行的自动验收命令见下文。
+
+按 `submission_id` 搜索 `/tmp/acorn-backend.log` 中的 `Submission saved`、`Dispatching submission` 和 `Submission terminal committed`，可关联题号、固定版本、语言及 Worker 地址。首版 Submission ID 就是 Worker Job ID；在对应 Worker 日志中可找到 `Job accepted`、`Case started` 和 `Judging finished`。普通轮询和 ACK 日志为 debug，需要查看时在两端配置中将 `logging.level` 改为 `debug` 后启动。日志不包含完整源码或测试数据。
+
+正常停止时，先在后端终端按 Ctrl-C，等待后端完成在途保存、一次 ACK 并退出，再停止 Worker。也可由服务管理器发送 SIGTERM。重新运行同一后端配置，使用 `GET /api/v1/submissions/<submission_id>` 查询此前两个 AC；历史终态仍应存在。数据库初始化 SQL 不重复执行。未分派任务保留排队状态，旧在途任务按前述重启规则中断。
+
 内存限额和 Isolate 单文件／磁盘空间限额统一使用 KiB（1 KiB = 1024 字节），配置字段明确以 `_kib` 结尾；实际资源统计、输出保留和产物导出大小仍按字节计量。数据库结构版本为 2，内存列为 `memory_kib`；旧配置与旧数据库需更新，后端与 Worker 按当前 KiB 协议同步构建运行。已有数据库由部署端离线转换或另建新库，详见 [SQL 使用说明](sql/README.md)。
 
 P06–P09 的数据库、Scheduler、HTTP 和进程生命周期常规测试：
@@ -89,12 +183,21 @@ P06–P09 的数据库、Scheduler、HTTP 和进程生命周期常规测试：
 cargo test -p acorn-backend --locked
 ```
 
-P07/P08 的真实验收通过实际 HTTP 端口、Scheduler、gRPC、SQLite 和 Isolate 检查 C/Python AC、C CE、Python 首例 WA，以及保存与 ACK 淘汰。使用独立 box ID，在具备既定权限的宿主环境执行：
+真实单 Worker 验收读取上述五份源码，通过实际 HTTP 端口、Scheduler、gRPC、SQLite 和 Isolate 检查 C/Python AC、C CE、Python 首例 WA、C TLE、持久化详情，以及保存与 ACK 淘汰。使用独立 box ID，在具备既定权限的宿主环境执行：
 
 ```sh
 ACORN_ISOLATE_BOX_ID=204 \
   cargo test -p acorn-backend --locked --test workflow real_http_worker_acceptance -- --ignored --nocapture
 ```
+
+真实双 Worker 验收需要两个不同的专用 box ID。它验证两个 HTTP 提交在不同节点同时执行，以及后端未知的占用造成明确忙拒绝后立即转交另一节点；使用 60 秒重试间隔和有界等待区分立即转交与定时重试，不作毫秒级性能断言：
+
+```sh
+ACORN_ISOLATE_BOX_ID=205 ACORN_ISOLATE_BOX_ID_2=206 \
+  cargo test -p acorn-backend --locked --test workflow real_two_workers_acceptance -- --ignored --nocapture
+```
+
+这两个测试在测试进程中组装真实服务；上文从新库启动独立程序的操作流程另外验收。它们不会配置系统配额或修改 Isolate 安装，环境前提未满足时明确失败。真实验收的实际结果和范围记录在[开发计划](docs/04-development-plan.md#7-实施记录)。
 
 后端使用一个共享 SQLx SQLite 连接池，固定最多一个连接；外键和有限锁等待配置用于每次连接建立。创建提交以 `BEGIN IMMEDIATE` 固定最新版本和幂等键，在返回完整内存任务前提交事务并释放连接。状态及终态使用条件更新，AC/CE/首个失败用例和执行失败按类型化 JSON 保存，字节字段使用 Base64。配置中的 HTTP JSON 上限、gRPC 二进制上限和原始任务／结果上限分别计量，示例值与 Worker 示例对齐。
 

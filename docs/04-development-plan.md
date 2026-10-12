@@ -1,6 +1,6 @@
 # Worker 与后端开发计划
 
-状态：实施中；P01–P09 已完成，下一步 P10。
+状态：P01–P10 已完成；首版整体联调和操作验收已通过。
 
 ## 1. 目标与依据
 
@@ -8,7 +8,7 @@
 
 首版交付两个程序：独立 Worker，以及内含 Scheduler 的后端。完成后，可以使用 HTTP 提交 C 或 Python 单文件源码，经 gRPC 判题后查询持久化结果。每个 Worker 同时执行一个 Job，Job 内编译、运行和各用例始终串行；不同 Worker 可以处理不同 Submission。
 
-当前已有设计、建表 SQL、Cargo workspace、共享 Proto、两个程序入口，以及可独立启动的 Worker：配置、日志、语言计划、Isolate 阶段接口、串行判题、RPC 和结果保留均已实现。后端已完成配置、日志、数据库访问、开发用户预置、Scheduler、HTTP API，以及 P09 的启动装入、旧在途记录中断、正常停机和故障退出。下一步 P10 完成整体联调与操作交付；每个阶段完成自己的验收后进入下一阶段。
+当前已有设计、建表 SQL、Cargo workspace、共享 Proto、两个程序入口，以及可独立启动的 Worker：配置、日志、语言计划、Isolate 阶段接口、串行判题、RPC 和结果保留均已实现。后端已完成配置、日志、数据库访问、开发用户预置、Scheduler、HTTP API，以及 P09 的启动装入、旧在途记录中断、正常停机和故障退出。P10 已完成源码样例、真实单／双 Worker 联调和独立程序从空库启动及重启查询，首版十个步骤均有实际产物与验证记录。
 
 运行时检查限于已约定的请求、资源、并发接纳和业务状态要求。实现依赖组件的正常返回与错误报告，不增加跨域检查、Worker 身份核验或额外清理审计。
 
@@ -185,13 +185,41 @@ Worker 以子进程启动 `isolate --run`，通过 `Child::wait().await` 等待�
 
 ### 4.10 P10：完成联调、样例与操作说明
 
-1. 整理一组小型、可重复的源码样例：C/Python AC、C CE、首个失败用例和一个代表性超限。主要联调用例复用已有阶段测试，不为每个错误组合另写一套。
-2. 用真实 Isolate、Worker、后端和 SQLite 跑通 HTTP 创建、轮询结果及 ACK；查询并确认持久化状态、结论和失败详情。
-3. 启动两个不同地址、不同 Isolate box ID 的 Worker，验证忙时立即选择其他候选节点，以及不同提交分布执行；Job 内仍串行。
-4. 补充本地运行说明：构建工具与 Linux/Isolate 前提、沙箱文件系统用户配额、初始化数据库、预置用户与题目、填写配置、启动顺序、HTTP 示例及停止方式。配置示例之间的载荷、结果和资源门限必须匹配；正式发布保留 `sql/001-initial-schema.sql`、`sql/002-example-problem.sql` 及其执行说明。
-5. 记录实际使用的构建和验证命令、环境前提及结果。日志中能够按 Submission/Job ID 串起创建、分派、执行和终态保存，失败时能看到明确操作与原因。
+P10 是首版整体交付验收阶段。交付范围仍为已有的 C/Python 单文件判题闭环；开发工作集中在可复用样例、真实联调、操作说明及联调中发现的具体缺陷修正。
 
-**完成条件：** 按操作说明，在准备好的开发机上可从空数据库完成一次 C 和一次 Python 提交及结果查询；已执行检查有记录，未执行项明确标注。
+#### 4.10.1 实施前的覆盖与缺口
+
+以下是 P10 实施前的基线，最终产物和实际结果见[第 7.12 节](#712-p10已完成)。
+
+- P08 的 [`real_http_worker_acceptance`](../crates/backend/tests/workflow.rs) 已通过真实 HTTP、gRPC、SQLite 和 Isolate 验证 C/Python AC、C CE、Python 首例 WA，以及结果保存与 ACK 淘汰。该测试在同一测试进程中组装服务，不能替代独立程序按说明启动的验收。
+- P07 的常规测试已通过受控 Worker 验证忙时换节点和两个提交并行跟踪；真实双 Worker、不同 Isolate box ID 下的相同行为仍待验收。
+- [项目说明](../README.md)已有构建、数据库初始化、启动、HTTP 和沙箱前提说明；`examples/submissions/` 尚无源码样例，现有 HTTP 示例也尚未形成从文件提交 C/Python、轮询并核对结果的完整步骤。
+- P09 已验证启动、正常停机、重启和数据库故障边界。P10 复用这些结果，针对最终联调改动运行相关检查；只有发现具体问题时才补对应回归。
+
+#### 4.10.2 实施顺序与产物
+
+1. **先补源码样例。** 在 `examples/submissions/` 放置以下五个文件，均针对正式保留的“两数求和”题目版本 1。样例及期望结论写入项目说明，真实 HTTP 验收从这些文件读取源码，避免维护第二套内嵌样例。
+
+   | 文件 | 预期持久化结果 | 核对重点 |
+   | --- | --- | --- |
+   | `a-plus-b.c` | `finished / AC` | 编译一次，四个用例全部通过 |
+   | `a-plus-b.py` | `finished / AC` | Python 直接运行，四个用例全部通过 |
+   | `compile-error.c` | `finished / CE` | 有编译诊断，不进入运行用例 |
+   | `wrong-answer.py` | `finished / WA` | 第一个用例失败，保存失败用例与有界输出 |
+   | `time-limit.c` | `finished / TLE` | 使用持续计算触发题目的现有时限，在首个失败用例短路 |
+
+2. **完善单 Worker 真实验收。** 扩展现有 `real_http_worker_acceptance`，复用上述样例增加一个代表性 TLE。通过 HTTP 创建和轮询终态，核对数据库状态、结论及 CE/WA/TLE 详情；沿用结果保留上限为 1 的设置，验证持久化之后 ACK、后续任务仍可接纳及旧结果淘汰。判题结论 CE/WA/TLE 均为 `finished`，不能误记为执行故障 `failed`。
+3. **补一项双 Worker 真实验收。** 复用现有测试夹具和生成的 gRPC 客户端，使用真实 Isolate 启动两个不同监听地址、不同专用 box ID 的 Worker。先通过直接 gRPC 请求使一个 Worker 被后端未知的任务占用，再经 HTTP 提交，确认该节点明确返回忙后，同一提交立即交给另一可用候选节点，不等待下一轮定时重试。另验证两个 HTTP 提交可同时由不同 Worker 执行，各自 Job 内仍串行；终态分别保存并 ACK。使用有预算上限的任务和有界等待，通过运行状态、节点及 Job ID 判断接纳和重叠，不以毫秒级耗时阈值作为通过条件。
+4. **补齐独立程序操作步骤并实际照做。** 在现有 README 中串起构建、环境准备、空库初始化、用户和题目预置、配置修改、Worker 先于后端启动、从样例文件构造 HTTP JSON、生成幂等键、按 `Location` 轮询、读取历史及停止程序。说明重复提交使用原键、主动新提交使用新键，列出双 Worker 的地址和 box ID 配置方式。沿用正式 SQL 和现有配置文件，核对两端请求、结果和资源门限；系统配额、控制组和 Isolate 权限仍由部署端准备。用实际 `acorn-worker`、`acorn-backend` 程序，从新数据库完成 C/Python 各一次 AC，并在后端正常重启后查询原持久化结果。
+5. **核对日志并记录验收。** 用同一个 Submission/Job ID 在现有英文日志中对应创建、Worker 地址选择、接纳、执行和终态保存；确认失败样例有明确操作及原因。仅在发现缺失时补必要字段或日志。在本文件的实施记录中追加实际构建和验证命令、环境前提、使用的专用 box ID、结果及未执行项，保留此前失败和验证范围的记录。
+
+#### 4.10.3 完成条件与验证边界
+
+- 五个样例可重复提交，真实单 Worker 验收得到约定的 AC/CE/WA/TLE 和失败详情，结果持久化与 ACK 顺序保持正确。
+- 真实双 Worker 验收证明明确忙拒绝后的立即换节点，以及不同提交同时执行；不把受控 Worker 的结果计为该项通过。
+- 按 README 在已准备好的开发机上，从空数据库启动两个独立程序，完成 C/Python 提交、轮询、历史查询、正常停止及重启后结果查询。
+- 修改 Rust 时执行格式检查、workspace 编译、Clippy 和相关测试；真实验收使用明确的专用 box ID 单独运行。仅修改文档时检查格式和本地链接，按第 5 节选择验证范围。
+- 每项记录实际结果。受环境限制未运行的真实验收标注为未执行，不据此宣称对应交付检查通过。联调不扩展为穷举错误／资源矩阵、压力测试或部署自动化框架；第 7.8 节的历史期限测试问题继续保留其原始记录，除非另有实际定位与修正证据。
 
 ## 5. 验证与提交方式
 
@@ -377,3 +405,25 @@ Worker 独立交付点已完成；下一步 P06 实现后端 TOML、日志、SQL
 新增测试首次编译存在创建 future 的借用生命周期错误，改用独立创建服务句柄后通过；临时配置最初使用值解析接口导致完整 TOML 文档解析失败，改用 `toml::from_str`。严重读取测试最初的附加库连接及内存库夹具未触发预期文件错误，改为单连接的实际临时文件库后通过。工具沙箱中的后端测试先因 HTTP 回环监听 `Operation not permitted` 失败，随后在宿主权限环境通过，未将环境限制记作后端功能故障。
 
 已同步项目说明和相关设计的当前进度。此阶段没有修改 Worker 实现、Proto、数据库结构或依赖，没有重跑真实 Isolate／HTTP 判题验收和完整 workspace 测试；第 7.8 节的历史期限测试时序问题仍保留，不能由本阶段的定向测试宣称解决。下一步 P10 完成整体联调、源码样例与操作说明。
+
+### 7.12 P10：已完成
+
+新增 `examples/submissions/` 中的五份源码：C/Python 两数求和 AC、明确的 C 编译错误、Python 首例 WA 和持续计算的 C TLE。扩展[真实 HTTP 验收](../crates/backend/tests/workflow.rs)，直接读取这些文件；共同的 HTTP、Scheduler、真实 gRPC Worker 和 Isolate 组装提取到[真实验收夹具](../crates/backend/tests/support/real.rs)，复用正式 SQL 和已有数据库夹具。正常判题结论均保存为 `finished`，并核对 HTTP 与数据库终态详情一致。
+
+单 Worker 真实验收通过 C/Python 各四用例 AC、C CE 零运行用例、Python WA 和 C TLE 各首例短路；核对 CE 诊断、WA 输出及 TLE 失败详情。未确认区和 ACK FIFO 均设为 1，后续样例仍可接纳，最早记录已按 ACK FIFO 淘汰。双 Worker 真实验收使用两个独立地址和 box，观察两个 HTTP 提交同时处于首例执行阶段，各自保存 TLE 并完成跟踪。随后直接用 gRPC 占用一个节点，实际确认 `WorkerBusy`，HTTP 提交在该占用仍运行时经另一节点完成 AC；测试重试间隔为 60 秒，整个等待短于该间隔，不能以定时重试代替立即转交。
+
+[项目说明](../README.md)补齐实际二进制构建、复制配置与 box ID 选择、新库 SQL、从源码文件生成 JSON、新键与同键重传、按 `Location` 有界轮询、历史查询、双 Worker 配置、日志关联、停止顺序及重启查询。说明仍要求部署端预先准备 Linux、Isolate、控制组和用户配额，不安装或更改系统配置。
+
+本次宿主环境：Linux `6.18.40.1-microsoft-standard-WSL2`，Rust/Cargo `1.101.0-nightly`，protoc `3.21.12`，Isolate `2.6`，GCC `15.2.0`，Python `3.14.4`，SQLite CLI `3.46.1`。Isolate 可执行文件由 root 所有并启用 setuid；沙箱根目录位于启用 `quota,usrquota` 的 ext4 文件系统。最初环境没有 `sqlite3` 命令，用户安装后按既定 SQLite CLI 流程完成初始化，未为此增加应用依赖或运行期回退路径。
+
+已执行：
+
+- `cargo fmt --all -- --check`、`cargo check --workspace --all-targets --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo build --workspace --locked`：通过。
+- 在宿主权限环境执行 `cargo test -p acorn-backend --locked`：三十一个常规测试通过，两个真实验收默认忽略。
+- 在宿主使用专用 box 204 执行 `ACORN_ISOLATE_BOX_ID=204 cargo test -p acorn-backend --locked --test workflow real_http_worker_acceptance -- --ignored --nocapture`：一个真实验收通过，覆盖上述五份样例及 ACK 淘汰。
+- 在宿主使用专用 box 205、206 执行 `ACORN_ISOLATE_BOX_ID=205 ACORN_ISOLATE_BOX_ID_2=206 cargo test -p acorn-backend --locked --test workflow real_two_workers_acceptance -- --ignored --nocapture`：一个真实验收通过，覆盖不同节点同时执行和忙拒绝后的立即转交。
+- 使用本次临时核对脚本 `python3 /tmp/acorn-p10-smoke.py` 启动两个实际 `target/debug/acorn-worker`（box 210、211）及一个 `target/debug/acorn-backend`。数据库由 `sqlite3 -bail` 依次执行三个正式／开发预置 SQL；请求使用 `curl --data-binary`，按 `Location` 查询。五份样例全部得到预期终态，同键重传返回原 ID，历史查询包含全部五条记录。正常停止后端、使用原库重启，再查询五条详情，结果与重启前完全相同；两次后端退出及两个 Worker 退出均为 0。
+
+独立程序运行的原始配置、请求头、创建响应、结果、数据库、两端日志及汇总保留在临时证据目录 `/tmp/acorn-p10-97tkupxd/`；脚本仅用于此次核对，不是工程依赖，README 提供可重复的操作命令。C AC 的提交 ID 为 `b0b64a70-649d-4526-937c-ca919a9c8d6c`，Python AC 为 `5b1c5309-c260-47dd-9a48-ebd4c5d4fe98`。日志按同一 Submission/Job ID 对应创建、分派地址、接纳、执行、保存和 ACK，实际保存日志先于 ACK 日志；C 各编译一次，Python 不编译，AC 用例按 1–4 顺序执行，CE 未运行用例，WA/TLE 只运行首例。现有日志已满足本阶段核对要求，无需修改运行期日志实现。
+
+本阶段没有修改业务实现、Proto、数据库结构、配置门限或 Cargo 依赖，也没有重跑完整 workspace 测试、P03 的全部隔离／配额矩阵或 Worker 专项测试。第 7.8 节的历史期限测试并发敏感性继续保留，未由本次验收宣称解决。P10 的约定交付项均已实际验证，P01–P10 首版开发计划完成。文档格式、稳定编号、七份文档的九十一处本地链接／锚点、README 十四个 shell 块和两个内嵌 Python 块的语法，以及 `git diff --check` 均通过。

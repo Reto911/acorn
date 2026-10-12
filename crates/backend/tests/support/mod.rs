@@ -1,5 +1,7 @@
 //! Real SQLite and gRPC fixtures with controlled, deterministic Worker responses.
 
+pub mod real;
+
 use std::{
     collections::HashMap,
     net::SocketAddr,
