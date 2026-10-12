@@ -1,25 +1,13 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { Submission, SubmissionState, Verdict } from '../api/types'
+import type { Submission } from '../api/types'
+import {
+  submissionStates as states,
+  submissionVerdicts as verdicts,
+} from '../utils/submissionPresentation'
 import OutputText from './OutputText.vue'
 
 const props = defineProps<{ submission: Submission }>()
-const states: Record<SubmissionState, string> = {
-  queued: '排队中',
-  dispatching: '分派中',
-  running: '判题中',
-  finished: '已完成',
-  failed: '执行失败',
-}
-const verdicts: Record<Verdict, string> = {
-  AC: '通过',
-  WA: '答案错误',
-  CE: '编译错误',
-  RE: '运行错误',
-  TLE: '时间超限',
-  MLE: '内存超限',
-  OLE: '输出超限',
-}
 const compile = computed(() =>
   props.submission.state === 'finished' && props.submission.verdict === 'CE'
     ? props.submission.terminal_details

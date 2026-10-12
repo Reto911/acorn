@@ -6,6 +6,8 @@ import FixedProblemStatement from '../components/FixedProblemStatement.vue'
 import RequestFeedback from '../components/RequestFeedback.vue'
 import SubmissionOutcome from '../components/SubmissionOutcome.vue'
 import { useSubmissionPolling } from '../composables/useSubmissionPolling'
+import { readHistoryQuery } from '../utils/historyQuery'
+import { submissionDateFormat as dateFormat } from '../utils/submissionPresentation'
 import 'element-plus/es/components/button/style/css'
 
 const route = useRoute()
@@ -20,17 +22,18 @@ const {
   () => String(route.params.submissionId),
   (id, signal) => getSubmission(id, { signal, polling: true }),
 )
-const dateFormat = new Intl.DateTimeFormat('zh-CN', {
-  dateStyle: 'medium',
-  timeStyle: 'medium',
-})
 const timeZone = dateFormat.resolvedOptions().timeZone
 </script>
 
 <template>
   <section aria-labelledby="page-title">
     <div class="page-heading">
-      <RouterLink class="back-link" to="/submissions"
+      <RouterLink
+        class="back-link"
+        :to="{
+          path: '/submissions',
+          query: { ...readHistoryQuery(route.query) },
+        }"
         >← 返回提交历史</RouterLink
       >
       <h1 id="page-title">提交结果</h1>

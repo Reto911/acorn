@@ -324,6 +324,59 @@ h1 {
   border-top: 1px solid #edf0eb;
 }
 
+.history-filters {
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+  padding: 20px;
+  border-bottom: 1px solid #edf0eb;
+}
+
+.history-filter {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+  gap: 8px;
+  font-size: 14px;
+}
+
+.history-filter input,
+.history-filter select {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 0 10px;
+  color: #3b4b40;
+  font: inherit;
+  background: white;
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+}
+
+.history-filter-actions {
+  display: flex;
+}
+
+.history-id {
+  overflow-wrap: anywhere;
+}
+
+.history-time + .history-time {
+  margin-top: 8px;
+}
+
+.history-time span {
+  margin-right: 8px;
+  color: #758178;
+}
+
+.history-note {
+  padding: 0 20px 20px;
+  color: #68756c;
+  font-size: 12px;
+  line-height: 1.8;
+}
+
 .problem-actions {
   display: flex;
   flex-wrap: wrap;

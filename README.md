@@ -4,7 +4,7 @@ C 与 Python 3 的单文件源码判题系统。后端包含 HTTP API、Schedule
 
 当前已完成 P01–P10：Worker 独立提供 C/Python 串行判题，后端通过 HTTP 创建提交、进程内 Scheduler 分派、gRPC 取结果、SQLite 持久化和 ACK 完成业务闭环，并已接入启动装入、正常停机及故障退出。首版源码样例、真实单／双 Worker 验收、独立程序从空库启动及重启查询已完成，操作步骤见下文。开发范围、执行契约和实际验证记录见[文档索引](docs/README.md)与[开发计划](docs/04-development-plan.md)。
 
-浏览器 GUI 采用 Vue 3、TypeScript 和 Monaco，已完成 F01–F05：工程与 HTTP 客户端、真实题目浏览、C/Python 编辑、本地草稿、主动提交，以及结果详情、固定版本题面和状态轮询，运行与检查命令见[前端说明](web/README.md)。提交历史和首版联调按[前端开发计划](docs/06-frontend-development-plan.md)的 F06–F07 继续接入与验收，交互依据见[GUI 设计](docs/05-frontend-design.md)；健康观测后置。
+浏览器 GUI 采用 Vue 3、TypeScript 和 Monaco，已完成 F01–F06：工程与 HTTP 客户端、真实题目浏览、C/Python 编辑、本地草稿、主动提交、结果详情、固定版本题面和状态轮询，以及提交历史筛选、分页和详情往返，运行与检查命令见[前端说明](web/README.md)。完整首版联调按[前端开发计划](docs/06-frontend-development-plan.md)的 F07 继续验收，交互依据见[GUI 设计](docs/05-frontend-design.md)；健康观测后置。
 
 ## 构建与检查
 
