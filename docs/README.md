@@ -10,3 +10,4 @@
 - [前端 GUI 设计](05-frontend-design.md)：Vue 3/TypeScript/Monaco 选型、题目与答题、提交结果和历史、本地草稿、HTTP 接入及健康观测边界。
 - [前端开发计划](06-frontend-development-plan.md)：F01–F07 首版 GUI 任务、接口依赖与验收，F08 健康观测及初次连通验收记录，后续每 10 秒自动获取的实现与验证边界。
 - [健康观测设计与实施计划](07-health-observation-design.md)：已确认的 F08 契约，H01–H04 已实现 Worker 状态 RPC、后端共享采集、只读 HTTP、支持自动获取及手动刷新的健康页面和独立过期警告；包含实施步骤与有限验收。
+- [LLM 代码审查设计](08-llm-code-review-design.md)：已批准、待实施，定义 Responses API 接入、判题后自动门槛及手动审查、最新意见持久化、后端独立队列、提交页面 UI 和实施验收步骤。

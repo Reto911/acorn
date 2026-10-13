@@ -118,8 +118,8 @@ curl -i http://127.0.0.1:8080/api/v1/health
 
 | 源码 | `language_id` | 预期结果 |
 | --- | --- | --- |
-| [a-plus-b.c](examples/submissions/a-plus-b.c) | `c` | `finished / AC`，四个用例通过 |
-| [a-plus-b.py](examples/submissions/a-plus-b.py) | `python` | `finished / AC`，四个用例通过 |
+| [a-plus-b.c](examples/submissions/a-plus-b.c) | `c` | `finished / AC`， 104 个用例通过 |
+| [a-plus-b.py](examples/submissions/a-plus-b.py) | `python` | `finished / AC`，新库的 104 个用例通过 |
 | [compile-error.c](examples/submissions/compile-error.c) | `c` | `finished / CE`，有编译诊断，不运行用例 |
 | [wrong-answer.py](examples/submissions/wrong-answer.py) | `python` | `finished / WA`，失败用例序号为 1，stdout 解码为 `0\n` |
 | [time-limit.c](examples/submissions/time-limit.c) | `c` | `finished / TLE`，失败用例序号为 1 |
