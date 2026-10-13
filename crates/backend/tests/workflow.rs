@@ -1451,13 +1451,13 @@ async fn real_http_worker_acceptance() {
             "c",
             include_str!("../../../examples/submissions/a-plus-b.c"),
             "AC",
-            4,
+            104,
         ),
         (
             "python",
             include_str!("../../../examples/submissions/a-plus-b.py"),
             "AC",
-            4,
+            104,
         ),
         (
             "c",
@@ -1489,7 +1489,7 @@ async fn real_http_worker_acceptance() {
             .unwrap()
             .into_inner();
         assert_eq!(job.completed_cases, completed);
-        assert_eq!(job.total_cases, 4);
+        assert_eq!(job.total_cases, 104);
         assert!(matches!(job.terminal, Some(Terminal::Result(_))));
         match verdict {
             "CE" => {

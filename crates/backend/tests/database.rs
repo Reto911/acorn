@@ -92,7 +92,7 @@ fn accepted(config: &Config) -> TerminalOutcome {
             verdict: proto::Verdict::Accepted as i32,
             ..Default::default()
         },
-        4,
+        104,
         &config.results,
     )
     .unwrap()
@@ -126,7 +126,7 @@ async fn published_queries_and_fixed_version_creation() {
     let task = created.task.unwrap();
     assert_eq!(task.request.job_id, created.info.id);
     assert_eq!(task.request.source, submission_request.source);
-    assert_eq!(task.request.cases.len(), 4);
+    assert_eq!(task.request.cases.len(), 104);
     assert_eq!(
         task.request.run_limits.as_ref().unwrap().memory_kib,
         256 * 1024
@@ -173,7 +173,7 @@ async fn published_queries_and_fixed_version_creation() {
     assert!(!repeated.created);
     assert_eq!(repeated.info.id, created.info.id);
     assert_eq!(repeated.info.version_no, 1);
-    assert_eq!(repeated.task.unwrap().request.cases.len(), 4);
+    assert_eq!(repeated.task.unwrap().request.cases.len(), 104);
     let new = database.create_submission(request("c")).await.unwrap();
     assert_eq!(new.info.version_no, 2);
     let task = new.task.unwrap();
