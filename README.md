@@ -6,6 +6,8 @@ C 与 Python 3 的单文件源码判题系统。后端包含 HTTP API、Schedule
 
 浏览器 GUI 采用 Vue 3、TypeScript 和 Monaco，已完成 F01–F07：题目浏览、C/Python 编辑、本地草稿、主动提交、结果详情、固定版本题面、状态轮询，以及提交历史筛选、分页和详情往返。首版桌面联调已覆盖 C/Python AC、C CE、Python WA 和 C TLE，实际新增与复用记录、UI-01–UI-09 对应关系及未测范围见[前端开发计划](docs/06-frontend-development-plan.md#57-f07首版浏览器联调与操作说明)。交互依据见[GUI 设计](docs/05-frontend-design.md)；健康观测 F08 / H01–H04 已完成，提供 Worker 状态 RPC、后端共享采集、只读 HTTP 快照及 `/health` 系统状态页面，支持自动、手动刷新和独立过期警告；初次实际检查见[健康页面交付记录](docs/06-frontend-development-plan.md#511-f08h04健康页面与最终连通验收)，后续每 10 秒自动获取的实现与验证边界见[补充记录](docs/06-frontend-development-plan.md#512-健康页面每十秒自动获取)。
 
+LLM 代码审查已批准、待实施，合同与 L01–L06 计划见[LLM 设计](docs/08-llm-code-review-design.md)，相关数据库、后端和前端设计已同步。当前程序和下述操作仍使用结构版本 2 与已有判题/健康功能；审查接口、页面和结构版本 3 尚未交付，既有验收不包含 LLM 审查。
+
 ## 浏览器 GUI
 
 先按下文[程序入口](#程序入口)启动 Worker 和后端；已有数据库只需使用原配置启动，不重复执行初始化 SQL。再按[前端环境与安装](web/README.md#环境与安装)准备 Node.js、pnpm、依赖和本地配置，在仓库根目录执行：

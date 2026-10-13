@@ -2,11 +2,15 @@
 
 状态：已确认，作为首版实现依据。
 
+本文同步[LLM 代码审查设计](08-llm-code-review-design.md)的后端增量合同，llm_review、结构版本 3、审查 HTTP 字段与路由及相关配置和生命周期均已批准、待实施；当前程序仍为下述 P06–P10 与健康观测实现。LLM 的具体策略和实施验收以第 08 篇为依据，文档维护边界见[索引](README.md)。
+
 实施进度：P06–P10 已完成配置、日志、SQLite 业务访问、开发用户预置、Scheduler、HTTP API，以及启动排队装入、旧在途中断、正常停机与故障退出。源码样例、真实单／双 Worker 联调和独立程序操作验收已完成，实际范围见[开发计划实施记录](04-development-plan.md#7-实施记录)。
 
 ## 1. 目标与范围
 
 后端是单个 Rust 进程，内含 HTTP API、Scheduler 和数据库访问模块。前端通过 HTTP JSON 查询题目、提交单文件源码并轮询结果；Scheduler 通过 unary gRPC 向独立 Worker 推送任务、轮询状态和确认结果。
+
+LLM 增量在同一进程增加与 Scheduler 平行的 llm_review 模块，机器判题后按固定题目版本自动触发，或由页面手动启动、重跑。审查只保存最近一次意见，不改变机器判题状态、verdict 或终态详情；请求沿用配置测试用户和既有访问范围，不新增管理员角色校验。
 
 首版服务于 C 与 Python 3 判题闭环。题目、测试数据及一个测试用户由部署端本地预置；后端从配置读取该用户的 `user_id`，所有新提交归属于此用户。当前不启用登录、会话、角色鉴权或用户管理接口，请求不能覆盖提交归属。
 
@@ -26,6 +30,7 @@
 | Worker 客户端 | [Tonic](https://docs.rs/tonic/latest/tonic/) / Prost，依据 `acorn.worker.v1` 协议生成 |
 | HTTP 中间件 | Tower 的 `ServiceBuilder` 组合中间件，tower-http 的 `TraceLayer` 记录请求日志 |
 | 数据库 | SQLite，使用 [SQLx](https://docs.rs/sqlx/latest/sqlx/) 的 `runtime-tokio`、`sqlite` 特性，直接维护 SQL |
+| LLM 客户端（待实施） | 复用 reqwest 异步客户端，Responses API 合同见[第 08 篇第 2 节](08-llm-code-review-design.md#2-api-兼容性核对) |
 | 配置 | TOML，启动时读取并验证 |
 | 日志 | tracing / tracing-subscriber，英文单行文本输出到 stderr |
 
@@ -39,12 +44,16 @@ flowchart LR
         Service -->|完整任务数据| Scheduler
         Service --> Database[数据库访问]
         Scheduler --> Database
+        Scheduler -->|机器终态保存后交接| Review[llm_review：待实施]
+        HTTP -->|手动审查| Review
+        Review --> Database
         subgraph Scheduling[Scheduler]
             Scheduler[队列与调度] --> Client[worker_client]
         end
     end
     Database --> SQLite[(acorn.db)]
     Client -->|提交、轮询、ACK| Worker[独立 Worker 进程]
+    Review -->|Responses API| LLM[外部模型]
 ```
 
 API 与 Scheduler 通过进程内调用和消息交接任务。Worker 客户端复用配置地址对应的 gRPC channel；连接复用不改变短 RPC、轮询取结果的业务模型。
@@ -59,6 +68,7 @@ API 与 Scheduler 通过进程内调用和消息交接任务。Worker 客户端�
 | `problems` | 查询已发布题目的最新版本、题面和语言限额 |
 | `submissions` | 创建幂等、固定版本、校验请求、保存源码、将任务交给 Scheduler、查询历史与结果 |
 | `scheduler` | 有界内存队列、Worker 轮转选择、分派、轮询、终态保存和 ACK 编排 |
+| `llm_review`（待实施） | 自动及手动接纳、独立有界队列与并发、模型调用、输出校验、最新审查保存及停止边界；分工见[第 08 篇第 3 节](08-llm-code-review-design.md#3-后端结构与责任边界) |
 | `scheduler::worker_client` | Scheduler 子模块，封装判题三个 RPC 和只读状态 RPC、调用 deadline、Proto 与后端类型转换、传输错误分类；状态查询使用独立健康预算 |
 | `database` | SQLx 共享连接池、参数绑定、短事务、条件状态更新和查询 |
 | `health` | 本地接纳快照、共享有界探测、最近结果缓存及单调时钟过期投影；不参与业务决策 |
@@ -71,6 +81,8 @@ HTTP 层通过 `ServiceBuilder` 组合公共中间件，`TraceLayer` 统一记�
 
 完整任务包含 Submission ID、固定题目版本、语言、源码字节、有序用例和限额。源码从 HTTP 字符串按 UTF-8 编码，不调整换行、不裁剪内容；入库字节与发送给 Worker 的字节一致。
 
+LLM 增量在创建及启动装入 JudgingTask 时携带固定版本的 review_mode，仅供后端判断自动门槛，不加入 Worker 请求或 Proto。llm_review 的队列只携带提交、审查身份及必要元数据，执行时独立读取源码、固定公开题面及 verdict。
+
 业务 HTTP 查询读取数据库中的业务状态和结果。前端轮询不触发 Worker RPC；Worker 的阶段和逐点进度不写库，首版 HTTP 也不提供这些临时信息。
 
 [`Health::start`](../crates/backend/src/health.rs) 接受健康配置、共享数据库和 Scheduler 句柄，从 Scheduler 取得现有客户端的廉价克隆；返回缓存句柄和由入口监督的任务。`Health::snapshot()` 只读缓存，`local_snapshot()` 读取创建服务停止标记及 Scheduler 短锁和信号量。`Health::stop()` 中断当前轮次或间隔，任务取消并等待本轮异步检查结束后返回；H03 已在入口启动唯一采集任务，并向 HTTP 共享创建服务、Scheduler 和 Health 句柄；受控及真实 Worker 测试夹具采用同一组装契约。采集周期、错误码和展示规则统一遵守[健康观测设计第 4 节](07-health-observation-design.md#4-后端观测来源与采集)。
@@ -79,9 +91,11 @@ HTTP 层通过 `ServiceBuilder` 组合公共中间件，`TraceLayer` 统一记�
 
 API 与 Scheduler 共享一个 SQLx `SqlitePool`，首版固定 `max_connections = 1`，数据库访问依次使用该连接。SQLx 异步调用直接运行在后端已有的 Tokio runtime 内；SQLite 的阻塞调用由 SQLx 内部后台线程处理，见[运行时支持](https://docs.rs/sqlx/latest/sqlx/#runtime-support)和[SQLite 连接说明](https://docs.rs/sqlx/latest/sqlx/sqlite/struct.SqliteConnection.html)。
 
+llm_review 复用该单连接池和 Tokio runtime。读取审查输入后先归还连接，再请求模型；模型网络等待不占用数据库连接、事务或 Scheduler 待接纳名额。
+
 `Database::probe_read()` 复用该连接池和 `Database::observe` 的只读错误边界，执行 `SELECT id FROM users LIMIT 1` 的可选行查询，空表也成功。采集预算覆盖连接池等待及 SQL；超时不承诺底层 SQLite 同时停止，仍受既有有限 busy timeout 约束。普通读取错误只降低该次观测，实际返回的严重存储错误仍通知既有故障退出流程。
 
-一个数据库操作使用一个连接，完成一次查询或一个短事务后归还；占用连接和事务均不能跨越 gRPC 调用或等待 Scheduler 入队。创建提交仍使用 `BEGIN IMMEDIATE`，表结构和事务规则保持不变。连接显式启用 `foreign_keys` 并配置有限 busy timeout。使用参数绑定的普通 SQL 查询和类型映射。
+一个数据库操作使用一个连接，完成一次查询或一个短事务后归还；占用连接和事务均不能跨越 gRPC、模型 HTTP 调用或等待内存队列交接。创建提交仍使用 `BEGIN IMMEDIATE`；LLM 的结构和审查写入增量遵守[数据库设计](02-database-design.md)。连接显式启用 `foreign_keys` 并配置有限 busy timeout。使用参数绑定的普通 SQL 查询和类型映射。
 
 服务使用已初始化的 `acorn.db`，启动时检查结构版本及配置引用，不自动修改已有结构或执行升级。
 
@@ -89,7 +103,7 @@ API 与 Scheduler 共享一个 SQLx `SqlitePool`，首版固定 `max_connections
 
 后端仍验证语言、用例数量、数据大小和限额：源码按 UTF-8 编码后的长度计量；输入、期望输出及总载荷按原始字节计量。HTTP 请求体、gRPC 消息和原始任务载荷各有独立上限。
 
-内存限额从 SQLite `memory_kib`、配置 `request.max_run_memory_kib` 到 RPC `RunLimits.memory_kib` 统一使用 KiB，不进行字节除法。数据库结构版本为 2，旧版数据库明确拒绝；后端与 Worker 需使用同一版 KiB 协议。实际资源统计和结果字节字段的单位保持原契约。
+内存限额从 SQLite `memory_kib`、配置 `request.max_run_memory_kib` 到 RPC `RunLimits.memory_kib` 统一使用 KiB，不进行字节除法。当前应用只接受结构版本 2，LLM 的 L01 将应用版本检查与完整初始 SQL 一同切换为 3；版本 2 → 3 由部署端使用单独交付的 SQL 离线升级，见[升级合同](08-llm-code-review-design.md#53-数据库升级职责)。后端与 Worker 需使用同一版 KiB 协议，LLM 增量不修改该协议；实际资源统计和结果字节字段的单位保持原契约。
 
 同一版本的测试数据在一次任务装配中按 `case_index` 读取。正常新提交由 API 将内存中的完整任务直接交给 Scheduler，Scheduler 不再次读源码或题库。启动装入排队任务时才由 Scheduler 读取其固定版本数据。
 
@@ -111,8 +125,9 @@ P06 的 [`Database`](../crates/backend/src/database/mod.rs) 提供题目列表�
 | `GET /api/v1/problems/{id}` | 返回最新版本的题号、版本号、标题、题面和可提交语言及限额 |
 | `GET /api/v1/problems/{id}/versions/{version_no}` | 返回指定已发布版本的同类信息；GUI 结果页按提交固定版本查询，答题页仍取最新版本 |
 | `POST /api/v1/submissions` | 创建提交，或取得同键的已有提交 |
+| `POST /api/v1/submissions/{id}/review`（待实施） | 手动启动或重跑最近一次 LLM 审查，不重新执行 Worker |
 | `GET /api/v1/submissions/{id}` | 返回提交身份、固定版本、语言、业务状态、判题结论、终态详情与时间戳 |
-| `GET /api/v1/submissions` | 返回配置测试用户的提交历史，可按题号、状态和 verdict 筛选 |
+| `GET /api/v1/submissions` | 返回配置测试用户的提交历史，可按题号、机器状态和 verdict 筛选；LLM 增量新增 review_status 筛选 |
 | `GET /api/v1/health` | 读取本地接纳、Scheduler 及共享数据库与 Worker 观测缓存，返回 `200` 和 `Cache-Control: no-store`；字段见[健康契约](07-health-observation-design.md#5-http-契约与可见范围) |
 
 健康 GET 不执行 SQL 或 Worker RPC；`failed`、`stale`、`full` 和 `stopping` 均作为响应中的组件状态，组装失败沿用 `500 InternalError`。返回后端 UTC 组装时间及各项实际完成时间，不包含内部地址、数据库路径或原始异常。
@@ -120,6 +135,8 @@ P06 的 [`Database`](../crates/backend/src/database/mod.rs) 提供题目列表�
 列表使用 `limit`、`offset`，默认页长和最大页长由配置提供。题目按题号排序，历史按 `created_at_ms DESC, id DESC` 排序；列表不附带源码、题面正文或终态诊断。题目查询不返回测试输入和答案。
 
 两个列表的顶层 JSON 均为 `{"items":[...],"limit":20,"offset":0}`，`limit` 是生效的页长，`offset` 默认 0，不额外计算总条数。题目列表项包含 `problem_id`、`version_no`、`title`；题目详情增加 `statement` 和 `languages`，每个语言项包含 `language_id`、`cpu_time_ms`、`wall_time_ms`、`memory_kib`。提交历史项采用第 5.3 节的身份、状态、结论和时间戳字段，省略 `terminal_details`。请求字段、分页及筛选参数不接受未规定字段。
+
+LLM 增量在最新及显式版本的题目详情新增 review_mode，提交历史项新增 review_status，不携带 review 详情。历史 review_status 允许 DISABLED、PENDING、DOUBTFUL、PASS、FAILED，省略表示全部；与 problem_id、state、verdict 按 AND 组合后排序和分页，非法值返回 InvalidRequest。提交详情的审查字段见第 5.3 节。
 
 `statement` 是 Markdown 源文，后端按字符串返回，不预渲染 HTML。GUI 按[题面展示规则](05-frontend-design.md#32-答题页面)解析并禁用内嵌 HTML；公开样例写在题面中，不由测试用例接口提供。
 
@@ -161,6 +178,8 @@ Idempotency-Key: 7b5f28d3-51a4-463c-98a4-0a11815d8d46
 | `verdict` | 判题结论，未取得判题结论时为 `null` |
 | `terminal_details` | 终态详情对象；运行中和 AC 时为 `null` |
 | `created_at_ms`、`terminal_at_ms` | UTC Unix 毫秒；终态时间尚无时为 `null` |
+| `review_status`（待实施） | 独立审查状态，DISABLED / PENDING / DOUBTFUL / PASS / FAILED |
+| `review`（待实施） | 可空对象，返回审查 ID、触发来源、时间、模型、有效意见或稳定错误；具体合同见[第 08 篇第 8.1 节](08-llm-code-review-design.md#81-接口) |
 
 运行中 `verdict` 和终态详情为空；AC 仅有结论；CE 带编译诊断和截断标记；WA、RE、TLE、MLE、OLE 只带首个失败用例；执行失败带 `code` 和有界 `diagnostic`。缺失的用例和统计保持缺失，不构造占位数据。
 
@@ -168,17 +187,19 @@ CE 的 `terminal_details` 使用 `compile_diagnostic_base64`、`compile_diagnost
 
 查询到判题失败仍返回 `200 OK`，由业务状态和结果描述失败。执行失败详情中的 `code` 属于任务结果，不是 HTTP 错误码。
 
+review 独立于 terminal_details，机器 AC 仍要求 terminal_details 为 null。审查 DOUBTFUL 或 FAILED 同样作为 GET 的正常业务数据返回 200，不把审查失败当作机器执行失败。prompt_version、raw_output_json、endpoint、密钥、完整 API 正文和思考链不进入前端 DTO。
+
 ### 5.4 HTTP 错误规约
 
 错误结构采用 `{"error":{"code":"QueueFull","message":"The submission queue is full."}}`。`code` 稳定供前端判断，`message` 为英文，具体措辞可以改进。HTTP 错误只描述当前 HTTP 操作未能完成。
 
-首版所有 HTTP `error.code` 如下，增加错误码时须先更新此表：
+HTTP `error.code` 如下，标注 LLM 的新增项待实施；增加错误码时须先更新此表：
 
 | `error.code` | HTTP 状态码 | 条件 |
 | --- | --- | --- |
 | `InvalidRequest` | `400` | JSON、路径或查询参数格式错误，必填值缺失、源码为空、出现未允许字段或分页与筛选值无效 |
 | `InvalidIdempotencyKey` | `400` | 创建请求缺失 `Idempotency-Key`，或键不符合 UUID 格式 |
-| `UnsupportedMediaType` | `415` | 创建请求未使用 JSON Content-Type |
+| `UnsupportedMediaType` | `415` | POST 请求未使用 JSON Content-Type |
 | `RequestTooLarge` | `413` | HTTP 请求体超过上限 |
 | `SourceTooLarge` | `413` | 源码按 UTF-8 编码后超过字节上限 |
 | `UnsupportedLanguage` | `422` | 请求的语言不是首版支持的 C 或 Python |
@@ -188,7 +209,11 @@ CE 的 `terminal_details` 使用 `compile_diagnostic_base64`、`compile_diagnost
 | `SubmissionNotFound` | `404` | 提交不存在 |
 | `IdempotencyConflict` | `409` | 同一用户的同一幂等键携带不同题目、语言或源码 |
 | `QueueFull` | `503` | 当前没有待接纳名额 |
-| `BackendStopping` | `503` | 后端已停止接纳新提交 |
+| `JudgingNotFinished`（LLM） | `409` | 手动审查的机器 state 不是 finished |
+| `ReviewChanged`（LLM） | `409` | 手动接纳时最新审查 ID 与 expected_review_id 不同，需先取得最新快照 |
+| `ReviewUnavailable`（LLM） | `503` | 审查服务未启用或不可接纳 |
+| `ReviewQueueFull`（LLM） | `503` | 独立审查队列没有待执行名额 |
+| `BackendStopping` | `503` | 后端已停止接纳新提交；LLM 增量也用于停止后的手动审查请求 |
 | `RouteNotFound` | `404` | API 路径不存在 |
 | `MethodNotAllowed` | `405` | 路径存在但不支持该 HTTP 方法 |
 | `InternalError` | `500` | 数据库访问、预置任务数据或当前操作发生内部错误 |
@@ -196,6 +221,12 @@ CE 的 `terminal_details` 使用 `compile_diagnostic_base64`、`compile_diagnost
 已有排队提交因没有名额而无法再次交接时，`QueueFull` 的 `error` 对象额外携带 `submission_id`，指向原提交；其他错误省略该字段。内部 SQL、宿主路径和原始传输异常只写日志，不直接用作 `error.code` 或 `message`。框架及中间件的错误响应也遵守本节。
 
 数据库操作失败是否同时触发后端退出，按[第 8.3 节](#83-数据库及后台故障)区分普通只读失败、关键写入失败与严重存储故障。
+
+### 5.5 手动审查（待实施）
+
+POST review 的 JSON 必须携带最近一次 GET 取得的 expected_review_id，尚无审查时为 null。仅机器 state=finished 可启动，包括 CE、零通过及题目禁用自动审查的情况；不满足自动门槛不限制手动触发。
+
+按[第 08 篇第 8.1 节](08-llm-code-review-design.md#81-接口)处理服务状态、PENDING 合并、预期 ID 和队列名额：已有 PENDING 返回 200 并复用同次审查，新接纳返回 202，包含 submission_id、review_status 和 review，Location 指向提交详情。新一轮覆盖上次审查，机器结果保持不变。GET 只读快照；自动触发直接走进程内交接。
 
 ## 6. 提交创建与进程内交接
 
@@ -265,6 +296,8 @@ gRPC deadline 覆盖单次提交、查询或 ACK；不启用应用层自动重�
 
 `finished` 与 `failed` 的写入使用 `WHERE state IN ('dispatching','running')`，在同一事务中保存状态、独立 verdict、详情和终态时间。终态时间是后端保存时刻。
 
+LLM 增量按固定版本 review_mode 与已校验机器结果判断门槛，在上述首次终态写入中同时保存审查初态。独立名额预留、未生效时释放、提交后交接及交接失败处理遵守[第 08 篇第 7.1 节](08-llm-code-review-design.md#71-自动交接)。重复终态、ACK 失败、同键重传和后端重启不重复自动触发。审查的外部网络等待不进入判题跟踪或 ACK 流程。
+
 事务提交后调用 `AcknowledgeResult`。ACK 失败仅记录警告，不回滚数据库、不重判；首版不建立自动 ACK 重试循环或持久确认队列。Worker 已返回终态且本次 ACK 调用已结束后，释放本地在途记录和路由。
 
 迟到结果不能覆盖已保存失败；如果在本次仍有路由的处理流程中拿到旧终态，可丢弃内容并 ACK。任务跟踪结束后，不额外扫描旧 Worker 查找迟到结果。
@@ -279,6 +312,8 @@ gRPC deadline 覆盖单次提交、查询或 ACK；不启用应用层自动重�
 4. 检查现有 `queued` 数量不超过待接纳上限，按 `created_at_ms, id` 装入完整任务；超限报错退出，由部署端调整上限。
 5. 创建 Worker 客户端句柄，启动 Scheduler、共享健康采集和 HTTP 服务；全部启动检查成功后才接纳 HTTP 提交。健康缓存初始可为 `unknown`，无需等待首轮探测成功。
 
+LLM 增量在接纳请求前将遗留 PENDING 保存为 FAILED/ReviewInterrupted，保留原 ID 和请求元数据、补完成时间，不补投模型请求；启动并监督审查模块，与现有判题启动处理共同由入口编排。
+
 排队任务继续调度；在途旧任务不恢复、不重交、不补发 ACK。没有 Worker 可立即接纳时，排队任务留在内存等待候选地址下次可用。
 
 ### 8.2 正常停机
@@ -289,6 +324,8 @@ gRPC deadline 覆盖单次提交、查询或 ACK；不启用应用层自动重�
 
 等待已经分派的任务完成正常跟踪、结果保存和一次有 deadline 的 ACK 调用，再关闭 HTTP，通知健康采集停止并等待其结束，最后关闭 SQLx 连接池和日志。等待业务收尾期间，健康采集及健康 HTTP 查询继续可用。明确未接纳而退回队列的任务不再分派。停止后端不向 Worker 发送远程取消请求。
 
+LLM 增量收到停止信号即关闭手动和自动审查接纳，取消未完成审查并按本次 ID 保存 FAILED/ReviewInterrupted；停止前已开始的短接纳操作允许收尾。停止后到达且满足自动门槛的机器终态，在保存机器结果的同一事务中直接写入 FAILED/ReviewInterrupted，不再入审查队列。关闭 HTTP 和数据库前等待本地审查收尾，不等待远端模型执行完成；详细停止边界见[第 08 篇第 7.3 节](08-llm-code-review-design.md#73-启动停机与异常)。
+
 被强制终止时，下次启动仍按第 8.1 节处理，不承诺这一次等待完成。
 
 ### 8.3 数据库及后台故障
@@ -296,6 +333,8 @@ gRPC deadline 覆盖单次提交、查询或 ACK；不启用应用层自动重�
 连接配置有限 `busy_timeout_ms`，对 SQLite 支持的锁竞争先有限等待。运行期普通只读操作失败时，记录英文错误，当前 HTTP 操作返回 `500 InternalError`，后端继续运行。此规则覆盖题目、提交历史和结果查询，以及创建写事务开始前的幂等查询；例如查询锁等待耗尽或连接池等待超时。这类失败可能随锁释放或负载回落而恢复，单次失败不作为进程退出依据。健康读取探测的普通失败只更新缓存，健康 HTTP 读取该缓存仍返回 `200`。
 
 关键写入包括创建提交的写事务开始、执行和提交，业务状态转换、终态保存，以及启动时旧在途记录的中断写入。上述操作发生数据库错误，经过适用的有限锁等待仍无法完成时，记录英文错误并触发故障退出；未成功保存的结果不 ACK，也不能声称已将任务保存为失败。预期的查重与业务校验错误正常返回，不触发进程退出。
+
+LLM 增量的审查接纳、完成和中断写入同属关键数据库写入；审查调度任务意外结束按入口监督规则故障退出。普通外部 API 失败只结束本次审查，不触发后端退出；下次启动按审查中断规则处理遗留 PENDING。
 
 明确的磁盘满、I/O 故障和数据库损坏等严重存储故障，无论发生在读取还是写入时，均触发故障退出，不适用普通只读失败的继续运行规则。
 
@@ -319,12 +358,15 @@ Scheduler 后台任务意外退出交给程序入口记录错误并触发故障�
 | Scheduler | 待接纳上限、Worker 地址列表、轮询间隔、拒绝后再次尝试间隔 |
 | gRPC | 提交、查询和 ACK deadline，发送与接收消息上限 |
 | 健康观测 | `[health]` 的 `interval_ms` 和 `timeout_ms`，缺省分别为 5_000 和 1_000；均为正值，派生过期阈值 `2 * (interval_ms + timeout_ms)` 必须不溢出 |
+| LLM 审查（待实施） | 可缺省的 `[llm_review]`，缺省不启用；endpoint、密钥、模型、思考强度、独立并发与队列名额、HTTP/token/字节预算见[第 08 篇第 9 节](08-llm-code-review-design.md#9-后端配置预算与错误) |
 | 任务校验 | 源码、用例数、单个输入和答案、合计字节、运行时间及内存的允许上限 |
 | 结果与日志 | 有界诊断及输出约定、日志级别 |
 
 API 上限与部署的 Worker 规约对齐，Base64 结果和 JSON 请求开销单独计量。配置不从 Worker 动态发现，不协商能力，不自动放宽限额。
 
 日志统一为英文、可读的单行文本，记录提交 ID、题号、语言、Worker 地址、操作和错误原因。创建、分派、终态保存和停机记录为 info；明确拒绝和 ACK 失败为 warn；数据库与后台故障为 error；重复请求和普通轮询为 debug。日志不输出完整源码、测试数据或无界程序输出。
+
+LLM 配置同样只由后端 TOML 读取，正式程序不加载开发用 .env。审查日志字段和保密边界遵守第 08 篇第 9、11 节；未启用时手动请求返回 ReviewUnavailable，满足自动门槛的审查保存 FAILED/ReviewUnavailable，停机时优先使用 ReviewInterrupted。
 
 ## 10. 最小验证范围
 
@@ -337,3 +379,5 @@ API 上限与部署的 Worker 规约对齐，Base64 结果和 JSON 请求开销�
 - 提交响应不明只查询一次；失联后保存失败且不重交；数据库终态提交早于 ACK，ACK 失败不改变终态。
 - 后端重启继续装入 `queued`，将旧在途记录保存失败，不联系旧 Worker；启动排队超限和关键数据库故障按约定退出。
 - 正常停机完成在途处理，排队记录留至下次启动。
+
+LLM 新增合同按[第 08 篇 L01–L06](08-llm-code-review-design.md#10-实施顺序与有限验收)独立验证；上述已完成的判题检查不作为审查功能已交付或已验收的证据。

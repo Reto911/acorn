@@ -1,6 +1,8 @@
 # 数据库 SQL
 
-[001-initial-schema.sql](001-initial-schema.sql) 实现[数据库设计版本 2](../docs/02-database-design.md)的六张业务表、外键、约束和索引。数据库结构版本记录在 `PRAGMA user_version` 中。
+[001-initial-schema.sql](001-initial-schema.sql) 当前实现[数据库设计](../docs/02-database-design.md)中已交付的结构版本 2，包含六张业务表、外键、约束和索引。数据库结构版本记录在 `PRAGMA user_version` 中。
+
+LLM 增量已批准、待实施：L01 将完整初始 SQL 与应用版本检查一同更新为 3，增加 review_mode、review_status、review_id 和 review_details_json。版本 2 → 3 的升级 SQL 及执行命令届时单独交付，不纳入仓库；部署端停服务、备份后离线执行，旧记录默认 DISABLED，不补跑审查，详见[第 08 篇升级合同](../docs/08-llm-code-review-design.md#53-数据库升级职责)。本文现有命令用于当前版本的新库初始化，不用于已有库升级。
 
 使用 SQLite 3.38.0 或更新版本，并启用 JSON 函数。表使用 [STRICT 模式](https://www.sqlite.org/stricttables.html)约束存储类型；[JSON 函数](https://www.sqlite.org/json1.html)检查终态详情是合法 JSON 对象。
 
