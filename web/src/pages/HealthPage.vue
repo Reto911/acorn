@@ -26,6 +26,7 @@ const {
 } = useQuery(
   () => 'health',
   (_query, signal) => getHealth({ signal }),
+  { refreshIntervalMs: 10_000 },
 )
 const stale = computed(() =>
   snapshot.value ? staleObservations(snapshot.value) : [],
@@ -69,9 +70,6 @@ const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone
           以下为上次成功获取的旧快照，内容可能已过期；请重试获取最新快照。
         </p>
       </div>
-      <p class="health-note">
-        页面仅在进入或手动刷新时获取快照；刷新读取后端缓存，各项检查时间可能不同。
-      </p>
     </div>
 
     <template v-if="snapshot">
@@ -114,9 +112,6 @@ const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone
               </dd>
             </div>
           </dl>
-          <p class="health-note">
-            名额占用包含创建预留、排队和等待接纳确认的任务；实际提交以创建接口结果为准。
-          </p>
         </section>
         <section class="surface" aria-labelledby="database-title">
           <div class="panel-heading"><h2 id="database-title">数据库</h2></div>
@@ -143,9 +138,6 @@ const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone
               </dd>
             </div>
           </dl>
-          <p class="health-note">
-            读取正常表示该次检查完成，不保证后续写入成功。
-          </p>
         </section>
       </div>
 
@@ -205,10 +197,6 @@ const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone
             }}</template>
           </ElTableColumn>
         </ElTable>
-        <p class="health-note">
-          节点标识按配置顺序生成。检查失败表示未取得有效状态，不能据此断言
-          Worker 已停止；执行状态、停机标记与结果数量分别展示。
-        </p>
       </section>
     </template>
   </section>

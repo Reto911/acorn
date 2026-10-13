@@ -1,10 +1,11 @@
 import { onScopeDispose, shallowRef, watch } from 'vue'
 import { RequestError } from '../api/http'
 
-/** Page identity/query changes cancel old requests and invalidate late responses. */
+/** Cancel obsolete queries; optional periodic refreshes preserve data and skip busy ticks. */
 export function useQuery<Q, T>(
   source: () => Q,
   load: (query: Q, signal: AbortSignal) => Promise<T>,
+  options: { refreshIntervalMs?: number } = {},
 ) {
   const data = shallowRef<T | null>(null)
   const error = shallowRef<unknown>(null)
@@ -36,10 +37,18 @@ export function useQuery<Q, T>(
   }
 
   watch(source, () => void execute(false), { immediate: true, deep: true })
+  const reload = () => execute(true)
+  const refreshTimer =
+    options.refreshIntervalMs === undefined
+      ? undefined
+      : setInterval(() => {
+          if (!loading.value) void reload()
+        }, options.refreshIntervalMs)
   onScopeDispose(() => {
+    clearInterval(refreshTimer)
     generation += 1
     controller?.abort()
   })
 
-  return { data, error, loading, reload: () => execute(true) }
+  return { data, error, loading, reload }
 }
