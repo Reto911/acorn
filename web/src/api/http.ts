@@ -43,7 +43,7 @@ interface RequestOptions {
   body?: unknown
   idempotencyKey?: string
   signal?: AbortSignal
-  /** Creation must validate its acknowledgement before clearing the saved request. */
+  /** Mutating operations validate acknowledgements before accepting their outcome. */
   validate?: (value: unknown, status: number) => boolean
 }
 
@@ -68,7 +68,7 @@ function errorBody(value: unknown): HttpErrorBody | undefined {
   }
 }
 
-/** One attempt only. Aborting browser waiting does not cancel backend creation. */
+/** One attempt only. Aborting browser waiting does not cancel registered backend operations. */
 export async function requestJson<T>(
   path: string,
   options: RequestOptions,

@@ -6,6 +6,7 @@ import { listSubmissions } from '../api'
 import RequestFeedback from '../components/RequestFeedback.vue'
 import { useQuery } from '../composables/useQuery'
 import { readHistoryQuery } from '../utils/historyQuery'
+import { reviewStatuses } from '../utils/reviewPresentation'
 import {
   submissionDateFormat as dateFormat,
   submissionStates as states,
@@ -22,6 +23,7 @@ const filters = reactive({
   problem_id: '' as string | number,
   state: '',
   verdict: '',
+  review_status: '',
 })
 watch(
   query,
@@ -30,6 +32,7 @@ watch(
       value.problem_id === undefined ? '' : String(value.problem_id)
     filters.state = value.state ?? ''
     filters.verdict = value.verdict ?? ''
+    filters.review_status = value.review_status ?? ''
   },
   { immediate: true },
 )
@@ -47,7 +50,8 @@ const hasFilters = computed(
   () =>
     query.value.problem_id !== undefined ||
     query.value.state !== undefined ||
-    query.value.verdict !== undefined,
+    query.value.verdict !== undefined ||
+    query.value.review_status !== undefined,
 )
 const pageQuery = computed(() => ({
   ...query.value,
@@ -65,6 +69,7 @@ function applyFilters() {
       problem_id: filters.problem_id || undefined,
       state: filters.state || undefined,
       verdict: filters.verdict || undefined,
+      review_status: filters.review_status || undefined,
     },
   })
 }
@@ -73,6 +78,7 @@ function clearFilters() {
   filters.problem_id = ''
   filters.state = ''
   filters.verdict = ''
+  filters.review_status = ''
   void router.push({
     path: '/submissions',
     query: { limit: pageQuery.value.limit, offset: 0 },
@@ -136,6 +142,19 @@ function changePage(offset: number) {
             </option>
           </select>
         </div>
+        <div class="history-filter">
+          <label for="history-review">审查状态</label>
+          <select id="history-review" v-model="filters.review_status">
+            <option value="">全部审查状态</option>
+            <option
+              v-for="(label, value) in reviewStatuses"
+              :key="value"
+              :value="value"
+            >
+              {{ label }}
+            </option>
+          </select>
+        </div>
         <div class="history-filter-actions">
           <ElButton type="primary" native-type="submit" :disabled="loading"
             >查询</ElButton
@@ -168,7 +187,7 @@ function changePage(offset: number) {
             page && page.offset > 0
               ? '已到达列表末尾，可返回上一页或回到首页。'
               : hasFilters
-                ? '请调整或清除筛选条件。状态与判题结论同时设置时需同时满足。'
+                ? '请调整或清除筛选条件。多个筛选条件需同时满足。'
                 : '提交代码后，可在这里重新打开判题结果。'
           "
           @retry="reload"
@@ -198,28 +217,33 @@ function changePage(offset: number) {
             >
           </template>
         </ElTableColumn>
-        <ElTableColumn prop="problem_id" label="题号" width="64" />
-        <ElTableColumn label="版本" width="64">
+        <ElTableColumn prop="problem_id" label="题号" width="56" />
+        <ElTableColumn label="版本" width="56">
           <template #default="{ row }">v{{ row.version_no }}</template>
         </ElTableColumn>
-        <ElTableColumn label="语言" width="88">
+        <ElTableColumn label="语言" width="78">
           <template #default="{ row }">{{
             row.language_id === 'c' ? 'C' : 'Python 3'
           }}</template>
         </ElTableColumn>
-        <ElTableColumn label="状态" width="92">
+        <ElTableColumn label="状态" width="82">
           <template #default="{ row }">{{
             states[row.state as keyof typeof states]
           }}</template>
         </ElTableColumn>
-        <ElTableColumn label="判题结论" width="120">
+        <ElTableColumn label="判题结论" width="112">
           <template #default="{ row }">{{
             row.verdict === null
               ? '未产生'
               : `${verdicts[row.verdict as keyof typeof verdicts]}（${row.verdict}）`
           }}</template>
         </ElTableColumn>
-        <ElTableColumn label="时间" min-width="210">
+        <ElTableColumn label="审查状态" width="128">
+          <template #default="{ row }">{{
+            reviewStatuses[row.review_status as keyof typeof reviewStatuses]
+          }}</template>
+        </ElTableColumn>
+        <ElTableColumn label="时间" min-width="200">
           <template #default="{ row }">
             <div class="history-time">
               <span>创建</span>{{ dateFormat.format(row.created_at_ms) }}

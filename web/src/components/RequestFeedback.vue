@@ -11,7 +11,7 @@ const props = withDefaults(
     loading?: boolean
     loadingText?: string
     error?: unknown
-    operation?: 'query' | 'create'
+    operation?: 'query' | 'create' | 'review'
     empty?: boolean
     emptyText?: string
     emptyDescription?: string

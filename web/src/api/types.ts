@@ -3,6 +3,55 @@ export type LanguageId = 'c' | 'python'
 export type SubmissionState =
   'queued' | 'dispatching' | 'running' | 'finished' | 'failed'
 export type Verdict = 'AC' | 'WA' | 'CE' | 'RE' | 'TLE' | 'MLE' | 'OLE'
+export type ReviewMode = 'DISABLED' | 'ENABLE-ANY' | 'ENABLE-ALL'
+export type ReviewStatus =
+  'DISABLED' | 'PENDING' | 'PASS' | 'DOUBTFUL' | 'FAILED'
+export type ReviewErrorCode =
+  | 'ReviewUnavailable'
+  | 'ReviewQueueFull'
+  | 'ReviewInputUnavailable'
+  | 'ReviewInputTooLarge'
+  | 'ReviewTimeout'
+  | 'ReviewApiFailed'
+  | 'ReviewIncomplete'
+  | 'ReviewInvalidOutput'
+  | 'ReviewInterrupted'
+export type FindingCategory =
+  | 'TEST_TARGETING'
+  | 'JUDGE_ENVIRONMENT_ABUSE'
+  | 'STATEMENT_CONSTRAINT_VIOLATION'
+
+/** Locations are one-based inclusive intervals in the saved submission source. */
+export interface ReviewFinding {
+  category: FindingCategory
+  line_start: number
+  line_end: number
+  evidence: string
+  normal_explanation: string
+}
+
+export interface ReviewResult {
+  decision: 'PASS' | 'DOUBTFUL'
+  summary: string
+  findings: ReviewFinding[]
+}
+
+/** The seven public fields deliberately exclude provider diagnostics and policy metadata. */
+export interface Review {
+  review_id: string
+  trigger: 'auto' | 'manual'
+  requested_at_ms: number
+  completed_at_ms: number | null
+  model: string
+  result: ReviewResult | null
+  error: { code: ReviewErrorCode; message: string } | null
+}
+
+export interface ReviewResponse {
+  submission_id: string
+  review_status: Exclude<ReviewStatus, 'DISABLED'>
+  review: Review
+}
 
 export interface Page<T> {
   items: T[]
@@ -31,6 +80,7 @@ export interface ProblemLanguage {
 export interface Problem extends ProblemSummary {
   statement: string
   languages: ProblemLanguage[]
+  review_mode: ReviewMode
 }
 
 export interface CreateSubmissionRequest {
@@ -51,6 +101,7 @@ export interface SubmissionSummary {
   language_id: LanguageId
   state: SubmissionState
   verdict: Verdict | null
+  review_status: ReviewStatus
   created_at_ms: number
   terminal_at_ms: number | null
 }
@@ -88,8 +139,7 @@ export interface ExecutionFailure {
 }
 
 /** State and verdict discriminate the terminal shapes without invented placeholders. */
-export type Submission = SubmissionSummary &
-  (
+export type Submission = SubmissionSummary & { review: Review | null } & (
     | {
         state: 'queued' | 'dispatching' | 'running'
         verdict: null
@@ -110,6 +160,7 @@ export interface HistoryQuery extends PageQuery {
   problem_id?: number
   state?: SubmissionState
   verdict?: Verdict
+  review_status?: ReviewStatus
 }
 
 export interface HttpErrorBody {

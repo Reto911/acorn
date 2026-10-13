@@ -11,6 +11,8 @@ const identity = {
   language_id: 'c' as const,
   created_at_ms: 1000,
   terminal_at_ms: 2000,
+  review_status: 'DISABLED' as const,
+  review: null,
 }
 
 function render(submission: Submission) {

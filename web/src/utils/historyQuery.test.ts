@@ -34,12 +34,12 @@ describe('history route queries', () => {
       await vi.waitFor(() => expect(page.data.value?.limit).toBe(3))
       expect(fetch.mock.calls[0]![0]).toBe('/api/v1/submissions')
       await router.push(
-        '/submissions?problem_id=1&state=finished&verdict=AC&limit=3&offset=6&extra=ignored',
+        '/submissions?problem_id=1&state=finished&verdict=AC&review_status=DOUBTFUL&limit=3&offset=6&extra=ignored',
       )
       await nextTick()
       await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2))
       expect(fetch.mock.calls[1]![0]).toBe(
-        '/api/v1/submissions?limit=3&offset=6&problem_id=1&state=finished&verdict=AC',
+        '/api/v1/submissions?limit=3&offset=6&problem_id=1&state=finished&verdict=AC&review_status=DOUBTFUL',
       )
     } finally {
       scope.stop()
@@ -60,6 +60,7 @@ describe('history route queries', () => {
       problem_id: '1',
       state: 'finished',
       verdict: 'AC',
+      review_status: 'DOUBTFUL',
       limit: '3',
       offset: '6',
     })
@@ -80,11 +81,16 @@ describe('history route queries', () => {
     try {
       await expect(
         listSubmissions(
-          readHistoryQuery({ problem_id: '-1', state: 'unknown', offset: '0' }),
+          readHistoryQuery({
+            problem_id: '-1',
+            state: 'unknown',
+            review_status: 'unknown',
+            offset: '0',
+          }),
         ),
       ).rejects.toMatchObject({ code: 'InvalidRequest' })
       expect(fetch.mock.calls[0]![0]).toBe(
-        '/api/v1/submissions?offset=0&problem_id=-1&state=unknown',
+        '/api/v1/submissions?offset=0&problem_id=-1&state=unknown&review_status=unknown',
       )
     } finally {
       consoleError.mockRestore()

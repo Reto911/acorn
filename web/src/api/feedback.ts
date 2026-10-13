@@ -32,6 +32,22 @@ const messages: Record<string, [string, string]> = {
     '本次请求已结束，请先查看提交历史；再次主动提交可能创建另一条记录。',
   ],
   QueueFull: ['当前排队任务较多', '原提交请求已保留，请稍后手动重试原提交。'],
+  JudgingNotFinished: [
+    '机器判题尚未完成',
+    '请刷新提交状态，只有机器判题已完成的提交可以启动审查。',
+  ],
+  ReviewChanged: [
+    '最新审查已变化',
+    '页面会查询最新状态；请查看最新结果后再决定是否重新审查，不会自动再次发送。',
+  ],
+  ReviewUnavailable: [
+    '审查服务暂不可用',
+    '此次审查未接纳，原审查结果保留，请稍后手动操作。',
+  ],
+  ReviewQueueFull: [
+    '审查队列已满',
+    '此次审查未接纳，原审查结果保留，请稍后手动操作。',
+  ],
   BackendStopping: [
     '服务暂不接纳新提交',
     '原提交请求已保留，请稍后手动重试；已有提交仍可查询。',
@@ -47,12 +63,33 @@ const messages: Record<string, [string, string]> = {
 /** UI guidance describes this operation, without claiming drafts were saved. */
 export function errorFeedback(
   error: unknown,
-  operation: 'query' | 'create' = 'query',
+  operation: 'query' | 'create' | 'review' = 'query',
 ): ErrorFeedback {
+  if (operation === 'review' && reviewNeedsRefresh(error))
+    return error instanceof RequestError && error.code === 'ReviewChanged'
+      ? {
+          title: messages.ReviewChanged![0],
+          description: messages.ReviewChanged![1],
+          code: error.code,
+        }
+      : {
+          title: '尚未确认审查请求是否接纳',
+          description:
+            '请以最新查询状态为准，再决定是否手动操作；不会自动再次发送审查请求，停止等待也不会撤销后端已登记的操作。',
+          code: error instanceof RequestError ? error.code : undefined,
+          detail:
+            error instanceof RequestError ? error.body?.message : undefined,
+        }
   if (!(error instanceof RequestError))
     return {
       title: '操作未能完成',
       description: '请重试；若持续出现，请联系维护者。',
+    }
+  if (operation === 'review' && error.code === 'BackendStopping')
+    return {
+      title: '服务已停止接纳审查',
+      description: '此次审查未接纳，原审查结果保留，请稍后手动操作。',
+      code: error.code,
     }
   const createUnknown =
     operation === 'create' &&
@@ -104,6 +141,19 @@ export function errorFeedback(
     code: error.code,
     detail: error.body?.message,
   }
+}
+
+/** Uncertain POST outcomes and stale identities require GET before another manual attempt. */
+export function reviewNeedsRefresh(error: unknown) {
+  return (
+    !(error instanceof RequestError) ||
+    error.code === 'ReviewChanged' ||
+    error.kind !== 'http' ||
+    ((error.status ?? 0) >= 500 &&
+      !['ReviewUnavailable', 'ReviewQueueFull', 'BackendStopping'].includes(
+        error.code ?? '',
+      ))
+  )
 }
 
 /** Only documented, definitive rejections end a create attempt automatically. */

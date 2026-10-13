@@ -5,6 +5,7 @@ import {
   getSubmission,
   listProblems,
   listSubmissions,
+  startReview,
 } from '.'
 import { errorFeedback } from './feedback'
 
@@ -156,6 +157,68 @@ describe('HTTP operation boundaries', () => {
 })
 
 describe('allowed API fields', () => {
+  it('sends only the expected review identity and accepts both new and reused reviews', async () => {
+    const review = {
+      review_id: 'review-a',
+      trigger: 'manual',
+      model: 'review-model',
+      requested_at_ms: 1000,
+      completed_at_ms: null,
+      result: null,
+      error: null,
+    }
+    const response = {
+      submission_id: 'saved-id',
+      review_status: 'PENDING',
+      review,
+    }
+    fetchMock
+      .mockResolvedValueOnce(Response.json(response, { status: 202 }))
+      .mockResolvedValueOnce(Response.json(response, { status: 200 }))
+    expect(await startReview('saved-id', null)).toEqual(response)
+    expect(await startReview('saved-id', 'review-a')).toEqual(response)
+    expect(
+      fetchMock.mock.calls.map(([url, options]) => ({
+        url,
+        method: options?.method,
+        body: JSON.parse(options?.body as string),
+      })),
+    ).toEqual([
+      {
+        url: '/api/v1/submissions/saved-id/review',
+        method: 'POST',
+        body: { expected_review_id: null },
+      },
+      {
+        url: '/api/v1/submissions/saved-id/review',
+        method: 'POST',
+        body: { expected_review_id: 'review-a' },
+      },
+    ])
+    expect(fetchMock.mock.calls[0]![1]?.headers).not.toHaveProperty(
+      'Idempotency-Key',
+    )
+  })
+
+  it('treats a malformed review acknowledgement as uncertain without repeating POST', async () => {
+    fetchMock.mockResolvedValue(
+      Response.json(
+        {
+          submission_id: 'other-id',
+          review_status: 'PENDING',
+          review: { review_id: 'review-a' },
+        },
+        { status: 202 },
+      ),
+    )
+    const error = await startReview('saved-id', null).catch(
+      (cause: unknown) => cause,
+    )
+    expect(error).toMatchObject({ kind: 'invalid-response', status: 202 })
+    expect(errorFeedback(error, 'review').title).toContain('尚未确认审查')
+    expect(fetchMock).toHaveBeenCalledOnce()
+  })
+
   it('picks list parameters and preserves backend defaults', async () => {
     fetchMock.mockImplementation(async () =>
       Response.json({ items: [], limit: 20, offset: 0 }),
@@ -171,6 +234,7 @@ describe('allowed API fields', () => {
       problem_id: 1,
       state: 'finished',
       verdict: 'AC',
+      review_status: 'DOUBTFUL',
       limit: 2,
       offset: 0,
       extra: true,
@@ -178,7 +242,7 @@ describe('allowed API fields', () => {
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
       '/api/v1/problems',
       '/api/v1/problems?limit=2&offset=0',
-      '/api/v1/submissions?limit=2&offset=0&problem_id=1&state=finished&verdict=AC',
+      '/api/v1/submissions?limit=2&offset=0&problem_id=1&state=finished&verdict=AC&review_status=DOUBTFUL',
     ])
   })
 

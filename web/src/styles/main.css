@@ -490,6 +490,7 @@ h1 {
 
 .result-identity,
 .result-outcome,
+.result-review,
 .result-feedback,
 .fixed-problem-content {
   padding: 24px;
@@ -526,6 +527,7 @@ h1 {
 }
 
 .result-outcome h2,
+.result-review h2,
 .fixed-problem-content h2 {
   font-size: 18px;
   margin-bottom: 16px;
@@ -544,6 +546,45 @@ h1 {
 .result-status.is-failure,
 .output-truncated {
   color: #b34437;
+}
+
+.result-status.is-doubtful {
+  color: #966118;
+}
+
+.review-heading {
+  padding: 0;
+  margin-bottom: 16px;
+}
+
+.review-heading h2 {
+  margin: 0;
+}
+
+.review-facts,
+.review-request-feedback,
+.review-failure {
+  margin-top: 20px;
+}
+
+.result-review h3 {
+  margin: 20px 0 12px;
+  font-size: 15px;
+}
+
+.result-review h4 {
+  margin: 16px 0 8px;
+  font-size: 14px;
+}
+
+.review-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.8;
+}
+
+.review-findings {
+  padding-left: 24px;
 }
 
 .result-outcome h3 {

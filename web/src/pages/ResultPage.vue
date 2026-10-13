@@ -5,6 +5,8 @@ import { getSubmission } from '../api'
 import FixedProblemStatement from '../components/FixedProblemStatement.vue'
 import RequestFeedback from '../components/RequestFeedback.vue'
 import SubmissionOutcome from '../components/SubmissionOutcome.vue'
+import SubmissionReview from '../components/SubmissionReview.vue'
+import { useReviewRequest } from '../composables/useReviewRequest'
 import { useSubmissionPolling } from '../composables/useSubmissionPolling'
 import { readHistoryQuery } from '../utils/historyQuery'
 import { submissionDateFormat as dateFormat } from '../utils/submissionPresentation'
@@ -17,10 +19,22 @@ const {
   loading,
   hidden,
   terminal,
+  refreshRequired,
   refresh,
+  reconcileReview,
 } = useSubmissionPolling(
   () => String(route.params.submissionId),
   (id, signal) => getSubmission(id, { signal, polling: true }),
+)
+const {
+  sending: reviewSending,
+  error: reviewError,
+  canStart: canStartReview,
+  start: startReview,
+} = useReviewRequest(
+  () => submission.value,
+  () => refreshRequired.value,
+  reconcileReview,
 )
 const timeZone = dateFormat.resolvedOptions().timeZone
 </script>
@@ -113,6 +127,15 @@ const timeZone = dateFormat.resolvedOptions().timeZone
         </p>
       </section>
       <SubmissionOutcome :submission="submission" />
+      <SubmissionReview
+        :submission="submission"
+        :sending="reviewSending"
+        :can-start="canStartReview"
+        :refresh-required="refreshRequired"
+        :error="reviewError"
+        @start="startReview"
+        @refresh="refresh"
+      />
       <p v-if="!terminal && !error" class="result-note" role="status">
         {{
           hidden

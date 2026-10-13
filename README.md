@@ -6,7 +6,7 @@ C 与 Python 3 的单文件源码判题系统。后端包含 HTTP API、Schedule
 
 浏览器 GUI 采用 Vue 3、TypeScript 和 Monaco，已完成 F01–F07：题目浏览、C/Python 编辑、本地草稿、主动提交、结果详情、固定版本题面、状态轮询，以及提交历史筛选、分页和详情往返。首版桌面联调已覆盖 C/Python AC、C CE、Python WA 和 C TLE，实际新增与复用记录、UI-01–UI-09 对应关系及未测范围见[前端开发计划](docs/06-frontend-development-plan.md#57-f07首版浏览器联调与操作说明)。交互依据见[GUI 设计](docs/05-frontend-design.md)；健康观测 F08 / H01–H04 已完成，提供 Worker 状态 RPC、后端共享采集、只读 HTTP 快照及 `/health` 系统状态页面，支持自动、手动刷新和独立过期警告；初次实际检查见[健康页面交付记录](docs/06-frontend-development-plan.md#511-f08h04健康页面与最终连通验收)，后续每 10 秒自动获取的实现与验证边界见[补充记录](docs/06-frontend-development-plan.md#512-健康页面每十秒自动获取)。
 
-LLM 代码审查已完成 L01–L04，合同与后续计划见[LLM 设计](docs/08-llm-code-review-design.md)。已提供结构版本 3、固定策略与客户端、独立队列和生命周期，以及手动启动／重跑、HTTP 审查查询和历史状态筛选，见[手动接口实施记录](docs/08-llm-code-review-design.md#124-l04手动接口与查询)。配置 enabled=true 后可手动审查任意 finished 提交；自动审查还须固定题目版本达到门槛，默认策略为 DISABLED。机器结果保存、ACK 和 Worker 本地占用释放后才自动交接，模型等待不占数据库连接。GUI 与最终联调待 L05–L06。当前后端只接受结构版本 3；已有版本 2 数据库须按[离线升级交付](docs/08-llm-code-review-design.md#1212-离线升级交付)停服务、备份并单独执行升级 SQL，不能重跑初始化 SQL。既有判题和健康验收不扩展为完整 LLM 验收。
+LLM 代码审查已完成 L01–L05，合同与后续计划见[LLM 设计](docs/08-llm-code-review-design.md)。已提供结构版本 3、固定策略与客户端、独立队列和生命周期、手动 HTTP 与查询，以及 GUI 审查结果区、启动／重跑、联合轮询和历史状态筛选，见[前端实施记录](docs/08-llm-code-review-design.md#125-l05结果页轮询与历史筛选)。配置 enabled=true 后可手动审查任意 finished 提交；自动审查还须固定题目版本达到门槛，默认策略为 DISABLED。机器结果保存、ACK 和 Worker 本地占用释放后才自动交接，模型等待不占数据库连接。最终联调及完整链路的真实 API 检查留在 L06。当前后端只接受结构版本 3；已有版本 2 数据库须按[离线升级交付](docs/08-llm-code-review-design.md#1212-离线升级交付)停服务、备份并单独执行升级 SQL，不能重跑初始化 SQL。既有判题和健康验收不扩展为完整 LLM 验收。
 
 ## 浏览器 GUI
 
@@ -186,7 +186,7 @@ curl --fail-with-body --silent --show-error \
 
 ### 手动 LLM 审查与查询
 
-在服务端 TOML 的 `[llm_review]` 中启用 enabled，填写实际 endpoint、api_key 和 model 后重启后端；示例预算及字段见[配置合同](docs/08-llm-code-review-design.md#9-后端配置预算与错误)。正式程序只读取 TOML，不加载开发用 .env，启动不发送模型探测。GUI 审查区待 L05，当前通过 HTTP 操作。
+在服务端 TOML 的 `[llm_review]` 中启用 enabled，填写实际 endpoint、api_key 和 model 后重启后端；示例预算及字段见[配置合同](docs/08-llm-code-review-design.md#9-后端配置预算与错误)。正式程序只读取 TOML，不加载开发用 .env，启动不发送模型探测。GUI 可在结果页点击“启动审查／重新审查”，并在提交历史按审查状态筛选，操作见[前端说明](web/README.md#代码审查)。下述 HTTP 操作适用于直接调用接口。
 
 选择一个机器 state=finished 的 submission_id，包括 CE、首例失败及题目禁用自动审查的提交。先读取最新详情，再从 review.review_id 生成手动请求；首次没有审查时写 null。将下面的占位 ID 替换为实际值：
 

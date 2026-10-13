@@ -8,6 +8,7 @@ const problem: Problem = {
   version_no: 1,
   title: 'A + B',
   statement: 'Add two integers.',
+  review_mode: 'DISABLED',
   languages: [
     {
       language_id: 'c',

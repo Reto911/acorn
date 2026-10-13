@@ -11,6 +11,7 @@ import type {
   ProblemSummary,
   Submission,
   SubmissionSummary,
+  ReviewResponse,
 } from './types'
 
 export interface QueryOptions {
@@ -36,6 +37,7 @@ function queryString(query: HistoryQuery) {
     'problem_id',
     'state',
     'verdict',
+    'review_status',
   ] as const) {
     if (query[key] !== undefined) params.set(key, String(query[key]))
   }
@@ -110,6 +112,49 @@ export async function getSubmission(
       submission_id: submissionId,
       duration_ms: result.duration_ms,
     })
+  return result.data
+}
+
+/** Send one explicit review request using the caller's latest persisted identity; never retry. */
+export async function startReview(
+  submissionId: string,
+  expectedReviewId: string | null,
+  options: QueryOptions = {},
+) {
+  const path = `/api/v1/submissions/${encodeURIComponent(submissionId)}/review`
+  const result = await requestJson<ReviewResponse>(path, {
+    operation: 'start-review',
+    method: 'POST',
+    signal: options.signal,
+    body: { expected_review_id: expectedReviewId },
+    validate: (value, status) => {
+      if (
+        (status !== 200 && status !== 202) ||
+        typeof value !== 'object' ||
+        value === null
+      )
+        return false
+      const response = value as Partial<ReviewResponse>
+      return (
+        response.submission_id === submissionId &&
+        ['PENDING', 'PASS', 'DOUBTFUL', 'FAILED'].includes(
+          response.review_status ?? '',
+        ) &&
+        typeof response.review === 'object' &&
+        response.review !== null &&
+        typeof response.review.review_id === 'string' &&
+        response.review.review_id.length > 0
+      )
+    },
+  })
+  log('info', {
+    operation: 'start-review',
+    path,
+    method: 'POST',
+    status: result.status,
+    submission_id: submissionId,
+    duration_ms: result.duration_ms,
+  })
   return result.data
 }
 

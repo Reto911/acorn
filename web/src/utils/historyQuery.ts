@@ -1,5 +1,10 @@
 import type { LocationQuery } from 'vue-router'
-import type { HistoryQuery, SubmissionState, Verdict } from '../api/types'
+import type {
+  HistoryQuery,
+  ReviewStatus,
+  SubmissionState,
+  Verdict,
+} from '../api/types'
 
 /** Read only history fields; invalid URL values remain subject to API validation. */
 export function readHistoryQuery(query: LocationQuery): HistoryQuery {
@@ -15,5 +20,6 @@ export function readHistoryQuery(query: LocationQuery): HistoryQuery {
     problem_id: number('problem_id'),
     state: value('state') as SubmissionState | undefined,
     verdict: value('verdict') as Verdict | undefined,
+    review_status: value('review_status') as ReviewStatus | undefined,
   }
 }

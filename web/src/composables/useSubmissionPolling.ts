@@ -1,5 +1,5 @@
 import { computed, onScopeDispose, shallowRef, watch } from 'vue'
-import type { Submission } from '../api/types'
+import type { ReviewResponse, Submission } from '../api/types'
 import { logSubmissionState } from '../utils/log'
 
 type PageVisibility = Pick<
@@ -17,8 +17,12 @@ export function useSubmissionPolling(
   const error = shallowRef<unknown>(null)
   const loading = shallowRef(false)
   const hidden = shallowRef(visibility.hidden)
+  const refreshRequired = shallowRef(false)
   const terminal = computed(
-    () => data.value?.state === 'finished' || data.value?.state === 'failed',
+    () =>
+      (data.value?.state === 'finished' || data.value?.state === 'failed') &&
+      data.value.review_status !== 'PENDING' &&
+      !refreshRequired.value,
   )
   let controller: AbortController | undefined
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -52,6 +56,7 @@ export function useSubmissionPolling(
         data.value?.state,
       )
       data.value = snapshot
+      refreshRequired.value = false
     } catch (cause) {
       if (current === generation && !signal.aborted) error.value = cause
     } finally {
@@ -62,6 +67,20 @@ export function useSubmissionPolling(
           timer = setTimeout(() => void refresh(), 1000)
       }
     }
+  }
+
+  /** Discard any older GET, apply an accepted review snapshot and immediately query again. */
+  async function reconcileReview(response?: ReviewResponse) {
+    if (disposed) return
+    stop()
+    refreshRequired.value = true
+    if (response && data.value?.submission_id === response.submission_id)
+      data.value = {
+        ...data.value,
+        review_status: response.review_status,
+        review: response.review,
+      }
+    await refresh()
   }
 
   function visibilityChanged() {
@@ -77,6 +96,7 @@ export function useSubmissionPolling(
       stop()
       data.value = null
       error.value = null
+      refreshRequired.value = false
       void refresh()
     },
     { immediate: true },
@@ -87,5 +107,14 @@ export function useSubmissionPolling(
     visibility.removeEventListener('visibilitychange', visibilityChanged)
   })
 
-  return { data, error, loading, hidden, terminal, refresh }
+  return {
+    data,
+    error,
+    loading,
+    hidden,
+    terminal,
+    refreshRequired,
+    refresh,
+    reconcileReview,
+  }
 }
