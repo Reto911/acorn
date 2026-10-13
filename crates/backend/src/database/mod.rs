@@ -2,6 +2,7 @@
 
 mod problems;
 mod reviews;
+pub(crate) use reviews::ReviewAdmission;
 pub use reviews::ReviewInput;
 mod submissions;
 

@@ -56,6 +56,7 @@ async fn published_queries_and_history_shapes() {
     assert!(list["items"][0].get("statement").is_none());
     let (_, _, detail) = call(&harness.app, "GET", "/api/v1/problems/1", None, None).await;
     assert_eq!(detail["languages"][0]["memory_kib"], 262144);
+    assert_eq!(detail["review_mode"], "DISABLED");
     assert!(detail.get("cases").is_none());
     harness.fixture.publish_next().await;
     let (_, _, latest) = call(&harness.app, "GET", "/api/v1/problems/1", None, None).await;
@@ -69,6 +70,8 @@ async fn published_queries_and_history_shapes() {
     .await;
     assert_eq!(latest["version_no"], 2);
     assert_eq!(old["version_no"], 1);
+    assert_eq!(latest["review_mode"], "DISABLED");
+    assert_eq!(old["review_mode"], "DISABLED");
     let id = create(&harness.app, "python", "ac").await;
     harness.terminal(&id).await;
     let (_, _, history) = call(
@@ -81,6 +84,7 @@ async fn published_queries_and_history_shapes() {
     .await;
     assert_eq!(history["items"][0]["submission_id"], id);
     assert_eq!(history["items"][0]["version_no"], 2);
+    assert_eq!(history["items"][0]["review_status"], "DISABLED");
     assert!(history["items"][0].get("source").is_none());
     assert!(history["items"][0].get("terminal_details").is_none());
     harness.close().await;
@@ -542,6 +546,7 @@ async fn health_database_read_failure_and_timeout_recover() {
             creation,
             scheduler.clone(),
             health.clone(),
+            review.clone(),
         );
         wait_for(|| health.snapshot().database.state == ProbeState::Ok).await;
         sqlx::query("BEGIN EXCLUSIVE")

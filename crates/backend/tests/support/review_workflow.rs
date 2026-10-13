@@ -1,4 +1,4 @@
-//! Automatic review contracts over the real queue, SQLite, gRPC and backend lifecycle.
+//! Automatic and manual review contracts over SQLite, HTTP, gRPC and backend lifecycle.
 
 use std::{
     sync::{
@@ -11,7 +11,9 @@ use std::{
 use acorn_backend::{
     config::LlmReviewConfig,
     database::Database,
-    llm_review::{ReviewAttempt, ReviewErrorCode, ReviewStatus, ReviewTrigger},
+    llm_review::{
+        ReviewAttempt, ReviewDecision, ReviewErrorCode, ReviewResult, ReviewStatus, ReviewTrigger,
+    },
     scheduler::Scheduler,
     submissions::{CreateSubmission, Submission, SubmissionState, TerminalOutcome},
 };
@@ -33,7 +35,7 @@ use tokio::{
 use uuid::Uuid;
 
 use super::support::{
-    BackendProcess, Fixture, Harness, Mock, Mode, RpcServer, network_call, wait_for,
+    BackendProcess, Fixture, Harness, Mock, Mode, RpcServer, call, network_call, wait_for,
 };
 
 /// Controlled request captures and an explicit response gate, with no model credentials.
@@ -44,6 +46,8 @@ struct Responses {
     release: watch::Sender<bool>,
     /// One representative API failure can be selected without network timing.
     status: AtomicU16,
+    /// Complete model body selected by the test, including representative invalid output.
+    output: Mutex<Value>,
     /// When present, verify ACK completion and local release at the actual model POST.
     observer: Mutex<Option<(Scheduler, Arc<Mock>)>>,
 }
@@ -73,12 +77,17 @@ async fn respond(State(state): State<Arc<Responses>>, Json(body): Json<Value>) -
         let _ = release.changed().await;
     }
     let status = StatusCode::from_u16(state.status.load(Ordering::SeqCst)).unwrap();
-    (status, Json(json!({
-        "id":"controlled-response", "status":"completed",
-        "output":[{"type":"message", "role":"assistant", "content":[{
-            "type":"output_text", "text":"{\"decision\":\"PASS\",\"summary\":\"未发现疑点\",\"findings\":[]}"
-        }]}]
-    }))).into_response()
+    let output = state.output.lock().unwrap().to_string();
+    (
+        status,
+        Json(json!({
+            "id":"controlled-response", "status":"completed",
+            "output":[{"type":"message", "role":"assistant", "content":[{
+                "type":"output_text", "text":output
+            }]}]
+        })),
+    )
+        .into_response()
 }
 
 /// Ephemeral local HTTP service using the production client's actual Responses transport.
@@ -103,6 +112,7 @@ impl Endpoint {
             requests: Mutex::new(Vec::new()),
             release,
             status: AtomicU16::new(200),
+            output: Mutex::new(json!({"decision":"PASS", "summary":"未发现疑点", "findings":[]})),
             observer: Mutex::new(None),
         });
         let app = Router::new()
@@ -179,6 +189,643 @@ async fn review_state(database: &Database, id: &str, expected: ReviewStatus) -> 
     })
     .await
     .unwrap()
+}
+
+/// Send a manual request and check the common persisted-detail Location on successful responses.
+async fn manual(app: &Router, id: &str, expected: Option<&str>) -> (StatusCode, Value) {
+    let (status, headers, body) = call(
+        app,
+        "POST",
+        &format!("/api/v1/submissions/{id}/review"),
+        Some(json!({"expected_review_id":expected})),
+        None,
+    )
+    .await;
+    if status.is_success() {
+        assert_eq!(headers["location"], format!("/api/v1/submissions/{id}"));
+    }
+    (status, body)
+}
+
+/// One bounded finding with an inclusive single-line location.
+fn doubtful_output() -> Value {
+    json!({"decision":"DOUBTFUL", "summary":"需要人工复核", "findings":[{
+        "category":"TEST_TARGETING", "line_start":1, "line_end":1,
+        "evidence":"受控测试疑点", "normal_explanation":"受控测试正常解释"
+    }]})
+}
+
+/// Manual CE and first-case WA bypass automatic gates; pending reuse works even when full.
+#[tokio::test]
+async fn manual_http_admission_pending_merge_and_queue_full() {
+    let endpoint = Endpoint::start(true).await;
+    *endpoint.state.output.lock().unwrap() = doubtful_output();
+    let harness = Harness::start_fixture(endpoint.fixture("DISABLED").await, &[Mode::Finish]).await;
+    let ce = harness.submit("c", "ce").await;
+    let original = harness.terminal(&ce).await;
+    let (_, _, initial) = call(
+        &harness.app,
+        "GET",
+        &format!("/api/v1/submissions/{ce}"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(initial["review_status"], "DISABLED");
+    assert!(initial.get("review").unwrap().is_null());
+    let (status, first) = manual(&harness.app, &ce, None).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(first["review_status"], "PENDING");
+    assert_eq!(first["review"]["trigger"], "manual");
+    let review_id = first["review"]["review_id"].as_str().unwrap().to_owned();
+    wait_for(|| endpoint.count() == 1).await;
+
+    let wa = harness.submit("python", "wa").await;
+    harness.terminal(&wa).await;
+    assert_eq!(
+        manual(&harness.app, &wa, None).await.0,
+        StatusCode::ACCEPTED
+    );
+    let ac = harness.submit("python", "ac").await;
+    let before_full = harness.terminal(&ac).await;
+    let (status, full) = manual(&harness.app, &ac, None).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(full["error"]["code"], "ReviewQueueFull");
+    assert_eq!(
+        harness
+            .fixture
+            .database
+            .submission(&ac)
+            .await
+            .unwrap()
+            .unwrap(),
+        before_full
+    );
+
+    let mut duplicates = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let app = harness.app.clone();
+        let id = ce.clone();
+        duplicates.spawn(async move { manual(&app, &id, Some(&Uuid::new_v4().to_string())).await });
+    }
+    while let Some(result) = duplicates.join_next().await {
+        let (status, reused) = result.unwrap();
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(reused["review"]["review_id"], review_id);
+    }
+    assert_eq!(endpoint.count(), 1);
+    for invalid in [json!({}), json!({"expected_review_id":null,"user_id":1})] {
+        assert_eq!(
+            call(
+                &harness.app,
+                "POST",
+                &format!("/api/v1/submissions/{ce}/review"),
+                Some(invalid),
+                None
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    endpoint.state.release.send_replace(true);
+    review_state(&harness.fixture.database, &ce, ReviewStatus::Doubtful).await;
+    review_state(&harness.fixture.database, &wa, ReviewStatus::Doubtful).await;
+    let (status, _, detail) = call(
+        &harness.app,
+        "GET",
+        &format!("/api/v1/submissions/{ce}"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["verdict"], "CE");
+    assert_eq!(detail["review"]["result"], doubtful_output());
+    let after = harness
+        .fixture
+        .database
+        .submission(&ce)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.terminal_details, original.terminal_details);
+    assert_eq!(after.info.terminal_at_ms, original.info.terminal_at_ms);
+    assert_eq!(endpoint.count(), 2);
+    harness.close().await;
+    endpoint.close().await;
+}
+
+/// Concurrent first requests commit one attempt and reuse its pending identity without extra POSTs.
+#[tokio::test]
+async fn concurrent_first_manual_requests_share_one_attempt() {
+    let endpoint = Endpoint::start(true).await;
+    let mut fixture = endpoint.fixture("DISABLED").await;
+    fixture.config.llm_review.pending_max_count = 8;
+    let harness = Harness::start_fixture(fixture, &[Mode::Finish]).await;
+    let id = harness.submit("python", "ac").await;
+    harness.terminal(&id).await;
+    let mut requests = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let app = harness.app.clone();
+        let id = id.clone();
+        requests.spawn(async move { manual(&app, &id, None).await });
+    }
+    let mut created = 0;
+    let mut identities = std::collections::HashSet::new();
+    while let Some(result) = requests.join_next().await {
+        let (status, body) = result.unwrap();
+        assert!(
+            matches!(status, StatusCode::OK | StatusCode::ACCEPTED),
+            "{body}"
+        );
+        created += usize::from(status == StatusCode::ACCEPTED);
+        identities.insert(body["review"]["review_id"].as_str().unwrap().to_owned());
+    }
+    assert_eq!(created, 1);
+    assert_eq!(identities.len(), 1);
+    wait_for(|| endpoint.count() == 1).await;
+    harness.close().await;
+    assert_eq!(endpoint.count(), 1);
+    endpoint.close().await;
+}
+
+/// Nonfinished, nonexistent, disabled and stopping cases reject without replacing review data.
+#[tokio::test]
+async fn manual_http_rejections_preserve_records() {
+    let endpoint = Endpoint::start(false).await;
+    let harness = Harness::start_fixture(endpoint.fixture("DISABLED").await, &[Mode::Finish]).await;
+    let id = harness.fixture.queued("python").await;
+    for state in ["queued", "dispatching", "running", "failed"] {
+        match state {
+            "dispatching" => {
+                harness
+                    .fixture
+                    .database
+                    .mark_dispatching(&id)
+                    .await
+                    .unwrap();
+            }
+            "running" => {
+                harness.fixture.database.mark_running(&id).await.unwrap();
+            }
+            "failed" => {
+                let failure = TerminalOutcome::failed(
+                    &acorn_protocol::worker::v1::JobFailure {
+                        code: "ControlledFailure".into(),
+                        diagnostic: String::new(),
+                    },
+                    &harness.fixture.config.results,
+                )
+                .unwrap();
+                harness
+                    .fixture
+                    .database
+                    .save_terminal(&id, &failure, None)
+                    .await
+                    .unwrap();
+            }
+            _ => {}
+        }
+        let before = harness
+            .fixture
+            .database
+            .submission(&id)
+            .await
+            .unwrap()
+            .unwrap();
+        let (status, body) = manual(&harness.app, &id, None).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "JudgingNotFinished");
+        assert_eq!(
+            harness
+                .fixture
+                .database
+                .submission(&id)
+                .await
+                .unwrap()
+                .unwrap(),
+            before
+        );
+    }
+    let (status, body) = manual(&harness.app, &Uuid::new_v4().to_string(), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "SubmissionNotFound");
+    let finished = harness.submit("python", "ac").await;
+    harness.terminal(&finished).await;
+    let (status, body) = manual(&harness.app, &finished, Some(&Uuid::new_v4().to_string())).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"]["code"], "ReviewChanged");
+    harness.review.stop();
+    let (status, body) = manual(&harness.app, &finished, None).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"]["code"], "BackendStopping");
+    assert_eq!(endpoint.count(), 0);
+    harness.close().await;
+    let harness = Harness::start(&[Mode::Finish], 1).await;
+    let id = harness.submit("python", "ac").await;
+    let before = harness.terminal(&id).await;
+    let (status, body) = manual(&harness.app, &id, None).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"]["code"], "ReviewUnavailable");
+    assert_eq!(
+        harness
+            .fixture
+            .database
+            .submission(&id)
+            .await
+            .unwrap()
+            .unwrap(),
+        before
+    );
+    harness.close().await;
+    endpoint.close().await;
+}
+
+/// Reruns replace only the latest review, reject delayed snapshots and preserve old opinions on full.
+#[tokio::test]
+async fn manual_rerun_expected_identity_and_preservation() {
+    let endpoint = Endpoint::start(false).await;
+    let harness = Harness::start_fixture(endpoint.fixture("DISABLED").await, &[Mode::Finish]).await;
+    let id = harness.submit("python", "ac").await;
+    harness.terminal(&id).await;
+    assert_eq!(
+        manual(&harness.app, &id, None).await.0,
+        StatusCode::ACCEPTED
+    );
+    let first = review_state(&harness.fixture.database, &id, ReviewStatus::Pass)
+        .await
+        .review
+        .unwrap();
+    assert_eq!(
+        manual(&harness.app, &id, Some(&first.id)).await.0,
+        StatusCode::ACCEPTED
+    );
+    let second = review_state(&harness.fixture.database, &id, ReviewStatus::Pass)
+        .await
+        .review
+        .unwrap();
+    assert_ne!(first.id, second.id);
+    let (status, changed) = manual(&harness.app, &id, Some(&first.id)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(changed["error"]["code"], "ReviewChanged");
+    assert_eq!(endpoint.count(), 2);
+    endpoint.state.status.store(503, Ordering::SeqCst);
+    assert_eq!(
+        manual(&harness.app, &id, Some(&second.id)).await.0,
+        StatusCode::ACCEPTED
+    );
+    let failed = review_state(&harness.fixture.database, &id, ReviewStatus::Failed)
+        .await
+        .review
+        .unwrap();
+    assert_eq!(
+        failed.details.error.as_ref().unwrap().code,
+        ReviewErrorCode::ReviewApiFailed
+    );
+    endpoint.state.status.store(200, Ordering::SeqCst);
+    assert_eq!(
+        manual(&harness.app, &id, Some(&failed.id)).await.0,
+        StatusCode::ACCEPTED
+    );
+    let previous = review_state(&harness.fixture.database, &id, ReviewStatus::Pass).await;
+
+    endpoint.state.release.send_replace(false);
+    for (index, source) in ["held-model", "queued-model"].into_iter().enumerate() {
+        let other = harness.submit("python", source).await;
+        harness.terminal(&other).await;
+        assert_eq!(
+            manual(&harness.app, &other, None).await.0,
+            StatusCode::ACCEPTED
+        );
+        if index == 0 {
+            wait_for(|| endpoint.count() == 5).await;
+        }
+    }
+    let (status, full) = manual(
+        &harness.app,
+        &id,
+        Some(&previous.review.as_ref().unwrap().id),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(full["error"]["code"], "ReviewQueueFull");
+    assert_eq!(
+        harness
+            .fixture
+            .database
+            .submission(&id)
+            .await
+            .unwrap()
+            .unwrap(),
+        previous
+    );
+    endpoint.state.release.send_replace(true);
+    harness.close().await;
+    endpoint.close().await;
+}
+
+/// A new attempt survives while its predecessor still owns a local execution record.
+#[tokio::test]
+async fn manual_rerun_survives_previous_attempt_cleanup() {
+    let endpoint = Endpoint::start(true).await;
+    let harness = Harness::start_fixture(endpoint.fixture("DISABLED").await, &[Mode::Finish]).await;
+    let id = harness.submit("python", "ac").await;
+    harness.terminal(&id).await;
+    let (_, first) = manual(&harness.app, &id, None).await;
+    wait_for(|| endpoint.count() == 1).await;
+    let previous = harness
+        .fixture
+        .database
+        .submission(&id)
+        .await
+        .unwrap()
+        .unwrap()
+        .review
+        .unwrap();
+    // Keep the old execution active while formal persistence exposes its completed state.
+    let completed = previous
+        .succeeded(
+            2_000,
+            ReviewResult {
+                decision: ReviewDecision::Pass,
+                summary: "受控完成".into(),
+                findings: vec![],
+            },
+            None,
+            None,
+            1,
+        )
+        .unwrap();
+    harness
+        .fixture
+        .database
+        .finish_review(&id, &completed)
+        .await
+        .unwrap();
+    let (status, next) = manual(
+        &harness.app,
+        &id,
+        Some(first["review"]["review_id"].as_str().unwrap()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_ne!(next["review"]["review_id"], first["review"]["review_id"]);
+    endpoint.state.release.send_replace(true);
+    let saved = review_state(&harness.fixture.database, &id, ReviewStatus::Pass)
+        .await
+        .review
+        .unwrap();
+    assert_eq!(saved.id, next["review"]["review_id"].as_str().unwrap());
+    assert_eq!(endpoint.count(), 2);
+    harness.close().await;
+    endpoint.close().await;
+}
+
+/// GET exposes only public review fields and combines review filters with the existing query.
+#[tokio::test]
+async fn review_query_projection_and_history_filters() {
+    let harness = Harness::start(&[Mode::Finish], 8).await;
+    for status in [
+        ReviewStatus::Disabled,
+        ReviewStatus::Pending,
+        ReviewStatus::Pass,
+        ReviewStatus::Doubtful,
+        ReviewStatus::Failed,
+    ] {
+        let id = harness.submit("python", status.as_str()).await;
+        harness.terminal(&id).await;
+        if status != ReviewStatus::Disabled {
+            let pending = ReviewAttempt::pending(
+                ReviewTrigger::Manual,
+                1_000,
+                "test-model".into(),
+                "max".into(),
+                "private-policy".into(),
+            )
+            .unwrap();
+            harness
+                .fixture
+                .database
+                .start_review(&id, None, &pending)
+                .await
+                .unwrap();
+            let completed = match status {
+                ReviewStatus::Pass | ReviewStatus::Doubtful => Some(
+                    pending
+                        .succeeded(
+                            2_000,
+                            if status == ReviewStatus::Pass {
+                                ReviewResult {
+                                    decision: ReviewDecision::Pass,
+                                    summary: "无疑点".into(),
+                                    findings: vec![],
+                                }
+                            } else {
+                                serde_json::from_value(doubtful_output()).unwrap()
+                            },
+                            Some("private-response-id".into()),
+                            None,
+                            1,
+                        )
+                        .unwrap(),
+                ),
+                ReviewStatus::Failed => Some(
+                    pending
+                        .failed(
+                            2_000,
+                            ReviewErrorCode::ReviewInvalidOutput,
+                            Some("private-response-id".into()),
+                            None,
+                            Some(json!({"diagnostic":"private-diagnostic"})),
+                        )
+                        .unwrap(),
+                ),
+                _ => None,
+            };
+            if let Some(completed) = completed {
+                harness
+                    .fixture
+                    .database
+                    .finish_review(&id, &completed)
+                    .await
+                    .unwrap();
+            }
+        }
+        let (code, _, detail) = call(
+            &harness.app,
+            "GET",
+            &format!("/api/v1/submissions/{id}"),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(detail["review_status"], status.as_str());
+        if status == ReviewStatus::Disabled {
+            assert!(detail.get("review").unwrap().is_null());
+        } else {
+            assert_eq!(detail["review"].as_object().unwrap().len(), 7);
+            for private in [
+                "prompt_version",
+                "raw_output_json",
+                "response_id",
+                "usage",
+                "endpoint",
+                "api_key",
+            ] {
+                assert!(detail["review"].get(private).is_none());
+            }
+            assert!(!detail.to_string().contains("private-"));
+        }
+        let (code, _, history) = call(&harness.app, "GET", &format!("/api/v1/submissions?problem_id=1&state=finished&verdict=AC&review_status={}&limit=1&offset=0", status.as_str()), None, None).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(history["items"].as_array().unwrap().len(), 1);
+        assert_eq!(history["items"][0]["submission_id"], id);
+        assert_eq!(history["items"][0]["review_status"], status.as_str());
+        assert!(history["items"][0].get("review").is_none());
+    }
+    let (_, _, empty) = call(
+        &harness.app,
+        "GET",
+        "/api/v1/submissions?verdict=WA&review_status=PASS",
+        None,
+        None,
+    )
+    .await;
+    assert!(empty["items"].as_array().unwrap().is_empty());
+    assert_eq!(
+        call(
+            &harness.app,
+            "GET",
+            "/api/v1/submissions?review_status=INVALID",
+            None,
+            None
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(harness.servers[0].mock.submits.load(Ordering::SeqCst), 5);
+    harness.close().await;
+}
+
+/// Canceling an HTTP waiter while the write is locked does not cancel its registered admission.
+#[tokio::test]
+async fn disconnected_manual_http_finishes_admission() {
+    use std::{future::Future, task::Poll};
+
+    let endpoint = Endpoint::start(false).await;
+    let harness = Harness::start_fixture(endpoint.fixture("DISABLED").await, &[Mode::Finish]).await;
+    let id = harness.submit("python", "ac").await;
+    harness.terminal(&id).await;
+    let mut connection = harness.fixture.connection().await;
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    {
+        let mut waiting = Box::pin(manual(&harness.app, &id, None));
+        std::future::poll_fn(|context| match waiting.as_mut().poll(context) {
+            Poll::Pending => Poll::Ready(()),
+            Poll::Ready(_) => panic!("A locked manual admission unexpectedly completed"),
+        })
+        .await;
+    }
+    sqlx::query("COMMIT")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    review_state(&harness.fixture.database, &id, ReviewStatus::Pass).await;
+    assert_eq!(endpoint.count(), 1);
+    connection.close().await.unwrap();
+    harness.close().await;
+    endpoint.close().await;
+}
+
+/// Process shutdown waits for a registered manual write and interruption after its client leaves.
+#[tokio::test]
+async fn process_shutdown_drains_registered_manual_admission() {
+    let endpoint = Endpoint::start(false).await;
+    let mut fixture = endpoint.fixture("DISABLED").await;
+    let id = fixture.queued("python").await;
+    fixture.database.mark_dispatching(&id).await.unwrap();
+    let terminal = TerminalOutcome::judged(
+        &JudgeResult {
+            verdict: acorn_protocol::worker::v1::Verdict::Accepted as i32,
+            ..Default::default()
+        },
+        4,
+        &fixture.config.results,
+    )
+    .unwrap();
+    fixture
+        .database
+        .save_terminal(&id, &terminal, None)
+        .await
+        .unwrap();
+    let server = RpcServer::start(Mode::Finish, fixture.database.clone()).await;
+    fixture.config.scheduler.workers = vec![server.address.clone()];
+    let mut backend = BackendProcess::spawn(&fixture);
+    let address = backend.listening().await;
+    let mut connection = fixture.connection().await;
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    let target = id.clone();
+    let waiting = tokio::spawn(async move {
+        network_call(
+            address,
+            "POST",
+            &format!("/api/v1/submissions/{target}/review"),
+            Some(json!({"expected_review_id":null})),
+            None,
+        )
+        .await
+    });
+    backend
+        .until_log("Manual review admission registered")
+        .await;
+    waiting.abort();
+    assert!(waiting.await.unwrap_err().is_cancelled());
+    backend.terminate();
+    backend
+        .until_log("Backend stopping admission and dispatch")
+        .await;
+    assert_eq!(
+        network_call(address, "GET", "/api/v1/health", None, None)
+            .await
+            .0,
+        200
+    );
+    let (status, body) = network_call(
+        address,
+        "POST",
+        &format!("/api/v1/submissions/{id}/review"),
+        Some(json!({"expected_review_id":null})),
+        None,
+    )
+    .await;
+    assert_eq!(status, 503);
+    assert_eq!(body["error"]["code"], "BackendStopping");
+    sqlx::query("COMMIT")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    let (status, logs) = backend.finish().await;
+    assert!(status.success(), "{logs}");
+    let interrupted = review_state(&fixture.database, &id, ReviewStatus::Failed).await;
+    assert_eq!(
+        interrupted.review.unwrap().details.error.unwrap().code,
+        ReviewErrorCode::ReviewInterrupted
+    );
+    assert_eq!(interrupted.info.state, SubmissionState::Finished);
+    assert_eq!(endpoint.count(), 0);
+    connection.close().await.unwrap();
+    server.close().await;
+    fixture.database.close().await;
+    endpoint.close().await;
 }
 
 /// Queue and execution limits are independent of Worker dispatch; duplicate terminals do not POST.

@@ -568,6 +568,7 @@ impl Harness {
             creation.clone(),
             scheduler.clone(),
             health.clone(),
+            review.clone(),
         );
         Self {
             fixture,

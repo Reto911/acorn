@@ -64,6 +64,7 @@ async fn serve(config: &Config, database: Database) -> Result<()> {
         creation.clone(),
         scheduler.clone(),
         health.clone(),
+        review.clone(),
     );
     let (stop, stopped) = oneshot::channel();
     let mut http_task = tokio::spawn(async move {

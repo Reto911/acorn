@@ -16,7 +16,7 @@ use axum::{
     },
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use tower::ServiceBuilder;
 use tower_http::trace::{DefaultOnResponse, TraceLayer};
@@ -26,6 +26,7 @@ use crate::{
     config::Config,
     database::Database,
     health::{self, Health},
+    llm_review::ReviewService,
     scheduler::Scheduler,
     submissions::{CreateSubmission, CreationService, SubmissionFilter},
 };
@@ -44,6 +45,8 @@ struct AppState {
     scheduler: Scheduler,
     /// The single collector's cache; HTTP never initiates a probe.
     health: Health,
+    /// Same independently supervised review service used by Scheduler automatic handoffs.
+    review: ReviewService,
 }
 
 /// Build the API with common body limits, English JSON errors and request tracing.
@@ -53,6 +56,7 @@ pub fn router(
     creation: CreationService,
     scheduler: Scheduler,
     health: Health,
+    review: ReviewService,
 ) -> Router {
     let state = AppState {
         config: Arc::new(config.clone()),
@@ -60,6 +64,7 @@ pub fn router(
         creation,
         scheduler,
         health,
+        review,
     };
     Router::new()
         .route("/api/v1/health", get(get_health))
@@ -68,6 +73,7 @@ pub fn router(
         .route("/api/v1/problems/{id}/versions/{version_no}", get(problem_version))
         .route("/api/v1/submissions", get(list_submissions).post(create_submission))
         .route("/api/v1/submissions/{id}", get(submission))
+        .route("/api/v1/submissions/{id}/review", post(start_review))
         .fallback(route_not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(DefaultBodyLimit::max(config.http.max_request_bytes))
@@ -192,7 +198,7 @@ async fn list_submissions(
         problem_id: query.problem_id,
         state: query.state,
         verdict: query.verdict,
-        review_status: None,
+        review_status: query.review_status,
     };
     let items = state
         .database
@@ -271,6 +277,35 @@ async fn create_submission(
             submission_id: created.info.id,
             state: created.info.state,
         }),
+    )
+        .into_response())
+}
+
+/// Start or reuse a manual review through an operation owned independently of the HTTP waiter.
+async fn start_review(
+    State(state): State<AppState>,
+    path: Result<Path<String>, PathRejection>,
+    body: Result<Json<dto::ReviewRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Path(id) = path.map_err(|_| ApiError::invalid())?;
+    let id = Uuid::parse_str(&id)
+        .map_err(|_| ApiError::invalid())?
+        .to_string();
+    let Json(body) = body?;
+    let admitted = state
+        .review
+        .start_manual(id, body.expected_review_id)
+        .await?;
+    let status = if admitted.created {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::OK
+    };
+    let location = format!("/api/v1/submissions/{}", admitted.submission_id);
+    Ok((
+        status,
+        [(header::LOCATION, location)],
+        Json(dto::ReviewResponse::from(admitted)),
     )
         .into_response())
 }

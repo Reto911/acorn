@@ -1,10 +1,94 @@
 //! Public JSON shapes; private source, test data and Worker progress never appear.
 
 use crate::{
-    health, problems, scheduler,
+    health,
+    llm_review::{
+        ManualReview, ReviewAttempt, ReviewError, ReviewMode, ReviewResult, ReviewStatus,
+        ReviewTrigger,
+    },
+    problems, scheduler,
     submissions::{self, SubmissionState, TerminalDetails, Verdict},
 };
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+/// Manual start or rerun input; the nullable expected identity must be explicitly present.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ReviewRequest {
+    /// Last observed review identity, normalized to the same UUID representation as storage.
+    #[serde(deserialize_with = "expected_review_id")]
+    pub expected_review_id: Option<String>,
+}
+
+/// Decode a required nullable UUID without treating an omitted field as null.
+fn expected_review_id<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    Option::<String>::deserialize(deserializer)?
+        .map(|id| {
+            Uuid::parse_str(&id)
+                .map(|id| id.to_string())
+                .map_err(|_| serde::de::Error::custom("Expected a review UUID or null"))
+        })
+        .transpose()
+}
+
+/// Public latest-attempt fields, deliberately excluding internal policy and diagnostics.
+#[derive(Serialize)]
+struct Review {
+    /// Identity used by the next manual request's expected_review_id.
+    review_id: String,
+    /// Automatic or manual origin of this attempt.
+    trigger: ReviewTrigger,
+    /// UTC Unix milliseconds at admission.
+    requested_at_ms: i64,
+    /// UTC Unix completion milliseconds, or null while pending.
+    completed_at_ms: Option<i64>,
+    /// Configured model for this attempt.
+    model: String,
+    /// Validated opinion, or null for pending and failed attempts.
+    result: Option<ReviewResult>,
+    /// Fixed stable error summary, or null when no failure exists.
+    error: Option<ReviewError>,
+}
+
+impl From<ReviewAttempt> for Review {
+    /// Select explicit public fields rather than serializing the persisted envelope.
+    fn from(attempt: ReviewAttempt) -> Self {
+        Self {
+            review_id: attempt.id,
+            trigger: attempt.details.trigger,
+            requested_at_ms: attempt.details.requested_at_ms,
+            completed_at_ms: attempt.details.completed_at_ms,
+            model: attempt.details.model,
+            result: attempt.details.result,
+            error: attempt.details.error,
+        }
+    }
+}
+
+/// Snapshot acknowledging new manual admission or reuse of an existing pending attempt.
+#[derive(Serialize)]
+pub(super) struct ReviewResponse {
+    /// Original submission, never a new Worker Job.
+    submission_id: String,
+    /// Independent review state at this operation's snapshot.
+    review_status: ReviewStatus,
+    /// Explicit public attempt metadata and opinion or error.
+    review: Review,
+}
+
+impl From<ManualReview> for ReviewResponse {
+    /// Preserve the service-owned snapshot without querying or starting another operation.
+    fn from(value: ManualReview) -> Self {
+        Self {
+            submission_id: value.submission_id,
+            review_status: value.review.status,
+            review: value.review.into(),
+        }
+    }
+}
 
 /// Public component observations, with no internal endpoints, paths or diagnostics.
 #[derive(Serialize)]
@@ -213,6 +297,8 @@ pub(super) struct Problem {
     statement: String,
     /// Allowed languages and their limits, excluding all tests and answers.
     languages: Vec<Language>,
+    /// Automatic policy fixed in this published version.
+    review_mode: ReviewMode,
 }
 
 impl From<problems::ProblemVersion> for Problem {
@@ -221,6 +307,7 @@ impl From<problems::ProblemVersion> for Problem {
         Self {
             summary: value.summary.into(),
             statement: value.statement,
+            review_mode: value.review_mode,
             languages: value
                 .languages
                 .into_iter()
@@ -250,6 +337,8 @@ pub(super) struct SubmissionSummary {
     state: SubmissionState,
     /// Independent verdict, or null before a judging terminal.
     verdict: Option<Verdict>,
+    /// Latest review state, independent of the machine verdict.
+    review_status: ReviewStatus,
     /// UTC Unix creation milliseconds.
     created_at_ms: i64,
     /// UTC Unix terminal-save milliseconds, or null until terminal.
@@ -266,6 +355,7 @@ impl From<submissions::SubmissionInfo> for SubmissionSummary {
             language_id: value.language_id,
             state: value.state,
             verdict: value.verdict,
+            review_status: value.review_status,
             created_at_ms: value.created_at_ms,
             terminal_at_ms: value.terminal_at_ms,
         }
@@ -280,6 +370,8 @@ pub(super) struct Submission {
     summary: SubmissionSummary,
     /// Typed Base64-bearing details; null for AC and nonterminal records.
     terminal_details: Option<TerminalDetails>,
+    /// Latest public attempt snapshot, or null when no review has been admitted.
+    review: Option<Review>,
 }
 
 impl From<submissions::Submission> for Submission {
@@ -288,6 +380,7 @@ impl From<submissions::Submission> for Submission {
         Self {
             summary: value.info.into(),
             terminal_details: value.terminal_details,
+            review: value.review.map(Into::into),
         }
     }
 }
@@ -313,7 +406,7 @@ pub(super) struct PageQuery {
     pub offset: Option<u64>,
 }
 
-/// Submission history pagination and the three documented filters.
+/// Submission history pagination and the documented machine and review filters.
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct HistoryQuery {
@@ -327,6 +420,8 @@ pub(super) struct HistoryQuery {
     pub state: Option<SubmissionState>,
     /// Optional judging conclusion.
     pub verdict: Option<Verdict>,
+    /// Optional independent review state, combined with all other filters using AND.
+    pub review_status: Option<ReviewStatus>,
 }
 
 #[cfg(test)]
@@ -335,6 +430,34 @@ mod tests {
 
     use super::*;
     use serde_json::json;
+
+    /// Manual requests distinguish an explicit null from omission and reject unallowed input.
+    #[test]
+    fn manual_review_request_requires_nullable_uuid() {
+        assert!(
+            serde_json::from_value::<ReviewRequest>(json!({"expected_review_id":null}))
+                .unwrap()
+                .expected_review_id
+                .is_none()
+        );
+        let id = Uuid::new_v4();
+        assert_eq!(
+            serde_json::from_value::<ReviewRequest>(
+                json!({"expected_review_id":id.to_string().to_uppercase()})
+            )
+            .unwrap()
+            .expected_review_id,
+            Some(id.to_string())
+        );
+        for invalid in [
+            json!({}),
+            json!({"expected_review_id":3}),
+            json!({"expected_review_id":"bad-id"}),
+            json!({"expected_review_id":null,"user_id":1}),
+        ] {
+            assert!(serde_json::from_value::<ReviewRequest>(invalid).is_err());
+        }
+    }
 
     /// Unknown and stale values retain explicit nulls; failures expose only stable codes.
     #[test]

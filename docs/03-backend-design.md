@@ -2,7 +2,7 @@
 
 状态：已确认，作为首版实现依据。
 
-本文同步[LLM 代码审查设计](08-llm-code-review-design.md)的后端增量合同，L01 已实现 llm_review 数据类型、结构版本 3 和数据库基础操作，L02 已实现固定策略、单次 Responses 客户端及配置，L03 已实现独立队列、自动审查、入口监督和启动停机。当前 Scheduler 按固定版本门槛原子保存审查初态，先完成 ACK 和节点释放再交接；入口中断旧 PENDING，停机取消未完成审查。手动接纳和 HTTP 字段与路由待 L04，GUI 与最终联调待 L05–L06。LLM 的具体策略和实施验收以第 08 篇为依据，文档维护边界见[索引](README.md)。
+本文同步[LLM 代码审查设计](08-llm-code-review-design.md)的后端增量合同，L01–L04 已实现结构版本 3、固定策略和客户端、独立队列与生命周期、手动接纳及 HTTP 查询。Scheduler 按固定版本门槛原子保存审查初态，先完成 ACK 和节点释放再交接；手动接纳由审查服务独立持有事务与交接，客户端断开后继续收尾。入口中断旧 PENDING，停机取消未完成审查并等待已登记短操作。GUI 与最终联调待 L05–L06。LLM 的具体策略和实施验收以第 08 篇为依据，文档维护边界见[索引](README.md)。
 
 实施进度：P06–P10 已完成配置、日志、SQLite 业务访问、开发用户预置、Scheduler、HTTP API，以及启动排队装入、旧在途中断、正常停机与故障退出。源码样例、真实单／双 Worker 联调和独立程序操作验收已完成，实际范围见[开发计划实施记录](04-development-plan.md#7-实施记录)。
 
@@ -45,7 +45,7 @@ flowchart LR
         Service --> Database[数据库访问]
         Scheduler --> Database
         Scheduler -->|机器终态保存、ACK 与节点释放后交接| Review[llm_review]
-        HTTP -->|手动审查：待 L04| Review
+        HTTP -->|手动审查| Review
         Review --> Database
         subgraph Scheduling[Scheduler]
             Scheduler[队列与调度] --> Client[worker_client]
@@ -68,7 +68,7 @@ API 与 Scheduler 通过进程内调用和消息交接任务。Worker 客户端�
 | `problems` | 查询已发布题目的最新版本、题面和语言限额 |
 | `submissions` | 创建幂等、固定版本、校验请求、保存源码、将任务交给 Scheduler、查询历史与结果 |
 | `scheduler` | 有界内存队列、Worker 轮转选择、分派、轮询、终态保存和 ACK 编排 |
-| `llm_review` | 自动接纳、独立有界队列与并发、模型调用、输出校验、最新审查保存及停止边界已实现；手动接纳待 L04；分工见[第 08 篇第 3 节](08-llm-code-review-design.md#3-后端结构与责任边界) |
+| `llm_review` | 自动及手动接纳、独立有界队列与并发、模型调用、输出校验、最新审查保存及停止边界；监督手动短操作并在停机时等待收尾；分工见[第 08 篇第 3 节](08-llm-code-review-design.md#3-后端结构与责任边界) |
 | `scheduler::worker_client` | Scheduler 子模块，封装判题三个 RPC 和只读状态 RPC、调用 deadline、Proto 与后端类型转换、传输错误分类；状态查询使用独立健康预算 |
 | `database` | SQLx 共享连接池、参数绑定、短事务、条件状态更新和查询 |
 | `health` | 本地接纳快照、共享有界探测、最近结果缓存及单调时钟过期投影；不参与业务决策 |
@@ -125,7 +125,7 @@ P06 的 [`Database`](../crates/backend/src/database/mod.rs) 提供题目列表�
 | `GET /api/v1/problems/{id}` | 返回最新版本的题号、版本号、标题、题面和可提交语言及限额 |
 | `GET /api/v1/problems/{id}/versions/{version_no}` | 返回指定已发布版本的同类信息；GUI 结果页按提交固定版本查询，答题页仍取最新版本 |
 | `POST /api/v1/submissions` | 创建提交，或取得同键的已有提交 |
-| `POST /api/v1/submissions/{id}/review`（待实施） | 手动启动或重跑最近一次 LLM 审查，不重新执行 Worker |
+| `POST /api/v1/submissions/{id}/review` | 手动启动或重跑最近一次 LLM 审查，不重新执行 Worker |
 | `GET /api/v1/submissions/{id}` | 返回提交身份、固定版本、语言、业务状态、判题结论、终态详情与时间戳 |
 | `GET /api/v1/submissions` | 返回配置测试用户的提交历史，可按题号、机器状态和 verdict 筛选；LLM 增量新增 review_status 筛选 |
 | `GET /api/v1/health` | 读取本地接纳、Scheduler 及共享数据库与 Worker 观测缓存，返回 `200` 和 `Cache-Control: no-store`；字段见[健康契约](07-health-observation-design.md#5-http-契约与可见范围) |
@@ -178,8 +178,8 @@ Idempotency-Key: 7b5f28d3-51a4-463c-98a4-0a11815d8d46
 | `verdict` | 判题结论，未取得判题结论时为 `null` |
 | `terminal_details` | 终态详情对象；运行中和 AC 时为 `null` |
 | `created_at_ms`、`terminal_at_ms` | UTC Unix 毫秒；终态时间尚无时为 `null` |
-| `review_status`（待实施） | 独立审查状态，DISABLED / PENDING / DOUBTFUL / PASS / FAILED |
-| `review`（待实施） | 可空对象，返回审查 ID、触发来源、时间、模型、有效意见或稳定错误；具体合同见[第 08 篇第 8.1 节](08-llm-code-review-design.md#81-接口) |
+| `review_status` | 独立审查状态，DISABLED / PENDING / DOUBTFUL / PASS / FAILED |
+| `review` | 可空对象，固定返回 review_id、trigger、requested_at_ms、completed_at_ms、model、result、error；具体合同见[第 08 篇第 8.1 节](08-llm-code-review-design.md#81-接口) |
 
 运行中 `verdict` 和终态详情为空；AC 仅有结论；CE 带编译诊断和截断标记；WA、RE、TLE、MLE、OLE 只带首个失败用例；执行失败带 `code` 和有界 `diagnostic`。缺失的用例和统计保持缺失，不构造占位数据。
 
@@ -193,7 +193,7 @@ review 独立于 terminal_details，机器 AC 仍要求 terminal_details 为 nul
 
 错误结构采用 `{"error":{"code":"QueueFull","message":"The submission queue is full."}}`。`code` 稳定供前端判断，`message` 为英文，具体措辞可以改进。HTTP 错误只描述当前 HTTP 操作未能完成。
 
-HTTP `error.code` 如下，标注 LLM 的新增项待实施；增加错误码时须先更新此表：
+HTTP `error.code` 如下，LLM 新增项已由 L04 接入；增加错误码时须先更新此表：
 
 | `error.code` | HTTP 状态码 | 条件 |
 | --- | --- | --- |
@@ -222,13 +222,13 @@ HTTP `error.code` 如下，标注 LLM 的新增项待实施；增加错误码时
 
 数据库操作失败是否同时触发后端退出，按[第 8.3 节](#83-数据库及后台故障)区分普通只读失败、关键写入失败与严重存储故障。
 
-### 5.5 手动审查（待实施）
+### 5.5 手动审查
 
-POST review 的 JSON 必须携带最近一次 GET 取得的 expected_review_id，尚无审查时为 null。仅机器 state=finished 可启动，包括 CE、零通过及题目禁用自动审查的情况；不满足自动门槛不限制手动触发。
+POST review 的 JSON 必须携带最近一次 GET 取得的 review.review_id 作为 expected_review_id，尚无审查时显式写 null。省略、非 UUID、错误类型或未知字段返回 InvalidRequest。仅机器 state=finished 可启动，包括 CE、零通过及题目禁用自动审查的情况；不满足自动门槛不限制手动触发。
 
 按[第 08 篇第 8.1 节](08-llm-code-review-design.md#81-接口)处理服务状态、PENDING 合并、预期 ID 和队列名额：已有 PENDING 返回 200 并复用同次审查，新接纳返回 202，包含 submission_id、review_status 和 review，Location 指向提交详情。新一轮覆盖上次审查，机器结果保持不变。GET 只读快照；自动触发直接走进程内交接。
 
-llm_review 在短接纳操作开始时登记其生命周期，复用创建服务的组织方式；HTTP 处理器只等待结果。客户端超时、取消、关页或断连不取消已登记的事务处理、提交后交接或按停止及错误合同收尾；入队后的审查独立运行，正常停机等待这些短操作结束。
+llm_review 在短接纳操作开始时登记其生命周期，复用创建服务的独立持有原则；队列任务监督短操作，HTTP 处理器通过一次性结果通道等待。客户端超时、取消、关页或断连不取消已登记的事务处理、提交后交接或按停止及错误合同收尾；入队后的审查独立运行，正常停机等待这些短操作结束。活动去重按审查 ID，前一轮已落库而本地执行尚未清理时不误合并新一轮。
 
 ## 6. 提交创建与进程内交接
 
@@ -368,7 +368,7 @@ API 上限与部署的 Worker 规约对齐，Base64 结果和 JSON 请求开销�
 
 日志统一为英文、可读的单行文本，记录提交 ID、题号、语言、Worker 地址、操作和错误原因。创建、分派、终态保存和停机记录为 info；明确拒绝和 ACK 失败为 warn；数据库与后台故障为 error；重复请求和普通轮询为 debug。日志不输出完整源码、测试数据或无界程序输出。
 
-LLM 配置已由 L02 接入后端 TOML 读取和启用校验，正式程序不加载开发用 .env。客户端构造不发启动探测；L03 已在入口创建和监督审查服务，enabled=true 时按题目固定版本策略自动审查，题目默认 DISABLED。配置 Debug 隐藏密钥和 endpoint，TOML 解析错误只报告字节位置，不回显配置原文。审查日志字段和保密边界遵守第 08 篇第 9、11 节；满足自动门槛但服务未启用时保存 FAILED/ReviewUnavailable，停机时优先使用 ReviewInterrupted；手动接口及其错误映射留在 L04。
+LLM 配置已由 L02 接入后端 TOML 读取和启用校验，正式程序不加载开发用 .env。客户端构造不发启动探测；L03 已在入口创建和监督审查服务，enabled=true 时按题目固定版本策略自动审查，题目默认 DISABLED。配置 Debug 隐藏密钥和 endpoint，TOML 解析错误只报告字节位置，不回显配置原文。审查日志字段和保密边界遵守第 08 篇第 9、11 节；满足自动门槛但服务未启用时保存 FAILED/ReviewUnavailable，停机时优先使用 ReviewInterrupted；L04 的手动请求通过同一服务检查可用及停止边界。
 
 LLM 的完整落库详情固定上限为 32 KiB，按序列化后的 UTF-8 字节计量；错误 message 使用后端固定英文说明，最多 512 UTF-8 字节，不新增配置项。完整意见或诊断对象仍各自受 16 KiB 上限约束，组装规则见[第 08 篇第 5.2 节](08-llm-code-review-design.md#52-最近一次详情)。响应读取超过 max_response_bytes（默认 1 MiB）或组装详情超出总预算时，本次审查保存 FAILED/ReviewInvalidOutput；该错误属于审查结果，不是新增 HTTP 错误码。
 

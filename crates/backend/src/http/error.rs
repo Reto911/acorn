@@ -8,7 +8,9 @@ use axum::{
 };
 use serde::Serialize;
 
-use crate::{database, scheduler::AdmissionError, submissions::CreationError};
+use crate::{
+    database, llm_review::ManualReviewError, scheduler::AdmissionError, submissions::CreationError,
+};
 
 /// Stable JSON error payload; internal causes are logged separately.
 #[derive(Serialize)]
@@ -138,6 +140,46 @@ impl From<CreationError> for ApiError {
                 "BackendStopping",
                 "The backend is stopping.",
             ),
+            error => Self::internal(error),
+        }
+    }
+}
+
+impl From<ManualReviewError> for ApiError {
+    /// Map review admission failures independently of stored review results.
+    fn from(error: ManualReviewError) -> Self {
+        match error {
+            ManualReviewError::NotFound => Self::new(
+                StatusCode::NOT_FOUND,
+                "SubmissionNotFound",
+                "The submission was not found.",
+            ),
+            ManualReviewError::NotFinished => Self::new(
+                StatusCode::CONFLICT,
+                "JudgingNotFinished",
+                "Machine judging has not finished.",
+            ),
+            ManualReviewError::Unavailable => Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "ReviewUnavailable",
+                "The review service is unavailable.",
+            ),
+            ManualReviewError::Stopping => Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "BackendStopping",
+                "The backend is stopping.",
+            ),
+            ManualReviewError::Changed => Self::new(
+                StatusCode::CONFLICT,
+                "ReviewChanged",
+                "The latest review has changed. Refresh the submission.",
+            ),
+            ManualReviewError::QueueFull => Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "ReviewQueueFull",
+                "The review queue is full.",
+            ),
+            ManualReviewError::Database(error) => error.into(),
             error => Self::internal(error),
         }
     }

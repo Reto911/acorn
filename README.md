@@ -6,7 +6,7 @@ C 与 Python 3 的单文件源码判题系统。后端包含 HTTP API、Schedule
 
 浏览器 GUI 采用 Vue 3、TypeScript 和 Monaco，已完成 F01–F07：题目浏览、C/Python 编辑、本地草稿、主动提交、结果详情、固定版本题面、状态轮询，以及提交历史筛选、分页和详情往返。首版桌面联调已覆盖 C/Python AC、C CE、Python WA 和 C TLE，实际新增与复用记录、UI-01–UI-09 对应关系及未测范围见[前端开发计划](docs/06-frontend-development-plan.md#57-f07首版浏览器联调与操作说明)。交互依据见[GUI 设计](docs/05-frontend-design.md)；健康观测 F08 / H01–H04 已完成，提供 Worker 状态 RPC、后端共享采集、只读 HTTP 快照及 `/health` 系统状态页面，支持自动、手动刷新和独立过期警告；初次实际检查见[健康页面交付记录](docs/06-frontend-development-plan.md#511-f08h04健康页面与最终连通验收)，后续每 10 秒自动获取的实现与验证边界见[补充记录](docs/06-frontend-development-plan.md#512-健康页面每十秒自动获取)。
 
-LLM 代码审查正在实施，合同与 L01–L06 计划见[LLM 设计](docs/08-llm-code-review-design.md)。L01 已完成数据类型、结构版本 3、最新审查读写与历史筛选的数据库基础；L02 已完成配置、固定策略和单次 Responses 客户端；L03 已接通独立有界队列、判题后自动审查、启动中断及停机取消，见[队列与生命周期实施记录](docs/08-llm-code-review-design.md#123-l03队列自动触发与生命周期)。配置 enabled=true 后仍须题目固定版本的 review_mode 达到自动门槛，默认题目策略为 DISABLED；机器结果保存、ACK 和 Worker 本地占用释放后才交接审查，模型等待不占数据库连接。手动触发、HTTP 审查查询和 GUI 仍待 L04–L06。当前后端只接受结构版本 3；已有版本 2 数据库须按[离线升级交付](docs/08-llm-code-review-design.md#1212-离线升级交付)停服务、备份并单独执行升级 SQL，不能重跑初始化 SQL。既有判题和健康验收不扩展为完整 LLM 验收。
+LLM 代码审查已完成 L01–L04，合同与后续计划见[LLM 设计](docs/08-llm-code-review-design.md)。已提供结构版本 3、固定策略与客户端、独立队列和生命周期，以及手动启动／重跑、HTTP 审查查询和历史状态筛选，见[手动接口实施记录](docs/08-llm-code-review-design.md#124-l04手动接口与查询)。配置 enabled=true 后可手动审查任意 finished 提交；自动审查还须固定题目版本达到门槛，默认策略为 DISABLED。机器结果保存、ACK 和 Worker 本地占用释放后才自动交接，模型等待不占数据库连接。GUI 与最终联调待 L05–L06。当前后端只接受结构版本 3；已有版本 2 数据库须按[离线升级交付](docs/08-llm-code-review-design.md#1212-离线升级交付)停服务、备份并单独执行升级 SQL，不能重跑初始化 SQL。既有判题和健康验收不扩展为完整 LLM 验收。
 
 ## 浏览器 GUI
 
@@ -184,6 +184,45 @@ curl --fail-with-body --silent --show-error \
 
 需要重传同一请求时，保留 `/tmp/acorn-request.json` 和原 `ACORN_REQUEST_KEY`，只重复 `curl`，预期返回 `200` 和原 Submission ID。主动重新判题时生成新键；相同键更换源码会返回 `409 IdempotencyConflict`。
 
+### 手动 LLM 审查与查询
+
+在服务端 TOML 的 `[llm_review]` 中启用 enabled，填写实际 endpoint、api_key 和 model 后重启后端；示例预算及字段见[配置合同](docs/08-llm-code-review-design.md#9-后端配置预算与错误)。正式程序只读取 TOML，不加载开发用 .env，启动不发送模型探测。GUI 审查区待 L05，当前通过 HTTP 操作。
+
+选择一个机器 state=finished 的 submission_id，包括 CE、首例失败及题目禁用自动审查的提交。先读取最新详情，再从 review.review_id 生成手动请求；首次没有审查时写 null。将下面的占位 ID 替换为实际值：
+
+```sh
+ACORN_SUBMISSION_ID='<实际 submission_id>'
+curl --fail-with-body --silent --show-error \
+  "http://127.0.0.1:8080/api/v1/submissions/$ACORN_SUBMISSION_ID" \
+  --output /tmp/acorn-review-snapshot.json
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+snapshot = json.loads(Path('/tmp/acorn-review-snapshot.json').read_text())
+review = snapshot['review']
+request = {'expected_review_id': review['review_id'] if review else None}
+Path('/tmp/acorn-review-request.json').write_text(json.dumps(request))
+PY
+curl --fail-with-body --silent --show-error \
+  -X POST "http://127.0.0.1:8080/api/v1/submissions/$ACORN_SUBMISSION_ID/review" \
+  -H 'Content-Type: application/json' \
+  --data-binary @/tmp/acorn-review-request.json
+```
+
+新接纳返回 202；已有 PENDING 返回 200、复用同次审查；两者的 Location 均指向提交详情。GET 的 review_status=PENDING 表示排队或执行中，继续查询到 PASS、DOUBTFUL 或 FAILED：
+
+```sh
+curl --fail-with-body --silent --show-error \
+  "http://127.0.0.1:8080/api/v1/submissions/$ACORN_SUBMISSION_ID"
+curl --fail-with-body --silent --show-error \
+  'http://127.0.0.1:8080/api/v1/submissions?review_status=DOUBTFUL&limit=20'
+```
+
+公共 review 固定返回 review_id、trigger、requested_at_ms、completed_at_ms、model、result 和 error，不返回诊断 JSON、提示词版本、响应 ID 或用量。审查意见独立于机器 verdict；审查 FAILED 的 GET 仍为 200。
+
+重新审查时先 GET 最新快照，再按上述步骤生成新的 expected_review_id；接纳后替换上次意见。ReviewChanged 时先刷新，不自动重发；POST 超时或断连同样先 GET 确认。ReviewQueueFull、ReviewUnavailable 和停止后的 BackendStopping 拒绝新接纳并保留旧意见。客户端离开不取消已登记操作，后端停机仍按中断合同收尾。
+
 ### 双 Worker 配置、日志与停止
 
 第二个 Worker 复制同一示例配置，修改 `server.listen` 为 `127.0.0.1:50052`，`sandbox.box_id` 为另一个专用 ID，例如 211。后端 `/tmp/acorn-backend.toml` 中的 `[scheduler]` 使用：
@@ -198,7 +237,7 @@ workers = ["http://127.0.0.1:50051", "http://127.0.0.1:50052"]
 
 正常停止时，先在后端终端按 Ctrl-C，等待后端完成在途保存、一次 ACK 并退出，再停止 Worker。也可由服务管理器发送 SIGTERM。重新运行同一后端配置，使用 `GET /api/v1/submissions/<submission_id>` 查询此前两个 AC；历史终态仍应存在。数据库初始化 SQL 不重复执行。未分派任务保留排队状态，旧在途任务按前述重启规则中断。
 
-内存限额和 Isolate 单文件／磁盘空间限额统一使用 KiB（1 KiB = 1024 字节），配置字段明确以 `_kib` 结尾；实际资源统计、输出保留和产物导出大小仍按字节计量。数据库结构版本为 2，内存列为 `memory_kib`；旧配置与旧数据库需更新，后端与 Worker 按当前 KiB 协议同步构建运行。已有数据库由部署端离线转换或另建新库，详见 [SQL 使用说明](sql/README.md)。
+内存限额和 Isolate 单文件／磁盘空间限额统一使用 KiB（1 KiB = 1024 字节），配置字段明确以 `_kib` 结尾；实际资源统计、输出保留和产物导出大小仍按字节计量。当前数据库结构版本为 3，内存列为 `memory_kib`；后端与 Worker 按当前 KiB 协议同步构建运行。已有数据库由部署端按对应版本离线升级或另建新库，详见 [SQL 使用说明](sql/README.md)。
 
 P06–P09 的数据库、Scheduler、HTTP 和进程生命周期常规测试：
 

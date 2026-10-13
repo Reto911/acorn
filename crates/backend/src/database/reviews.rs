@@ -9,6 +9,22 @@ use crate::{
 
 use super::{Database, Error, Result, now_ms};
 
+/// One transactional manual-admission decision, without ownership of queue resources.
+pub(crate) enum ReviewAdmission {
+    /// No submission with the requested identity exists.
+    NotFound,
+    /// Only a finished machine result permits review.
+    NotFinished,
+    /// Reuse the latest pending attempt before checking the expected identity or capacity.
+    Existing(Box<ReviewAttempt>),
+    /// The latest review differs from the caller's expected identity.
+    Changed,
+    /// No capacity was reserved and the previous opinion remains intact.
+    QueueFull,
+    /// The supplied fresh pending attempt was committed.
+    Started,
+}
+
 /// Public fixed-version inputs, deliberately excluding private cases and user identity.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReviewInput {
@@ -45,23 +61,57 @@ impl Database {
 
     /// Replace the latest finished submission's review only when its expected identity matches.
     ///
-    /// This storage operation owns no queue capacity; the later admission service must
-    /// reserve capacity and own the operation's lifetime before calling it.
+    /// This storage operation owns no queue capacity; its caller must reserve capacity
+    /// and own the operation's lifetime before calling it.
     pub async fn start_review(
         &self,
         id: &str,
         expected_review_id: Option<&str>,
         review: &ReviewAttempt,
     ) -> Result<bool> {
+        Ok(matches!(
+            self.admit_review(id, expected_review_id, review, true)
+                .await?,
+            ReviewAdmission::Started
+        ))
+    }
+
+    /// Check and replace one latest review in the same short transaction, releasing before handoff.
+    pub(crate) async fn admit_review(
+        &self,
+        id: &str,
+        expected_review_id: Option<&str>,
+        review: &ReviewAttempt,
+        has_capacity: bool,
+    ) -> Result<ReviewAdmission> {
         self.observe("Start review", true, async {
             if review.status != ReviewStatus::Pending || expected_review_id == Some(&review.id) {
                 return Err(Error::InvalidReview("Admission requires a fresh pending review"));
             }
             let json = review.encode(0)?;
-            let changed = sqlx::query("UPDATE submissions SET review_status = 'PENDING', review_id = ?, review_details_json = ? WHERE id = ? AND state = 'finished' AND review_status <> 'PENDING' AND review_id IS ?")
-                .bind(&review.id).bind(json).bind(id).bind(expected_review_id)
-                .execute(&self.pool).await?;
-            Ok(changed.rows_affected() == 1)
+            let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+            let row = sqlx::query("SELECT state, review_status, review_id, review_details_json FROM submissions WHERE id = ?")
+                .bind(id).fetch_optional(&mut *transaction).await?;
+            let admission = match row {
+                None => ReviewAdmission::NotFound,
+                Some(row) if row.try_get::<String, _>("state")? != "finished" => ReviewAdmission::NotFinished,
+                Some(row) => {
+                    let current = stored_review(&row)?;
+                    if let Some(pending) = current.as_ref().filter(|attempt| attempt.status == ReviewStatus::Pending) {
+                        ReviewAdmission::Existing(Box::new(pending.clone()))
+                    } else if current.as_ref().map(|attempt| attempt.id.as_str()) != expected_review_id {
+                        ReviewAdmission::Changed
+                    } else if !has_capacity {
+                        ReviewAdmission::QueueFull
+                    } else {
+                        sqlx::query("UPDATE submissions SET review_status = 'PENDING', review_id = ?, review_details_json = ? WHERE id = ?")
+                            .bind(&review.id).bind(json).bind(id).execute(&mut *transaction).await?;
+                        ReviewAdmission::Started
+                    }
+                }
+            };
+            transaction.commit().await?;
+            Ok(admission)
         }).await
     }
 

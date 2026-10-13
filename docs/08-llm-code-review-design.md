@@ -1,6 +1,6 @@
 # LLM 代码审查设计
 
-状态：设计已批准；L01 数据契约与离线升级、L02 客户端与策略、L03 队列与程序生命周期已完成，L04–L06 待实施。本文定义 LLM 审查的数据字段、后端流程、HTTP 与前端合同、实施步骤及验收要求。LLM 相关前后端增量统一维护在本文。
+状态：设计已批准；L01–L04 已完成数据契约、客户端、队列与生命周期、手动 HTTP 及审查查询，L05–L06 的 GUI 与最终联调待实施。本文定义 LLM 审查的数据字段、后端流程、HTTP 与前端合同、实施步骤及验收要求。LLM 相关前后端增量统一维护在本文。
 
 ## 1. 已确认需求与范围
 
@@ -313,6 +313,20 @@ LLM 网络等待不进入 Worker、判题跟踪或数据库事务，不占用 Sc
 
 沿用现有 `/api/v1` 和配置测试用户。题目版本详情新增 `review_mode`；提交历史摘要新增 `review_status`；提交详情新增 `review_status` 和可空的 `review` 对象，返回审查 ID、触发来源、时间、模型、有效意见或稳定错误码。`prompt_version` 和 `raw_output_json` 留在后端，不放入前端 DTO；不公开 endpoint、密钥、完整 API 正文或思考链。
 
+GET 详情和手动接纳响应共用同一 public review 对象，固定包含以下七个键；不存在意见、错误或完成时间时保留显式 null。DISABLED 的 GET 返回 review=null，历史摘要不携带 review 对象。
+
+| review 字段 | 内容 |
+| --- | --- |
+| `review_id` | 本次审查 UUID，下次手动请求用作 expected_review_id |
+| `trigger` | auto 或 manual |
+| `requested_at_ms` | 本次接纳的 UTC Unix 毫秒 |
+| `completed_at_ms` | 完成时间；PENDING 时为 null |
+| `model` | 本次配置的模型名 |
+| `result` | 第 6.2 节的有效意见；PENDING、FAILED 时为 null |
+| `error` | 固定 code、英文 message；未失败时为 null |
+
+reasoning_effort、response_id、usage、prompt_version 和 raw_output_json 均保留在后端详情，不复制进此 HTTP 对象。机器 state、verdict 和 terminal_details 仍独立返回。
+
 新增 `POST /api/v1/submissions/{id}/review`，专门用于页面手动启动或重新审查，不会重新执行 Worker 判题。自动审查直接走后端进程内交接，不经过此 HTTP 接口。手动请求必须携带最近一次 GET 取得的审查 ID，首次为 NULL：
 
 ```json
@@ -334,6 +348,8 @@ LLM 网络等待不进入 Worker、判题跟踪或数据库事务，不占用 Sc
 预期 ID 的用途是避免旧操作覆盖后来结果。例如页面看到审查 A，请求重跑后创建 B；B 很快结束，延迟到达的同一页面请求仍携带 A，服务器发现当前已是 B 就返回 ReviewChanged，而不会再次付费创建 C。仅检查 PENDING 可以阻止同时审查，不能阻止这一类先后重跑；使用已有 review_id 即可处理，不增加长期请求幂等表。
 
 新接纳在短事务中同时检查机器状态、当前审查状态和预期 ID，写入新的 PENDING 后才交接。停止接纳后到达的新 POST 返回 BackendStopping；已登记短操作按第 7.3 节结束。POST 响应不明时先 GET 当前状态，不自动再次 POST。
+
+expected_review_id 是必填可空键，省略、非 UUID 字符串、错误类型或未知字段均返回 InvalidRequest；UUID 按现有路径规则规范化。通过 HTTP 格式校验后先检查服务停止及可用边界，再在同一事务中按不存在、非 finished、已有 PENDING、预期 ID 不符、名额不足、新接纳的顺序决定结果。已有 PENDING 的复用优先于 ID 比较和容量检查。200 与 202 均携带指向提交详情的 Location；返回值是该短操作取得的持久化快照，随后可能由后台完成更新。
 
 llm_review 在短接纳操作开始时登记其生命周期，HTTP 处理器只等待操作结果。浏览器超时、取消请求、关页或连接断开不取消已登记的操作；该操作仍须完成事务处理、提交后的本地交接或按停止及错误合同收尾。已交接的后台审查同样独立于浏览器连接。接纳生命周期复用现有创建服务的组织方式，不因客户端断开留下无人处理的 PENDING。
 
@@ -579,3 +595,25 @@ L03 已完成。[审查服务](../crates/backend/src/llm_review/service.rs)使�
 - 变更 Markdown 的本地链接与锚点、代码块闭合、既有标题编号保留，以及 `git diff --check`：通过。
 
 未调用真实模型、读取开发凭据、升级实际部署数据库或运行完整 workspace、真实 Isolate、浏览器验收；未人工注入审查任务 panic。受控 PASS 验证调用和持久化合同，不证明模型语义效果。本次不扩展 L02 单次真实调用或原判题、健康验收的结论。下一步 L04 实现手动接纳、预期 ID 校验、审查查询 DTO 和历史筛选。
+
+### 12.4 L04：手动接口与查询
+
+L04 已完成。[审查服务](../crates/backend/src/llm_review/service.rs)登记并独立持有手动接纳短操作，通过一次性结果通道让 HTTP 等待响应；请求取消不会取消事务处理、交接或中断写入。队列任务监督这些操作并在停止时等待结束，现有入口的审查任务等待同时覆盖模型取消和短操作收尾。自动与手动使用同一个停止边界、排队名额和运行容量；活动去重改为按审查 ID，上一轮终态已落库而本地执行尚未清理时，新一轮仍可交接。
+
+[数据库接纳](../crates/backend/src/database/reviews.rs)在 BEGIN IMMEDIATE 短事务内统一判断不存在、非 finished、PENDING 复用、预期 ID 不符及容量不足；满足条件才替换最新 ID 和 PENDING。容量预留由审查服务持有，已有 PENDING 即使未取得名额也能复用；不接纳时保留旧审查。公共 start_review 复用相同事务流程，完成仍按 review_id 条件写入。事务提交并释放连接后才交接，没有修改结构版本或机器终态合同。
+
+[HTTP 路由](../crates/backend/src/http/mod.rs)已提供 POST review、稳定业务错误映射及 200／202 和 Location。expected_review_id 必填可空，UUID 规范化后交给服务；HTTP 不持有接纳执行的生命周期。题目最新／指定版本详情返回 review_mode，提交详情返回 review_status 和显式公共 review，历史摘要及筛选支持五个审查状态。公开字段按第 8.1 节固定七键，缺失值保持 null；响应 ID、用量、策略版本及诊断 JSON 保留在后端，不从持久化详情直接透传。审查 FAILED 与 DOUBTFUL 的 GET 仍返回 200。
+
+同步了数据库、后端、前端设计、文档索引、基础开发计划和项目说明；[手动 HTTP 操作](../README.md#手动-llm-审查与查询)给出从最新快照生成预期 ID、主动启动及查询的步骤。GUI 仍待 L05，不将本次 HTTP 验收计入原浏览器结果。
+
+#### 12.4.1 实际检查
+
+- `cargo fmt --all -- --check`、`cargo check --workspace --all-targets --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings`：最终通过。首次 Clippy 报告接纳结果枚举的变体大小差异；将携带审查详情的变体改为 Box 后修正，没有增加 lint 豁免。
+- `cargo test -p acorn-backend --locked --lib`：十项通过，新增必填可空预期 ID 的解析检查，覆盖遗漏、错误类型、非法 UUID、未知字段及规范化。
+- 在可绑定回环端口的宿主环境执行 `cargo test -p acorn-backend --locked --test database --test workflow`：九项数据库和首轮三十八项 workflow 常规测试通过，两个真实 Isolate 验收按原规则忽略。补充题目／历史字段断言后，`cargo test -p acorn-backend --locked --test workflow published_queries_and_history_shapes` 定向通过；补充并发首次接纳后再执行 `cargo test -p acorn-backend --locked --test workflow`，最终三十九项常规测试通过、两个真实验收忽略。
+- [八项新增 workflow 检查](../crates/backend/tests/support/review_workflow.rs)沿用受控 Axum、gRPC 和临时 SQLite。验证禁用题目的手动 CE／首例 WA、非 finished 拒绝、404、服务禁用和停止边界、队列满保留旧记录、PASS／FAILED 重跑、旧 ID 不启动下一轮、公共意见与五状态历史组合筛选。八个并发首次请求取得一个 202、七个 200、同一 review_id，模型仅收到一次 POST；已 PENDING 时另验证满队列下并发复用，不重复调用。
+- 连续重跑窗口通过正式完成写入提前暴露上一轮终态、保持旧执行活动来构造；新一轮取得不同 ID，旧完成不会覆盖或误合并新交接，最终新意见可保存。意见及失败数据只由受控响应或数据库夹具构造，不代表真实模型判断。
+- 取消等待检查在实际 HTTP 路由已登记操作、SQLite 写锁尚未释放时丢弃请求等待；解锁后 PENDING 交接并保存 PASS。独立后端子进程另在登记后断开 TCP 等待并发送停止信号，锁未释放期间健康 GET 仍为 200、新手动 POST 为 BackendStopping；解锁后保存 FAILED/ReviewInterrupted，进程正常退出，未发模型请求。
+- 变更 Markdown 的本地链接与锚点、代码块闭合、既有编号保留、项目说明 shell／内嵌 Python 语法，以及 `git diff --check`：通过。
+
+未调用真实模型、读取开发凭据、修改实际部署数据库或执行完整 workspace、真实 Isolate、前端或浏览器验收。既有客户端和真实调用结论保持原范围。下一步 L05 接入结果页审查区、手动按钮、联合轮询和历史筛选。

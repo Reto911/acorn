@@ -4,7 +4,7 @@ pub mod client;
 pub mod policy;
 mod service;
 pub(crate) use service::PreparedReview;
-pub use service::ReviewService;
+pub use service::{ManualReview, ManualReviewError, ReviewService};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
