@@ -1,7 +1,10 @@
-//! Bounded latest-review data, fixed policy and a single-call Responses client.
+//! Bounded latest-review data, independent execution, fixed policy and Responses client.
 
 pub mod client;
 pub mod policy;
+mod service;
+pub(crate) use service::PreparedReview;
+pub use service::ReviewService;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

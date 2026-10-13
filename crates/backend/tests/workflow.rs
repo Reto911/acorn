@@ -1,5 +1,7 @@
 //! Contracts over SQLite, backend processes, HTTP and controlled or real Workers.
 
+#[path = "support/review_workflow.rs"]
+mod review_workflow;
 mod support;
 
 use std::{sync::atomic::Ordering, time::Duration};
@@ -9,6 +11,7 @@ use acorn_backend::{
     database::Database,
     health::{Health, ProbeErrorCode, ProbeState, SubmissionAdmission, local_snapshot},
     http,
+    llm_review::ReviewService,
     scheduler::AdmissionError,
     scheduler::{Scheduler, SchedulerState},
     submissions::{
@@ -513,8 +516,15 @@ async fn health_database_read_failure_and_timeout_recover() {
     fixture.database.probe_read().await.unwrap();
     let server = RpcServer::start(Mode::Finish, fixture.database.clone()).await;
     fixture.config.scheduler.workers = vec![server.address.clone()];
-    let (scheduler, scheduler_task) =
-        Scheduler::start(&fixture.config, fixture.database.clone(), Vec::new()).unwrap();
+    let (review, review_task) =
+        ReviewService::start(&fixture.config.llm_review, fixture.database.clone()).unwrap();
+    let (scheduler, scheduler_task) = Scheduler::start(
+        &fixture.config,
+        fixture.database.clone(),
+        Vec::new(),
+        review.clone(),
+    )
+    .unwrap();
     for (timeout_ms, expected) in [
         (1_000, ProbeErrorCode::DatabaseReadFailed),
         (10, ProbeErrorCode::ProbeTimeout),
@@ -568,6 +578,8 @@ async fn health_database_read_failure_and_timeout_recover() {
     }
     scheduler.shutdown();
     scheduler_task.await.unwrap().unwrap();
+    review.stop();
+    review_task.await.unwrap().unwrap();
     assert_eq!(server.mock.submits.load(Ordering::SeqCst), 0);
     assert_eq!(server.mock.acks.load(Ordering::SeqCst), 0);
     server.close().await;

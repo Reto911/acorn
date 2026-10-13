@@ -14,7 +14,9 @@ use tokio::{
     time::Instant,
 };
 
-use crate::{config::Config, database::Database, submissions::JudgingTask};
+use crate::{
+    config::Config, database::Database, llm_review::ReviewService, submissions::JudgingTask,
+};
 use worker_client::WorkerClient;
 
 /// Expected local admission errors, independent of Worker availability.
@@ -126,6 +128,7 @@ impl Scheduler {
         config: &Config,
         database: Database,
         startup: Vec<JudgingTask>,
+        review: ReviewService,
     ) -> anyhow::Result<(Self, JoinHandle<anyhow::Result<()>>)> {
         let nodes = config
             .scheduler
@@ -158,6 +161,7 @@ impl Scheduler {
             nodes,
             Arc::new(config.clone()),
             database,
+            review,
         ));
         Ok((scheduler, task))
     }
@@ -278,6 +282,7 @@ async fn run(
     mut nodes: Vec<Node>,
     config: Arc<Config>,
     database: Database,
+    review: ReviewService,
 ) -> anyhow::Result<()> {
     let _close = CloseOnDrop(scheduler.shared.clone());
     let mut active = JoinSet::new();
@@ -308,8 +313,10 @@ async fn run(
             let address = nodes[index].address.clone();
             let database = database.clone();
             let config = config.clone();
+            let review = review.clone();
             active.spawn(async move {
-                let result = tracking::track(pending, &client, &address, &database, &config).await;
+                let result =
+                    tracking::track(pending, &client, &address, &database, &config, &review).await;
                 (index, id, result)
             });
         }
@@ -347,11 +354,16 @@ async fn run(
                 nodes[index].ready_at = Instant::now() + if result.cooldown {
                     std::time::Duration::from_millis(config.scheduler.retry_interval_ms)
                 } else { std::time::Duration::ZERO };
-                let mut state = scheduler.shared.state.lock().expect("Scheduler state lock poisoned");
-                if let Some(pending) = result.deferred {
-                    state.queue.push_front(pending);
-                } else {
-                    state.known.remove(&id);
+                {
+                    let mut state = scheduler.shared.state.lock().expect("Scheduler state lock poisoned");
+                    if let Some(pending) = result.deferred {
+                        state.queue.push_front(pending);
+                    } else {
+                        state.known.remove(&id);
+                    }
+                }
+                if let Some(prepared) = result.review {
+                    review.handoff(id, prepared).await?;
                 }
             },
         }

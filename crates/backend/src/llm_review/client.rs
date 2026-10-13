@@ -51,7 +51,7 @@ impl ReviewClient {
         }))
     }
 
-    /// Prepare the metadata that the later admission service saves before queue handoff.
+    /// Prepare metadata that an admission service saves before queue handoff.
     pub fn pending(&self, trigger: ReviewTrigger, requested_at_ms: i64) -> Result<ReviewAttempt> {
         ReviewAttempt::pending(
             trigger,
@@ -66,7 +66,7 @@ impl ReviewClient {
     ///
     /// The caller obtains fixed input and releases its database connection before this call,
     /// then conditionally persists the returned attempt. Dropping this future cancels local
-    /// waiting; the later service owns interruption persistence and remote billing remains unknown.
+    /// waiting; the review service owns interruption persistence and remote billing remains unknown.
     pub async fn review(
         &self,
         submission_id: &str,

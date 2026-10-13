@@ -90,7 +90,7 @@ impl Database {
 
     /// End old pending attempts on explicit startup, retaining their IDs and request metadata.
     ///
-    /// The program entry point will invoke this in L03; it never re-enqueues work.
+    /// The program entry point invokes this before admission; it never re-enqueues work.
     pub async fn interrupt_pending_reviews(&self) -> Result<u64> {
         self.observe("Interrupt old pending reviews", true, async {
             let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;

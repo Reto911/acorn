@@ -18,6 +18,7 @@ use acorn_backend::{
     database::Database,
     health::Health,
     http,
+    llm_review::ReviewService,
     scheduler::Scheduler,
     submissions::{CreateSubmission, CreationService, Submission, SubmissionState},
 };
@@ -165,6 +166,15 @@ impl BackendProcess {
             (fixture.config.scheduler.retry_interval_ms as i64).into();
         config["health"]["interval_ms"] = (fixture.config.health.interval_ms as i64).into();
         config["health"]["timeout_ms"] = (fixture.config.health.timeout_ms as i64).into();
+        let review = &fixture.config.llm_review;
+        config["llm_review"]["enabled"] = review.enabled.into();
+        config["llm_review"]["endpoint"] = review.endpoint.clone().into();
+        config["llm_review"]["api_key"] = review.api_key.clone().into();
+        config["llm_review"]["model"] = review.model.clone().into();
+        config["llm_review"]["reasoning_effort"] = review.reasoning_effort.clone().into();
+        config["llm_review"]["timeout_ms"] = (review.timeout_ms as i64).into();
+        config["llm_review"]["max_concurrent"] = i64::from(review.max_concurrent).into();
+        config["llm_review"]["pending_max_count"] = i64::from(review.pending_max_count).into();
         let path = fixture
             .directory
             .path()
@@ -280,6 +290,8 @@ pub struct Mock {
     pub gets: AtomicUsize,
     /// Number of AcknowledgeResult calls, including failed ACKs.
     pub acks: AtomicUsize,
+    /// Gate ACK completion to exercise the commit-to-handoff stop boundary.
+    pub ack_released: AtomicBool,
     /// Number of status checks, distinct from Job queries and ACKs.
     pub status_calls: AtomicUsize,
     /// Controlled status outcome; None waits until the caller's deadline or cancellation.
@@ -400,6 +412,7 @@ impl JudgeWorker for Mock {
             SubmissionState::Finished | SubmissionState::Failed
         ));
         self.acks.fetch_add(1, Ordering::SeqCst);
+        wait_for(|| self.ack_released.load(Ordering::SeqCst)).await;
         if self.mode == Mode::AckFailure {
             return Err(Status::unavailable("Controlled ACK failure"));
         }
@@ -444,6 +457,7 @@ impl RpcServer {
             submission_order: Mutex::new(Vec::new()),
             gets: AtomicUsize::new(0),
             acks: AtomicUsize::new(0),
+            ack_released: AtomicBool::new(true),
             status_calls: AtomicUsize::new(0),
             status_reply: Mutex::new(Some(Ok(proto::GetWorkerStatusReply {
                 stopping: false,
@@ -491,6 +505,8 @@ pub struct Harness {
     pub creation: CreationService,
     /// The same passive cache exposed by the production router.
     pub health: Health,
+    /// Production independent review service, shared with Scheduler.
+    pub review: ReviewService,
     /// Production HTTP routes invoked as Tower requests.
     pub app: Router,
     /// Independently controlled Worker endpoints.
@@ -499,6 +515,8 @@ pub struct Harness {
     task: JoinHandle<anyhow::Result<()>>,
     /// Collector observed once, including tests that stop it before full teardown.
     health_task: Option<JoinHandle<anyhow::Result<()>>>,
+    /// Review cancellation and persistence must finish before closing the pool.
+    review_task: JoinHandle<anyhow::Result<()>>,
 }
 
 impl Harness {
@@ -516,6 +534,11 @@ impl Harness {
         let mut fixture = Fixture::new().await;
         fixture.config.health = health_config;
         fixture.config.scheduler.pending_max_count = capacity;
+        Self::start_fixture(fixture, modes).await
+    }
+
+    /// Assemble production services using a fixture with explicitly selected review settings.
+    pub async fn start_fixture(mut fixture: Fixture, modes: &[Mode]) -> Self {
         fixture.config.scheduler.retry_interval_ms = 60_000;
         fixture.config.scheduler.poll_interval_ms = 10;
         let mut servers = Vec::new();
@@ -526,8 +549,15 @@ impl Harness {
             .iter()
             .map(|server| server.address.clone())
             .collect();
-        let (scheduler, task) =
-            Scheduler::start(&fixture.config, fixture.database.clone(), Vec::new()).unwrap();
+        let (review, review_task) =
+            ReviewService::start(&fixture.config.llm_review, fixture.database.clone()).unwrap();
+        let (scheduler, task) = Scheduler::start(
+            &fixture.config,
+            fixture.database.clone(),
+            Vec::new(),
+            review.clone(),
+        )
+        .unwrap();
         let creation =
             CreationService::new(&fixture.config, fixture.database.clone(), scheduler.clone());
         let (health, health_task) =
@@ -544,10 +574,12 @@ impl Harness {
             scheduler,
             creation,
             health,
+            review,
             app,
             servers,
             task,
             health_task: Some(health_task),
+            review_task,
         }
     }
 
@@ -597,6 +629,7 @@ impl Harness {
     pub async fn close(mut self) {
         self.creation.stop();
         self.scheduler.pause();
+        self.review.stop();
         self.creation.wait_idle().await;
         for server in &self.servers {
             server.mock.released.store(true, Ordering::SeqCst);
@@ -607,6 +640,7 @@ impl Harness {
             .unwrap()
             .unwrap()
             .unwrap();
+        (&mut self.review_task).await.unwrap().unwrap();
         self.stop_health().await;
         for server in self.servers {
             server.close().await;
@@ -618,6 +652,7 @@ impl Harness {
     pub async fn close_failed(mut self) {
         self.creation.stop();
         self.health.stop();
+        self.review.stop();
         self.creation.wait_idle().await;
         assert!(
             tokio::time::timeout(Duration::from_secs(5), &mut self.task)
@@ -626,6 +661,7 @@ impl Harness {
                 .unwrap()
                 .is_err()
         );
+        (&mut self.review_task).await.unwrap().unwrap();
         self.stop_health().await;
         for server in self.servers {
             server.close().await;

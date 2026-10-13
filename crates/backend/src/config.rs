@@ -192,7 +192,7 @@ pub struct LoggingConfig {
 #[derive(Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LlmReviewConfig {
-    /// Whether the later review service may admit work.
+    /// Whether the independent review service may admit work.
     pub enabled: bool,
     /// Complete POST URL, with no automatic path suffix.
     pub endpoint: String,
@@ -204,9 +204,9 @@ pub struct LlmReviewConfig {
     pub reasoning_effort: String,
     /// Total HTTP send and response-read deadline, in milliseconds.
     pub timeout_ms: u64,
-    /// Independent running capacity, consumed by the later queue service.
+    /// Independent running capacity, consumed by the review queue service.
     pub max_concurrent: u32,
-    /// Independent pending capacity, consumed by the later queue service.
+    /// Independent pending capacity, consumed by the review queue service.
     pub pending_max_count: u32,
     /// Combined visible and reasoning token budget.
     pub max_output_tokens: u64,

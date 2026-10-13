@@ -2,7 +2,24 @@
 
 use serde_json::{Value, json};
 
-use crate::{config::LlmReviewConfig, database::ReviewInput};
+use crate::{
+    config::LlmReviewConfig,
+    database::ReviewInput,
+    submissions::{SubmissionState, TerminalDetails, TerminalOutcome, Verdict},
+};
+
+use super::ReviewMode;
+
+/// Decide from validated machine results and the submission's immutable version policy.
+pub(crate) fn automatic(mode: ReviewMode, terminal: &TerminalOutcome) -> bool {
+    if mode == ReviewMode::Disabled || terminal.state != SubmissionState::Finished {
+        return false;
+    }
+    terminal.verdict == Some(Verdict::AC)
+        || (mode == ReviewMode::EnableAny
+            && matches!(&terminal.details, Some(TerminalDetails::Case(details))
+                if details.failed_case.case_index > 1))
+}
 
 /// Backend-only identifier, saved with each attempt and never sent as input or schema metadata.
 pub const PROMPT_VERSION: &str = "review-policy-v1";
@@ -69,4 +86,74 @@ pub(crate) fn request(
         "stream":false,
         "store":false
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    //! Small decision table over validated machine outcomes and fixed review modes.
+
+    use acorn_protocol::worker::v1::{FailedCase, JobFailure, JudgeResult, Verdict};
+
+    use super::*;
+    use crate::config::Config;
+
+    /// Short-circuit failures trigger ANY only after an actually passed earlier case.
+    #[test]
+    fn automatic_gate_uses_actual_passed_cases() {
+        let config =
+            Config::parse(include_str!("../../../../config/backend.example.toml")).unwrap();
+        for verdict in [
+            Verdict::Accepted,
+            Verdict::CompileError,
+            Verdict::WrongAnswer,
+            Verdict::RuntimeError,
+            Verdict::TimeLimitExceeded,
+            Verdict::MemoryLimitExceeded,
+            Verdict::OutputLimitExceeded,
+        ] {
+            for index in [1, 2] {
+                let terminal = TerminalOutcome::judged(
+                    &JudgeResult {
+                        verdict: verdict as i32,
+                        failed_case: (!matches!(
+                            verdict,
+                            Verdict::Accepted | Verdict::CompileError
+                        ))
+                        .then_some(FailedCase {
+                            case_index: index,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    4,
+                    &config.results,
+                )
+                .unwrap();
+                assert!(!automatic(ReviewMode::Disabled, &terminal));
+                assert_eq!(
+                    automatic(ReviewMode::EnableAll, &terminal),
+                    verdict == Verdict::Accepted
+                );
+                assert_eq!(
+                    automatic(ReviewMode::EnableAny, &terminal),
+                    verdict == Verdict::Accepted || (verdict != Verdict::CompileError && index > 1)
+                );
+            }
+        }
+        let failed = TerminalOutcome::failed(
+            &JobFailure {
+                code: "WorkerUnavailable".into(),
+                diagnostic: String::new(),
+            },
+            &config.results,
+        )
+        .unwrap();
+        for mode in [
+            ReviewMode::Disabled,
+            ReviewMode::EnableAny,
+            ReviewMode::EnableAll,
+        ] {
+            assert!(!automatic(mode, &failed));
+        }
+    }
 }

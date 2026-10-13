@@ -6,7 +6,7 @@ C 与 Python 3 的单文件源码判题系统。后端包含 HTTP API、Schedule
 
 浏览器 GUI 采用 Vue 3、TypeScript 和 Monaco，已完成 F01–F07：题目浏览、C/Python 编辑、本地草稿、主动提交、结果详情、固定版本题面、状态轮询，以及提交历史筛选、分页和详情往返。首版桌面联调已覆盖 C/Python AC、C CE、Python WA 和 C TLE，实际新增与复用记录、UI-01–UI-09 对应关系及未测范围见[前端开发计划](docs/06-frontend-development-plan.md#57-f07首版浏览器联调与操作说明)。交互依据见[GUI 设计](docs/05-frontend-design.md)；健康观测 F08 / H01–H04 已完成，提供 Worker 状态 RPC、后端共享采集、只读 HTTP 快照及 `/health` 系统状态页面，支持自动、手动刷新和独立过期警告；初次实际检查见[健康页面交付记录](docs/06-frontend-development-plan.md#511-f08h04健康页面与最终连通验收)，后续每 10 秒自动获取的实现与验证边界见[补充记录](docs/06-frontend-development-plan.md#512-健康页面每十秒自动获取)。
 
-LLM 代码审查正在实施，合同与 L01–L06 计划见[LLM 设计](docs/08-llm-code-review-design.md)。L01 已完成数据类型、结构版本 3、最新审查读写与历史筛选的数据库基础；L02 已完成可缺省配置、固定指令与 Schema、单次 Responses 客户端和受控 HTTP 检查，见[客户端实施记录](docs/08-llm-code-review-design.md#122-l02审查客户端与策略)。当前后端只接受结构版本 3；已有版本 2 数据库须按[离线升级交付](docs/08-llm-code-review-design.md#1212-离线升级交付)停服务、备份并单独执行升级 SQL，不能重跑初始化 SQL。自动与手动接纳、入口生命周期及 HTTP/GUI 接入仍待 L03–L06；当前 Scheduler 保持 DISABLED，配置 enabled=true 也尚不会启动审查服务。既有判题和健康验收不扩展为 LLM 验收。
+LLM 代码审查正在实施，合同与 L01–L06 计划见[LLM 设计](docs/08-llm-code-review-design.md)。L01 已完成数据类型、结构版本 3、最新审查读写与历史筛选的数据库基础；L02 已完成配置、固定策略和单次 Responses 客户端；L03 已接通独立有界队列、判题后自动审查、启动中断及停机取消，见[队列与生命周期实施记录](docs/08-llm-code-review-design.md#123-l03队列自动触发与生命周期)。配置 enabled=true 后仍须题目固定版本的 review_mode 达到自动门槛，默认题目策略为 DISABLED；机器结果保存、ACK 和 Worker 本地占用释放后才交接审查，模型等待不占数据库连接。手动触发、HTTP 审查查询和 GUI 仍待 L04–L06。当前后端只接受结构版本 3；已有版本 2 数据库须按[离线升级交付](docs/08-llm-code-review-design.md#1212-离线升级交付)停服务、备份并单独执行升级 SQL，不能重跑初始化 SQL。既有判题和健康验收不扩展为完整 LLM 验收。
 
 ## 浏览器 GUI
 
@@ -76,7 +76,7 @@ Ctrl-C 或 SIGTERM 先停止接纳，再通过共同停止路径结束当前执�
 
 无效配置或不可调用的工具明确报错，不启动监听。工具的 `--version` 检查不能替代真实沙箱验收。
 
-后端读取 [backend.example.toml](config/backend.example.toml)，初始化英文日志，打开已初始化数据库并检查结构版本及预置测试用户，然后启动 Scheduler、共享健康采集和 HTTP 监听。数据库路径相对于启动目录；示例使用 `acorn.db`、用户 1 和 `http://127.0.0.1:50051` Worker endpoint。先启动上文的 Worker，再在另一终端于仓库根目录准备新数据库并启动后端：
+后端读取 [backend.example.toml](config/backend.example.toml)，初始化英文日志，打开已初始化数据库并检查结构版本及预置测试用户，然后启动独立审查服务、Scheduler、共享健康采集和 HTTP 监听。数据库路径相对于启动目录；示例使用 `acorn.db`、用户 1 和 `http://127.0.0.1:50051` Worker endpoint。先启动上文的 Worker，再在另一终端于仓库根目录准备新数据库并启动后端：
 
 ```sh
 sqlite3 -bail acorn.db < sql/001-initial-schema.sql
@@ -88,9 +88,9 @@ target/debug/acorn-backend --config /tmp/acorn-backend.toml 2>/tmp/acorn-backend
 
 三个 SQL 脚本仅在新库执行一次。应用不会创建数据库、装入 SQL 或执行升级。测试用户脚本仅供开发，Argon2id 哈希来自已丢弃的随机密码；当前没有登录功能或可用登录凭据。示例题仍随正式发布保留。
 
-后端在开放 HTTP 前将旧 `dispatching/running` 保存为 `failed / SchedulerInterrupted`，按 `created_at_ms, id` 装入 `queued` 的固定版本任务；排队数超出 `scheduler.pending_max_count` 时明确报错退出，提示部署端增大配置上限。启动不联系旧任务的 Worker，也不补发旧 ACK。
+后端在开放 HTTP 前将旧 `dispatching/running` 保存为 `failed / SchedulerInterrupted`，将旧审查 PENDING 保存为 FAILED/ReviewInterrupted，按 `created_at_ms, id` 装入 `queued` 的固定版本任务；排队数超出 `scheduler.pending_max_count` 时明确报错退出，提示部署端增大配置上限。启动不联系旧任务的 Worker，也不补发旧 ACK 或模型请求。
 
-后端收到 Ctrl-C 或 SIGTERM 后停止创建接纳和新分派，等待已开始的短创建操作、在途判题、结果保存及一次有 deadline 的 ACK，再关闭 HTTP，停止并等待健康采集任务，最后关闭连接池。等待期间查询继续可用，新创建返回 `503 BackendStopping`；未分派任务保持 `queued`，下次启动装入。已开始的创建操作即使尚在幂等查询阶段，也可在正常停机时完成名额预留与本地交接。
+后端收到 Ctrl-C 或 SIGTERM 后停止创建接纳和新分派，同时停止审查接纳、取消本地模型等待并按 ID 保存 FAILED/ReviewInterrupted；判题收尾时满足自动门槛的新终态直接原子保存审查中断。等待已开始的短创建操作、在途判题、结果保存、一次有 deadline 的 ACK 及本地审查收尾，再关闭 HTTP，停止并等待健康采集任务，最后关闭连接池。等待期间查询继续可用，新创建返回 `503 BackendStopping`；未分派任务保持 `queued`，下次启动装入。已开始的创建操作即使尚在幂等查询阶段，也可在正常停机时完成名额预留与本地交接。
 
 运行期普通业务只读失败返回 `500 InternalError` 并记录英文日志，后端继续运行。健康读取探测的普通失败只更新观测缓存，健康接口仍可返回 `200`。创建写事务及状态、终态写入失败，明确的 I/O、磁盘满或数据库损坏，以及 Scheduler 异常结束，会使后端停止接纳与分派，收尾短创建操作后尽快退出，不等待其他 Worker 完成；未保存结果不 ACK。具体边界见[后端故障契约](docs/03-backend-design.md#83-数据库及后台故障)。
 

@@ -6,7 +6,9 @@ use acorn_backend::{
     config::{Cli, Config},
     database::Database,
     health::Health,
-    http, logging,
+    http,
+    llm_review::ReviewService,
+    logging,
     scheduler::Scheduler,
     submissions::CreationService,
 };
@@ -39,9 +41,11 @@ async fn run(cli: Cli) -> Result<()> {
 /// Supervise business services and health collection, draining owned work before shutdown.
 async fn serve(config: &Config, database: Database) -> Result<()> {
     let interrupted = database.interrupt_in_flight().await?;
+    let reviews_interrupted = database.interrupt_pending_reviews().await?;
     let startup = database.queued_tasks().await?;
     tracing::info!(
         interrupted,
+        reviews_interrupted,
         queued = startup.len(),
         "Backend startup tasks loaded"
     );
@@ -49,7 +53,9 @@ async fn serve(config: &Config, database: Database) -> Result<()> {
         .await
         .context("Bind backend HTTP listener")?;
     let address = listener.local_addr()?;
-    let (scheduler, mut scheduler_task) = Scheduler::start(config, database.clone(), startup)?;
+    let (review, mut review_task) = ReviewService::start(&config.llm_review, database.clone())?;
+    let (scheduler, mut scheduler_task) =
+        Scheduler::start(config, database.clone(), startup, review.clone())?;
     let creation = CreationService::new(config, database.clone(), scheduler.clone());
     let (health, mut health_task) = Health::start(&config.health, database.clone(), &scheduler)?;
     let router = http::router(
@@ -70,6 +76,7 @@ async fn serve(config: &Config, database: Database) -> Result<()> {
     tracing::info!(listen = %address, "Backend HTTP listening");
     let mut stop = Some(stop);
     let mut scheduler_finished = false;
+    let mut review_finished = false;
     let mut http_finished = false;
     let mut health_finished = false;
     let mut stopping = false;
@@ -90,11 +97,29 @@ async fn serve(config: &Config, database: Database) -> Result<()> {
                 if let Err(error) = completed {
                     break Err(error);
                 }
-                let _ = stop.take().expect("HTTP stop signal is available").send(());
+                if review_finished {
+                    let _ = stop.take().expect("HTTP stop signal is available").send(());
+                }
+            },
+            result = &mut review_task, if !review_finished => {
+                review_finished = true;
+                if !stopping {
+                    break match result {
+                        Ok(Err(error)) => Err(error),
+                        other => Err(anyhow::anyhow!("Review service stopped unexpectedly: {other:?}")),
+                    };
+                }
+                if let Err(error) = result.context("Review service task failed").and_then(|result| result) {
+                    break Err(error);
+                }
+                tracing::info!("Review service stopped");
+                if scheduler_finished {
+                    let _ = stop.take().expect("HTTP stop signal is available").send(());
+                }
             },
             result = &mut http_task => {
                 http_finished = true;
-                if stopping && scheduler_finished {
+                if stopping && scheduler_finished && review_finished {
                     break result.context("HTTP task failed")
                         .and_then(|result| result.context("HTTP listener failed"));
                 }
@@ -114,6 +139,7 @@ async fn serve(config: &Config, database: Database) -> Result<()> {
                 tracing::info!("Backend stopping admission and dispatch");
                 creation.stop();
                 scheduler.pause();
+                review.stop();
                 stopping = true;
             },
             _ = creation.wait_idle(), if stopping && !creation_drained => {
@@ -126,6 +152,7 @@ async fn serve(config: &Config, database: Database) -> Result<()> {
         tracing::error!(error = %error, "Backend fault; stopping admission and dispatch");
         creation.stop();
         scheduler.pause();
+        review.stop();
         health.stop();
         if let Some(stop) = stop.take() {
             let _ = stop.send(());
@@ -136,6 +163,17 @@ async fn serve(config: &Config, database: Database) -> Result<()> {
         }
         if !http_finished {
             abort_task(&mut http_task, "HTTP").await;
+        }
+        if !review_finished {
+            match review_task.await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::error!(error = %error, "Review service failed during fault shutdown")
+                }
+                Err(error) => {
+                    tracing::error!(error = %error, "Review service task failed during fault shutdown")
+                }
+            }
         }
     }
     health.stop();

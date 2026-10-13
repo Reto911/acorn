@@ -1,6 +1,6 @@
 # LLM 代码审查设计
 
-状态：设计已批准；L01 数据契约与离线升级、L02 客户端与策略已完成，L03–L06 待实施。本文定义 LLM 审查的数据字段、后端流程、HTTP 与前端合同、实施步骤及验收要求。LLM 相关前后端增量统一维护在本文。
+状态：设计已批准；L01 数据契约与离线升级、L02 客户端与策略、L03 队列与程序生命周期已完成，L04–L06 待实施。本文定义 LLM 审查的数据字段、后端流程、HTTP 与前端合同、实施步骤及验收要求。LLM 相关前后端增量统一维护在本文。
 
 ## 1. 已确认需求与范围
 
@@ -555,3 +555,27 @@ L02 已完成。[后端配置](../crates/backend/src/config.rs)和[示例](../co
 本次 PASS 验证了单次真实调用和保存流程，不代表整体反作弊效果或后续调用必然得到相同意见。
 
 本阶段没有接入自动或手动审查服务；未运行完整 workspace 测试、真实 Isolate 或浏览器验收。此次真实调用覆盖接口与保存流程，L03–L06 的队列、HTTP、UI 和最终联调仍待实施；下一步按 L03 实现独立队列、自动交接及程序生命周期。
+
+### 12.3 L03：队列、自动触发与生命周期
+
+L03 已完成。[审查服务](../crates/backend/src/llm_review/service.rs)使用独立 FIFO、待执行信号量和受配置限制的运行任务，复用单个 ReviewClient 和既有数据库。预留及排队任务持有待执行名额，转入执行时释放；活动提交去重，任务只保留身份和请求元数据。模型输入在执行时读取，数据库方法返回后已归还连接；请求期间不占 Scheduler 名额、Worker 本地占用或数据库连接。按 review_id 条件完成，保留最近一次意见，不新增扫描补投、重试、恢复框架或依赖。
+
+[自动策略](../crates/backend/src/llm_review/policy.rs)复用 L01 已由共同任务装配入口携带的固定版本 review_mode，按已校验的机器终态判断 ANY、ALL 与 DISABLED；不修改 Worker 或 Proto。[判题跟踪](../crates/backend/src/scheduler/tracking.rs)在终态保存前尝试预留独立审查名额，用既有条件 UPDATE 原子保存机器终态和审查初态。未生效或写入失败时释放名额，未保存的机器结果不 ACK；队列满、服务禁用或停止时直接保存相应审查失败。
+
+首次机器终态保存后先执行一次 ACK，将审查意图和预留名额作为跟踪完成事件返回。[调度循环](../crates/backend/src/scheduler/mod.rs)释放节点、路由及本地在途身份后再交接；ACK 失败仍交接，重复终态不新建审查。交接遇到停止或关闭时，先释放审查名额，再按本次 ID 保存 ReviewInterrupted 或 ReviewUnavailable；该写入发生在 ACK 和节点释放之后。正常交接只修改本地队列，不等待模型。
+
+[程序入口](../crates/backend/src/main.rs)在开放 HTTP 前调用旧 PENDING 中断操作，保留 ID 和请求元数据，不补发请求；启动并监督独立审查任务。停止信号立即关闭审查接纳并取消本地输入读取或模型等待，完成短写入和队列中断；判题收尾中新到的自动需求直接原子保存 FAILED/ReviewInterrupted。入口等待创建、判题及本地审查收尾后关闭 HTTP、健康采集和数据库。普通 API 失败只结束该次审查；关键审查写入失败或调度任务异常结束按既有故障规则退出，不等待远端模型执行或计费结束。
+
+本阶段只接通自动审查。题目默认 DISABLED，enabled=true 仅启用审查服务，仍须提交固定版本满足门槛。手动接纳及短操作登记、HTTP DTO 和筛选留在 L04，前端及最终联调留在 L05–L06。
+
+#### 12.3.1 实际检查
+
+- `cargo fmt --all -- --check`、`cargo check --workspace --all-targets --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings`：最终通过，覆盖程序入口、全部现有测试目标和更新后的真实 Worker 夹具。
+- 沙箱执行 `cargo test -p acorn-backend --locked --lib --test llm_review --test workflow`：九项单元测试通过，新增自动门槛小表覆盖全部用例级 verdict 的首例／后续失败、AC、CE、执行失败及三种模式；五项客户端网络测试绑定回环端口时返回 Operation not permitted，命令失败，未执行 workflow。
+- 随后在可绑定回环端口的宿主环境执行 `cargo test -p acorn-backend --locked --test llm_review --test workflow`，五项 L02 客户端测试通过。首轮新增 workflow 用例因测试误用 python3 而非既有 python 标识失败；修正夹具后运行 `cargo test -p acorn-backend --locked --test workflow`，并在补充条件终态未生效检查后再次运行，最终三十一项常规测试通过，两个真实 Isolate 验收按原规则忽略。
+- [七项新增 workflow 检查](../crates/backend/tests/support/review_workflow.rs)使用临时 SQLite、受控 gRPC 和 Axum Responses 服务。覆盖单运行／单排队容量、FIFO、队列满、独立 Scheduler 容量、重复投递、迟到机器终态的名额释放、禁用服务及 ACK 失败。实际模型 POST 处理器断言 Scheduler 身份已释放且 ACK 已调用；卡住响应时仍能保存下一条机器终态并读取数据库。
+- ACK 完成门控检查确认：机器结果和 PENDING 已落库、ACK 尚未结束时停止审查，PENDING 此时不被交接收尾覆盖；ACK 完成后保存 ReviewInterrupted，未发模型 POST。实际后端子进程另验证旧 PENDING 启动中断、排队任务使用旧版本策略、重启不补发、运行及排队审查停机中断、停机中新机器终态的原子中断，以及 HTTP 查询持续可用；60 秒模型预算内的未完成请求不阻止既有 5 秒进程退出检查。
+- 受控 503 仅使该审查保存 ReviewApiFailed，后续审查正常完成。临时数据库触发器拒绝审查完成写入时，后端明确故障退出，机器 AC 和 ACK 保留，未写成的审查仍为 PENDING；没有把内存意见或失败记录伪称为已保存。
+- 变更 Markdown 的本地链接与锚点、代码块闭合、既有标题编号保留，以及 `git diff --check`：通过。
+
+未调用真实模型、读取开发凭据、升级实际部署数据库或运行完整 workspace、真实 Isolate、浏览器验收；未人工注入审查任务 panic。受控 PASS 验证调用和持久化合同，不证明模型语义效果。本次不扩展 L02 单次真实调用或原判题、健康验收的结论。下一步 L04 实现手动接纳、预期 ID 校验、审查查询 DTO 和历史筛选。
