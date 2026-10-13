@@ -1,12 +1,12 @@
 # 健康观测设计与实施计划
 
-状态：v1 已确认，作为 F08 实施依据；H01–H03 的 Worker 状态 RPC、后端共享采集、程序入口及 HTTP 已实现，H04 健康页面及过期警告尚未实现。判题、调度和故障处理规则沿用原有契约。
+状态：v1 已确认，作为 F08 实施依据；H01–H04 的 Worker 状态 RPC、后端共享采集、程序入口、HTTP、健康页面及独立过期警告已完成，最终实际连通检查已通过。判题、调度和故障处理规则沿用原有契约。
 
 ## 1. 目标与范围
 
 为浏览器提供 HTTP 响应、数据库读取、新提交接纳、Scheduler 生命周期和 Worker 接纳条件的只读观测。依据见[前端健康规划](05-frontend-design.md#62-后续健康功能)和[F08](06-frontend-development-plan.md#38-f08后续健康观测)。
 
-当前后端 P01–P10 已完成，前端 F01–F07 首版 GUI 已完成；F08 已开始实施，H01–H03 已实现，最新检查见[开发计划](06-frontend-development-plan.md#510-f08h03http-快照与生命周期)。当前后端程序已启动并监督共享采集，正常和故障退出均在关闭数据库前停止并等待采集任务。健康功能作为核心 GUI 交付后的独立工作。
+当前后端 P01–P10 已完成，前端 F01–F07 首版 GUI 已完成；F08 / H01–H04 已完成，GUI 与最终连通检查见[开发计划](06-frontend-development-plan.md#511-f08h04健康页面与最终连通验收)，后端阶段记录保留在此前章节。当前后端程序已启动并监督共享采集，正常和故障退出均在关闭数据库前停止并等待采集任务。健康功能作为核心 GUI 交付后的独立工作。
 
 本版交付一个 HTTP GET 接口、一个 Worker 状态 RPC、一个后端共享探测任务和一个手动刷新页面。复用现有 Tokio、Tonic、SQLx、Axum 和前端查询组件，无需新增依赖、数据库表或独立服务。
 
@@ -244,7 +244,7 @@ Worker 按配置顺序返回，标识为 `worker-1`、`worker-2` 等；配置顺
 | H01 Worker 状态 | 在[协议源文件](../proto/acorn/worker/v1/worker.proto)追加第 3 节协议；在[Jobs](../crates/worker/src/jobs.rs)增加执行位置标记；在[RPC](../crates/worker/src/rpc.rs)实现查询并接入现有终态发布。同步[Worker 设计](01-worker-design.md#3-rpc-契约) | 生成客户端可查询空闲、忙、阻塞、停机和结果区数量；查询不改变业务状态 |
 | H02 观测数据与采集 | 在[后端配置](../crates/backend/src/config.rs)增加有缺省值的 `health` 配置并更新[示例](../config/backend.example.toml)；在[创建服务](../crates/backend/src/submissions/creation.rs)和[Scheduler](../crates/backend/src/scheduler/mod.rs)增加只读本地快照；在[数据库](../crates/backend/src/database/mod.rs)增加读取探测；在[Worker 客户端](../crates/backend/src/scheduler/worker_client.rs)增加状态调用。新增 `crates/backend/src/health.rs` 并从[库入口](../crates/backend/src/lib.rs)导出 | 单轮有界探测可更新各项缓存，查询不影响任务分派、名额和 ACK |
 | H03 HTTP 与生命周期 | 在[HTTP 路由及 DTO](../crates/backend/src/http/mod.rs)增加第 5 节接口；在[程序入口](../crates/backend/src/main.rs)组装、观察和结束共享探测任务；同步[后端设计](03-backend-design.md)的接口、配置和模块职责 | HTTP 读取本地状态和缓存；数据库普通读取失败或 Worker 无响应时仍能返回组件快照；停机按第 4.3 节收尾 |
-| H04 GUI 与说明 | 在[前端 API](../web/src/api/index.ts)及 DTO 增加接口；新增 `web/src/pages/HealthPage.vue`，更新[路由](../web/src/router.ts)和[导航](../web/src/App.vue)；复用 `ElAlert` 增加独立过期警告区。同步前端设计、F08、根说明及前端说明 | 实际页面直接展示指标，手动刷新、请求错误和观测过期警告可用；文档准确记录已执行范围 |
+| H04 GUI 与说明 | 在[前端 API](../web/src/api/index.ts)及 DTO 增加接口；新增[健康页面](../web/src/pages/HealthPage.vue)，更新[路由](../web/src/router.ts)和[导航](../web/src/App.vue)；复用 `ElAlert` 增加独立过期警告区。同步前端设计、F08、根说明及前端说明 | 实际页面直接展示指标，手动刷新、请求错误和观测过期警告可用；文档准确记录已执行范围 |
 
 H01 修改 Proto 后通过 Cargo 构建生成代码，不手工编辑 `OUT_DIR`，所有实现 `JudgeWorker` 的现有受控服务需补齐新方法，默认返回确定的受控状态即可。H02 复用现有客户端 channel；H03 更新现有组装调用和测试夹具，不保留第二套无健康功能的组装路径。
 
@@ -278,7 +278,7 @@ H04 在 `web/` 执行已有 `pnpm format:check`、`pnpm lint`、`pnpm typecheck`
 
 新 RPC 通过实际生成客户端和服务端验证，不另外编写只重复 Prost 编解码的往返测试。现有启动、调度、ACK、存储严重错误和取消行为继续使用已有覆盖，除非实施中发现与本次改动直接相关的问题，否则不扩展测试范围。
 
-文档变更检查格式、稳定编号和本地链接。上述测试均为实施后的要求，本文不记录或声称它们已经通过。
+文档变更检查格式、稳定编号和本地链接。本文定义验收要求，不作为执行日志；实际执行结果和未测范围见[开发计划](06-frontend-development-plan.md#511-f08h04健康页面与最终连通验收)。
 
 ## 9. 已确认要点
 

@@ -117,3 +117,42 @@ export interface HttpErrorBody {
   message: string
   submission_id?: string
 }
+
+export type HealthProbeErrorCode =
+  | 'ProbeTimeout'
+  | 'DatabaseReadFailed'
+  | 'WorkerRpcFailed'
+  | 'WorkerStatusUnsupported'
+  | 'InvalidWorkerStatus'
+
+/** Latest check metadata; missing timestamps and errors remain explicit nulls. */
+export type HealthObservation =
+  | { state: 'unknown'; checked_at_ms: null; error_code: null }
+  | { state: 'ok' | 'stale'; checked_at_ms: number; error_code: null }
+  | { state: 'failed'; checked_at_ms: number; error_code: HealthProbeErrorCode }
+
+export interface WorkerStatus {
+  stopping: boolean
+  execution_state: 'idle' | 'running' | 'blocked'
+  unacknowledged_results: number
+  unacknowledged_capacity: number
+}
+
+/** A Worker status is provided only for an ok observation. */
+export type WorkerObservation = HealthObservation & {
+  id: string
+  status: WorkerStatus | null
+}
+
+/** HTTP assembly time differs from the independently completed component checks. */
+export interface HealthSnapshot {
+  snapshot_at_ms: number
+  submission_admission: 'open' | 'full' | 'stopping' | 'unavailable'
+  scheduler: {
+    state: 'running' | 'stopping' | 'stopped'
+    pending_used: number
+    pending_capacity: number
+  }
+  database: HealthObservation
+  workers: WorkerObservation[]
+}

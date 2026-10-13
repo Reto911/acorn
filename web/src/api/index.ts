@@ -4,6 +4,7 @@ import type {
   CreateSubmissionRequest,
   CreateSubmissionResponse,
   HistoryQuery,
+  HealthSnapshot,
   Page,
   PageQuery,
   Problem,
@@ -14,6 +15,16 @@ import type {
 
 export interface QueryOptions {
   signal?: AbortSignal
+}
+
+/** Read the backend snapshot without triggering component probes. */
+export async function getHealth(options: QueryOptions = {}) {
+  return (
+    await requestJson<HealthSnapshot>('/api/v1/health', {
+      operation: 'get-health',
+      ...options,
+    })
+  ).data
 }
 
 /** Pick parameters explicitly so route queries cannot introduce unallowed fields. */

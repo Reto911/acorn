@@ -37,6 +37,13 @@ const route = useRoute()
           >
             提交历史
           </RouterLink>
+          <RouterLink
+            to="/health"
+            :class="{ 'is-active': route.path === '/health' }"
+            :aria-current="route.path === '/health' ? 'page' : undefined"
+          >
+            系统状态
+          </RouterLink>
         </nav>
       </div>
     </header>

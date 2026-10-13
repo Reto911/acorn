@@ -5,6 +5,11 @@ export const router = createRouter({
   routes: [
     { path: '/', redirect: '/problems' },
     {
+      path: '/health',
+      component: () => import('./pages/HealthPage.vue'),
+      meta: { title: '系统状态' },
+    },
+    {
       path: '/problems',
       component: () => import('./pages/ProblemsPage.vue'),
       meta: { title: '题目' },
