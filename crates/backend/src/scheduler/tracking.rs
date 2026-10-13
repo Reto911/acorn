@@ -83,7 +83,7 @@ pub(super) async fn track(
                 tokio::time::sleep(Duration::from_millis(config.scheduler.poll_interval_ms)).await
             }
             Ok(Observation::Terminal(terminal)) => {
-                let saved = database.save_terminal(&id, &terminal).await?;
+                let saved = database.save_terminal(&id, &terminal, None).await?;
                 tracing::info!(submission = %id, worker = address, saved, "Submission terminal committed");
                 if let Err(error) = client.acknowledge(&id).await {
                     tracing::warn!(submission = %id, worker = address, error = %error, "Result acknowledgement failed");
@@ -128,6 +128,6 @@ async fn save_failure(
         },
         &config.results,
     )?;
-    database.save_terminal(id, &terminal).await?;
+    database.save_terminal(id, &terminal, None).await?;
     Ok(())
 }

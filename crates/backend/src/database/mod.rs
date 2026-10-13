@@ -1,6 +1,8 @@
 //! One shared SQLx SQLite pool, explicit queries and short conditional writes.
 
 mod problems;
+mod reviews;
+pub use reviews::ReviewInput;
 mod submissions;
 
 use std::{
@@ -41,6 +43,9 @@ pub enum Error {
     /// A Worker terminal violates the agreed shape or raw-byte budgets.
     #[error("Invalid Worker result: {0}")]
     InvalidResult(&'static str),
+    /// Review data violates the fixed shape or persistence budget.
+    #[error("Invalid review: {0}")]
+    InvalidReview(&'static str),
     /// SQLx preserves the actual SQLite failure and its context.
     #[error("Database operation failed: {0}")]
     Sql(#[from] sqlx::Error),
@@ -79,9 +84,9 @@ impl Database {
             let version: i64 = sqlx::query_scalar("PRAGMA user_version")
                 .fetch_one(&pool)
                 .await?;
-            if version != 2 {
+            if version != 3 {
                 return Err(Error::Data(anyhow::anyhow!(
-                    "Expected schema version 2, got {version}"
+                    "Expected schema version 3, got {version}"
                 )));
             }
             let exists: bool =

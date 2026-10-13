@@ -12,6 +12,7 @@ use uuid::Uuid;
 use crate::{
     config::ResultsConfig,
     database::{Error, Result},
+    llm_review::{ReviewAttempt, ReviewMode, ReviewStatus},
 };
 
 /// Persisted business states; Worker phases are not stored here.
@@ -120,6 +121,8 @@ pub struct SubmissionInfo {
     pub state: SubmissionState,
     /// Judging conclusion, present only when finished.
     pub verdict: Option<Verdict>,
+    /// Independent latest review state, without loading its payload.
+    pub review_status: ReviewStatus,
     /// UTC Unix creation time in milliseconds.
     pub created_at_ms: i64,
     /// Backend terminal-save time, not proof that the remote process stopped.
@@ -139,6 +142,8 @@ pub struct Submission {
     pub create_request_key: String,
     /// Parsed result details, absent for AC and nonterminal states.
     pub terminal_details: Option<TerminalDetails>,
+    /// Latest review attempt, absent when review_status is DISABLED.
+    pub review: Option<ReviewAttempt>,
 }
 
 /// Caller-provided content for a short, idempotent creation transaction.
@@ -163,6 +168,8 @@ pub struct JudgingTask {
     pub version_no: i64,
     /// Job identity, source, ordered cases and budgets sent to the Worker.
     pub request: SubmitJobRequest,
+    /// Fixed-version review policy, never included in the Worker request.
+    pub review_mode: ReviewMode,
 }
 
 /// Creation result returned only after the transaction and connection are released.
@@ -185,6 +192,8 @@ pub struct SubmissionFilter {
     pub state: Option<SubmissionState>,
     /// Optional independent verdict column.
     pub verdict: Option<Verdict>,
+    /// Optional independent review-state filter.
+    pub review_status: Option<ReviewStatus>,
 }
 
 /// Compiler diagnostics encoded once as standard Base64.

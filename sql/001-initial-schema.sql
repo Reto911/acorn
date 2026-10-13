@@ -1,4 +1,4 @@
--- Initial schema for docs/02-database-design.md, version 2.
+-- Initial schema for docs/02-database-design.md, version 3.
 -- Requires SQLite 3.38.0 or later with JSON functions enabled.
 -- Run once against an empty database, outside an existing transaction.
 -- Every application connection must also enable foreign_keys.
@@ -36,6 +36,8 @@ CREATE TABLE problem_versions (
     comparison_mode TEXT NOT NULL DEFAULT 'trim_trailing_ascii_whitespace'
         CHECK (comparison_mode = 'trim_trailing_ascii_whitespace'),
     published_at_ms INTEGER NOT NULL,
+    review_mode TEXT NOT NULL DEFAULT 'DISABLED'
+        CHECK (review_mode IN ('DISABLED', 'ENABLE-ANY', 'ENABLE-ALL')),
     PRIMARY KEY (problem_id, version_no),
     FOREIGN KEY (problem_id) REFERENCES problems (id)
         ON DELETE RESTRICT ON UPDATE RESTRICT
@@ -80,6 +82,23 @@ CREATE TABLE submissions (
     terminal_details_json TEXT,
     created_at_ms INTEGER NOT NULL,
     terminal_at_ms INTEGER,
+    review_status TEXT NOT NULL DEFAULT 'DISABLED'
+        CHECK (review_status IN ('DISABLED', 'PENDING', 'DOUBTFUL', 'PASS', 'FAILED')),
+    review_id TEXT,
+    review_details_json TEXT
+        CONSTRAINT submissions_review_json_object CHECK (
+            CASE
+                WHEN review_details_json IS NULL THEN 1
+                WHEN json_valid(review_details_json)
+                    THEN json_type(review_details_json) = 'object'
+                ELSE 0
+            END
+        )
+        CONSTRAINT submissions_review_fields CHECK (
+            (review_status = 'DISABLED' AND review_id IS NULL AND review_details_json IS NULL)
+            OR (review_status <> 'DISABLED' AND state = 'finished'
+                AND review_id IS NOT NULL AND review_details_json IS NOT NULL)
+        ),
     UNIQUE (user_id, create_request_key),
     FOREIGN KEY (user_id) REFERENCES users (id)
         ON DELETE RESTRICT ON UPDATE RESTRICT,
@@ -132,6 +151,6 @@ CREATE INDEX submissions_verdict_history_idx
 CREATE INDEX submissions_queued_order_idx
     ON submissions (created_at_ms, id) WHERE state = 'queued';
 
-PRAGMA user_version = 2;
+PRAGMA user_version = 3;
 
 COMMIT;

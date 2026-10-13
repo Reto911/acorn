@@ -192,6 +192,7 @@ async fn list_submissions(
         problem_id: query.problem_id,
         state: query.state,
         verdict: query.verdict,
+        review_status: None,
     };
     let items = state
         .database

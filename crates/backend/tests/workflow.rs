@@ -819,7 +819,7 @@ async fn terminal_replay_bypasses_capacity_and_late_result_is_acked() {
         harness
             .fixture
             .database
-            .save_terminal(id, &terminal)
+            .save_terminal(id, &terminal, None)
             .await
             .unwrap()
     );
@@ -854,7 +854,7 @@ async fn terminal_replay_bypasses_capacity_and_late_result_is_acked() {
         !harness
             .fixture
             .database
-            .save_terminal(id, &ac)
+            .save_terminal(id, &ac, None)
             .await
             .unwrap()
     );
@@ -1071,7 +1071,7 @@ async fn process_startup_loads_queue_and_interrupts_in_flight() {
     .unwrap();
     fixture
         .database
-        .save_terminal(&finished, &terminal)
+        .save_terminal(&finished, &terminal, None)
         .await
         .unwrap();
     let previous_terminal = fixture.database.submission(&finished).await.unwrap();

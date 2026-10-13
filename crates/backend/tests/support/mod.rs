@@ -105,7 +105,7 @@ impl Fixture {
     pub async fn publish_next(&self) {
         let mut connection = self.connection().await;
         sqlx::raw_sql("BEGIN IMMEDIATE;
-            INSERT INTO problem_versions SELECT problem_id, 2, 'New title', statement, comparison_mode, published_at_ms + 1 FROM problem_versions WHERE problem_id = 1 AND version_no = 1;
+            INSERT INTO problem_versions (problem_id, version_no, title, statement, comparison_mode, published_at_ms) SELECT problem_id, 2, 'New title', statement, comparison_mode, published_at_ms + 1 FROM problem_versions WHERE problem_id = 1 AND version_no = 1;
             INSERT INTO problem_version_languages SELECT problem_id, 2, language_id, cpu_time_ms + 1, wall_time_ms, memory_kib FROM problem_version_languages WHERE problem_id = 1 AND version_no = 1;
             INSERT INTO test_cases SELECT problem_id, 2, case_index, input, expected_output FROM test_cases WHERE problem_id = 1 AND version_no = 1;
             UPDATE problems SET current_version_no = 2 WHERE id = 1; COMMIT;").execute(&mut connection).await.unwrap();

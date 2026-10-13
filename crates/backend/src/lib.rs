@@ -4,6 +4,7 @@ pub mod config;
 pub mod database;
 pub mod health;
 pub mod http;
+pub mod llm_review;
 pub mod logging;
 pub mod problems;
 pub mod scheduler;

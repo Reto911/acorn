@@ -1,6 +1,6 @@
 # LLM 代码审查设计
 
-状态：设计已批准，待实施。本文定义 LLM 审查的数据字段、后端流程、HTTP 与前端合同、实施步骤及验收要求。LLM 相关前后端增量统一维护在本文。
+状态：设计已批准；L01 数据契约与离线升级已完成，L02–L06 待实施。本文定义 LLM 审查的数据字段、后端流程、HTTP 与前端合同、实施步骤及验收要求。LLM 相关前后端增量统一维护在本文。
 
 ## 1. 已确认需求与范围
 
@@ -463,7 +463,7 @@ L02 不要求真实模型每次给出相同结论。它检验程序是否按约�
 
 Rust 实施按仓库要求执行格式、受影响模块编译、必需 Clippy 及相关测试；前端使用既有格式、lint、typecheck、build 及相关测试。检查通过后只在发生新修改、失败或具体未解决问题时重测。不要求全量 workspace 测试、完整沙箱矩阵、所有 API 故障排列、并发压测或批量真实模型评测。
 
-实际 SQL、程序、调用方及配置示例在各实施步骤同步。LLM 实施记录继续维护在本文，不改写此前的数据库、前后端设计和开发计划。
+实际 SQL、程序、调用方及配置示例在各实施步骤同步。LLM 实施记录继续维护在本文；相关设计和当前操作说明随实现同步，既有开发及验收记录保留原范围，维护边界见[文档索引](README.md)。
 
 ## 11. 开发验证与密钥
 
@@ -483,3 +483,45 @@ ACORN_LLM_API_KEY="在本地填写实际密钥"
 由实现方代跑时，仅上述临时脚本读取 .env，不通过 cat、打印环境、打印配置或鉴权头把 key 送入工具输出。也可由用户自行运行临时验证脚本，仅分享脱敏后的状态、稳定错误、用量和结果摘要。两种方式均使用临时数据库和测试源码，不改动实际库，不重复初始化现有服务。验证结束后移除临时脚本；提交前核对无 .env 加载逻辑或真实密钥进入 Git。
 
 密钥始终在服务端使用，不放入前端或版本控制；相关原则见 [OpenAI API 鉴权说明](https://developers.openai.com/api/reference/overview)。
+
+## 12. 实施记录
+
+### 12.1 L01：数据契约与离线升级
+
+L01 已完成。[审查数据类型](../crates/backend/src/llm_review.rs)定义三个模式、五个状态、两种意见、三个疑点类别、最新一次详情及稳定失败码。意见严格解析必填字段、类型、枚举及未知字段；校验闭区间行号、PASS/DOUBTFUL 与 findings 的关系及 UTF-8 内容预算。固定可空键序列化为 null，缺失用量不估算，错误说明使用后端固定英文文本。
+
+详情组装与数据库写入均检查 32 KiB 总预算，意见和可选诊断另受 16 KiB 上限约束。接纳元数据还须容纳固定失败记录；有效意见或响应元数据造成总详情超限时组装 FAILED/ReviewInvalidOutput，移除超限的 response_id，诊断不能完整保留时省略，不截断 JSON。无效数据在应用边界明确报错，不作为 SQL 存储故障通知。
+
+[完整初始 SQL](../sql/001-initial-schema.sql)与[后端版本检查](../crates/backend/src/database/mod.rs)已切换至结构版本 3，增加四列及枚举、JSON 对象和列间空值约束，保留既有机器终态约束和索引。SQL 约束 DISABLED 的 ID/详情为空、其他状态仅出现在 finished 且 ID/详情非空；JSON 内的状态关系、固定错误、行范围和内容预算由应用检查。不新增审查表、索引或自动迁移。
+
+[数据库审查操作](../crates/backend/src/database/reviews.rs)提供固定源码、语言、题面和 verdict 的读取，最新 PENDING 的条件替换，按 review_id 完成，以及显式中断旧 PENDING。重跑覆盖审查字段；旧 ID、重复完成或已有 PENDING 不覆盖当前尝试。完成时按实际保存源码的 LF 物理行数校验行范围，保留 CRLF 字节，末尾换行不额外计作空行。读取返回后已释放连接。中断操作保留 ID 和请求元数据、补完成时间，入口接线留在 L03。
+
+[提交数据库操作](../crates/backend/src/database/submissions.rs)已支持机器终态与自动审查初态同一条件 UPDATE 原子保存，仍返回更新是否生效；现有 Scheduler 显式传入无审查初态，继续保存 DISABLED。JudgingTask 从共同装配方法携带固定版本 review_mode，不加入 Worker 请求。题目和提交内部类型、数据库历史的 review_status AND 筛选已扩展；当前 HTTP 仍使用原 DTO 和筛选，审查字段及手动服务留在 L04，前端留在 L05。
+
+#### 12.1.1 实际检查
+
+- `cargo fmt --all -- --check`、`cargo check --workspace --all-targets --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings`：通过，包含全部现有 Rust 测试目标；未新增依赖。
+- `cargo test -p acorn-backend --locked --lib`：八项通过，新增两项意见与详情预算检查，覆盖未知字段、必填值、闭区间、中文 UTF-8 字节、JSON 转义开销、无效意见、总详情超限及诊断省略。
+- `cargo test -p acorn-backend --locked --test database`：在可绑定回环端口的宿主环境九项通过。新增两项覆盖默认 DISABLED、固定版本策略和输入、PENDING/PASS/DOUBTFUL/FAILED 往返、条件重跑及迟到结果、实际源码行范围、启动中断方法、机器结果保留、组合筛选、SQL 约束和写入预算。现有独立后端启动测试通过。
+- `cargo test -p acorn-backend --locked --test workflow`：在宿主环境二十四项通过，两个真实 Isolate 验收按原规则忽略。现有 HTTP、保存后 ACK、启动停机和健康流程继续通过；新审查队列、HTTP 接纳或生命周期尚无实现，不据此声称已验收。
+- 执行仓库外临时脚本 `python3 /tmp/acorn-l01-check-upgrade.py`，通过 `sqlite3 -bail` 对临时版本 2 数据库执行单独交付的升级 SQL。七条 queued、dispatching、running、AC、CE、WA 和 failed 记录的原字段完整保留，新增字段默认 DISABLED/null，结构版本为 3。新库与升级库的列、外键、索引及去除空白后的完整结构定义一致，`foreign_key_check` 为空；错误版本执行在修改列之前拒绝。证据保留在 `/tmp/acorn-l01-upgrade-xxsi4lkw/`，包含原版本 2 库、升级库、新库、summary.json 及错误版本诊断。
+- 变更 Markdown 的本地链接与锚点、代码块闭合、既有标题编号保留，以及 `git diff --check`：通过。
+
+保留本阶段失败来源：首次编译在消费 self 后读取 usage，已先取出该值；首次 Clippy 报告三处可合并的 if，已修正。首次数据库测试七项通过、一项失败、一项未执行，原因是旧发布夹具使用无列名 INSERT，新增列后六个值不再匹配七列；已同步数据库及 workflow 夹具为显式列名，最终得到上述通过结果。首次临时升级核对脚本误写十三个占位符，而原 submissions 有十二列，失败发生在填充夹具时、尚未执行升级 SQL；修正临时脚本后完成升级核对，没有修改升级 SQL 来规避错误。
+
+本阶段未修改现有用户数据库、启动收费请求、读取开发密钥或提交 Git；未运行完整 workspace 测试、真实 Isolate 或浏览器验收。L02 的配置、Responses 客户端和指令，L03 的自动门槛、独立队列及启动停机接线，L04–L06 的 HTTP、前端和有限联调仍待实施。
+
+#### 12.1.2 离线升级交付
+
+一次性升级文件已单独交付在 `/tmp/acorn-l01-upgrade-v2-to-v3.sql`，不加入仓库，也不由应用加载。该文件以一个事务添加四列，检查原 user_version 必须为 2，成功后才设置为 3；旧记录不补跑审查。此路径是本次交付位置，部署前须自行保管文件，不将临时目录视为长期分发渠道。
+
+部署方停止后端后，将以下数据库和备份路径替换成实际路径，先确认原版本为 2、完成备份，再执行升级：
+
+```sh
+sqlite3 -bail /path/to/acorn.db 'PRAGMA user_version;'
+sqlite3 -bail /path/to/acorn.db ".backup '/path/to/acorn-v2-backup.db'"
+sqlite3 -bail /path/to/acorn.db < /tmp/acorn-l01-upgrade-v2-to-v3.sql
+sqlite3 -bail /path/to/acorn.db 'PRAGMA user_version; PRAGMA foreign_key_check;'
+```
+
+最后一条应只输出版本号 3，外键检查无记录，再使用原 TOML 启动新版后端。版本 1 不适用此脚本；已有库不执行完整初始化 SQL，升级失败先按原错误处理，不继续启动或只修改版本号。本阶段仅验证临时库，没有代为执行实际部署升级。

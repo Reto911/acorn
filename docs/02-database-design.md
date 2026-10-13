@@ -1,12 +1,12 @@
 # 数据库设计
 
-状态：基础判题设计已实现，当前结构版本 2；LLM 增量已批准、待实施，目标结构版本 3。
+状态：基础判题设计已实现；LLM 的 L01 数据契约已完成，当前结构版本 3，审查执行流程仍待 L02–L06。
 
-本文同步[LLM 代码审查设计](08-llm-code-review-design.md#5-数据库增量)的数据合同，新增审查字段及相关流程均待 L01–L06 实施。现行设计与既有实施记录的维护边界见[文档索引](README.md)。
+本文同步[LLM 代码审查设计](08-llm-code-review-design.md#5-数据库增量)的数据合同，审查字段、类型、固定版本策略读取、最新审查条件读写和数据库历史筛选已由 L01 实现；客户端、接纳服务及入口接线仍待后续步骤。现行设计与既有实施记录的维护边界见[文档索引](README.md)。
 
 P06 已实现后端[数据库模块](../crates/backend/src/database/mod.rs)、[题目类型](../crates/backend/src/problems.rs)与[提交和终态类型](../crates/backend/src/submissions.rs)。P07/P08 的 Scheduler 和 HTTP 已使用创建、固定版本任务装配、条件状态和终态写入方法；P09 已将启动读取／中断方法接入入口，并按[后端故障契约](03-backend-design.md#83-数据库及后台故障)报告关键写入与严重存储错误。P10 已从空数据库启动独立程序，验证样例结果、保存后 ACK 和后端重启后查询。开发用户脚本见 [seed-user.sql](../examples/seed-user.sql)。
 
-结构版本 2 将版本语言表的 `memory_bytes` 改为 `memory_kib`，以 KiB 保存内存限额并直接装配新的 RPC 字段；实际结果中的内存统计仍为字节。当前已实现的应用检查 `PRAGMA user_version = 2`。L01 实施时，完整初始 SQL 与应用版本检查一同切换为 3；版本 2 → 3 的升级 SQL 和执行命令单独交付，不纳入仓库。部署端停服务、备份后离线升级，应用不自动升级。旧提交新增审查字段默认 DISABLED，不补跑审查；已有库不重跑完整初始化 SQL。具体升级合同见[第 08 篇第 5.3 节](08-llm-code-review-design.md#53-数据库升级职责)。版本 1 的内存单位转换仍须由部署端处理，不能只修改结构版本号或将原字节值直接当作 KiB。
+结构版本 2 将版本语言表的 `memory_bytes` 改为 `memory_kib`，以 KiB 保存内存限额并直接装配新的 RPC 字段；实际结果中的内存统计仍为字节。L01 已将完整初始 SQL 与应用版本检查一同切换为 `PRAGMA user_version = 3`；版本 2 → 3 的升级 SQL 和执行命令单独交付，不纳入仓库，实际交付和检查见[第 08 篇实施记录](08-llm-code-review-design.md#121-l01数据契约与离线升级)。部署端停服务、备份后离线升级，应用不自动升级。旧提交新增审查字段默认 DISABLED，不补跑审查；已有库不重跑完整初始化 SQL。具体升级合同见[第 08 篇第 5.3 节](08-llm-code-review-design.md#53-数据库升级职责)。版本 1 的内存单位转换仍须由部署端处理，不能只修改结构版本号或将原字节值直接当作 KiB。
 
 初始建表语句见 [001-initial-schema.sql](../sql/001-initial-schema.sql)，执行说明见 [SQL 使用说明](../sql/README.md)。
 
@@ -88,7 +88,7 @@ API、Scheduler 与待实施的 llm_review 属于同一后端进程，见[后端
 | `title` | 版本标题 |
 | `statement` | 版本题面的 Markdown 源文；原文保存，浏览器按[前端设计](05-frontend-design.md#32-答题页面)禁用内嵌 HTML 渲染 |
 | `comparison_mode` | 比较规则保留字段，默认 `trim_trailing_ascii_whitespace` |
-| `review_mode`（版本 3，待实施） | 自动审查模式，`DISABLED` / `ENABLE-ANY` / `ENABLE-ALL`，默认 `DISABLED`；门槛见[第 08 篇第 4.1 节](08-llm-code-review-design.md#41-根据现有结果判断) |
+| `review_mode`（版本 3，已实现） | 自动审查模式，`DISABLED` / `ENABLE-ANY` / `ENABLE-ALL`，默认 `DISABLED`；门槛见[第 08 篇第 4.1 节](08-llm-code-review-design.md#41-根据现有结果判断) |
 | `published_at_ms` | 发布时刻 |
 
 版本、语言限额、全部测试用例和发布指针在同一事务中写入。发布分配下一个版本号并更新指针，不提供将最新指针切回旧版本的入口。首版不持久化可编辑草稿；已发布内容不可修改，修改题面、测试、限额、比较规则或自动审查模式时创建新版本。自动门槛使用提交固定版本的模式，不随最新发布指针变化。
@@ -141,9 +141,9 @@ API、Scheduler 与待实施的 llm_review 属于同一后端进程，见[后端
 | `terminal_details_json` | 可空；编译诊断、失败用例或执行失败详情，不含重复的 verdict |
 | `created_at_ms` | 创建时间，供历史排序和启动时装入队列使用 |
 | `terminal_at_ms` | 可空；业务终态写入时刻，不表示旧程序实际停止的时刻 |
-| `review_status`（版本 3，待实施） | `DISABLED` / `PENDING` / `DOUBTFUL` / `PASS` / `FAILED`，默认 `DISABLED` |
-| `review_id`（版本 3，待实施） | 可空 TEXT，每次接纳新审查生成的 UUID，用于条件完成和重跑并发控制 |
-| `review_details_json`（版本 3，待实施） | 可空 JSON 对象，序列化后最多 32768 UTF-8 字节，包含最近一次意见或诊断、全部元数据及错误；错误 message 为后端固定英文说明，最多 512 UTF-8 字节，完整合同见[第 08 篇第 5.2 节](08-llm-code-review-design.md#52-最近一次详情) |
+| `review_status`（版本 3，已实现） | `DISABLED` / `PENDING` / `DOUBTFUL` / `PASS` / `FAILED`，默认 `DISABLED` |
+| `review_id`（版本 3，已实现） | 可空 TEXT，每次接纳新审查生成的 UUID，用于条件完成和重跑并发控制 |
+| `review_details_json`（版本 3，已实现） | 可空 JSON 对象，序列化后最多 32768 UTF-8 字节，包含最近一次意见或诊断、全部元数据及错误；错误 message 为后端固定英文说明，最多 512 UTF-8 字节，完整合同见[第 08 篇第 5.2 节](08-llm-code-review-design.md#52-最近一次详情) |
 
 `(problem_id, version_no, language_id)` 的外键同时保证版本存在和语言属于该版本，不需要再增加一份仅检查版本存在的重复外键。主键、用户、版本、语言、源码、创建幂等键和创建时间在创建后不变。
 
@@ -253,4 +253,4 @@ LLM 增量在启动时另外将遗留 PENDING 保存为 FAILED/ReviewInterrupted
 
 Scheduler 重启验证在途记录立即失败、排队记录装入内存且不向旧 Worker 查询或补发 ACK；运行中验证迟到结果不覆盖已保存失败。确认动作必须晚于业务终态提交；字节字段往返不损坏，未知统计保持缺失。
 
-LLM 增量的数据验证按[第 08 篇 L01](08-llm-code-review-design.md#101-l01数据契约与离线升级)执行，包括新库与一次版本 2 → 3 升级、旧记录默认值、最近一次详情往返和条件写入；既有判题验收记录不包含这些新增合同。
+L01 的实际数据验证见[实施记录](08-llm-code-review-design.md#121-l01数据契约与离线升级)。后续维护仍按[第 08 篇 L01](08-llm-code-review-design.md#101-l01数据契约与离线升级)执行，包括新库与一次版本 2 → 3 升级、旧记录默认值、最近一次详情往返和条件写入；既有判题验收记录不包含这些新增合同。

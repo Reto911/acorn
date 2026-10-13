@@ -1,5 +1,7 @@
 //! Published problem types independent of HTTP response DTOs.
 
+use crate::llm_review::ReviewMode;
+
 use acorn_protocol::worker::v1::RunLimits;
 
 /// Minimal current-version information for a problem list.
@@ -29,6 +31,8 @@ pub struct ProblemVersion {
     pub summary: ProblemSummary,
     /// Version-specific problem statement.
     pub statement: String,
+    /// Immutable automatic review policy for this version.
+    pub review_mode: ReviewMode,
     /// Supported fixed output-comparison rule.
     pub comparison_mode: String,
     /// UTC Unix publication time in milliseconds.

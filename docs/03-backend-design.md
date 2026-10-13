@@ -2,7 +2,7 @@
 
 状态：已确认，作为首版实现依据。
 
-本文同步[LLM 代码审查设计](08-llm-code-review-design.md)的后端增量合同，llm_review、结构版本 3、审查 HTTP 字段与路由及相关配置和生命周期均已批准、待实施；当前程序仍为下述 P06–P10 与健康观测实现。LLM 的具体策略和实施验收以第 08 篇为依据，文档维护边界见[索引](README.md)。
+本文同步[LLM 代码审查设计](08-llm-code-review-design.md)的后端增量合同，L01 已实现 llm_review 数据类型、结构版本 3 和数据库基础操作；审查客户端、队列、HTTP 字段与路由、配置和生命周期仍待 L02–L06。当前 Scheduler 显式保存 DISABLED，入口尚未调用审查启动中断方法，不代表自动审查或停机取消已接通。LLM 的具体策略和实施验收以第 08 篇为依据，文档维护边界见[索引](README.md)。
 
 实施进度：P06–P10 已完成配置、日志、SQLite 业务访问、开发用户预置、Scheduler、HTTP API，以及启动排队装入、旧在途中断、正常停机与故障退出。源码样例、真实单／双 Worker 联调和独立程序操作验收已完成，实际范围见[开发计划实施记录](04-development-plan.md#7-实施记录)。
 
@@ -103,7 +103,7 @@ llm_review 复用该单连接池和 Tokio runtime。读取审查输入后先归�
 
 后端仍验证语言、用例数量、数据大小和限额：源码按 UTF-8 编码后的长度计量；输入、期望输出及总载荷按原始字节计量。HTTP 请求体、gRPC 消息和原始任务载荷各有独立上限。
 
-内存限额从 SQLite `memory_kib`、配置 `request.max_run_memory_kib` 到 RPC `RunLimits.memory_kib` 统一使用 KiB，不进行字节除法。当前应用只接受结构版本 2，LLM 的 L01 将应用版本检查与完整初始 SQL 一同切换为 3；版本 2 → 3 由部署端使用单独交付的 SQL 离线升级，见[升级合同](08-llm-code-review-design.md#53-数据库升级职责)。后端与 Worker 需使用同一版 KiB 协议，LLM 增量不修改该协议；实际资源统计和结果字节字段的单位保持原契约。
+内存限额从 SQLite `memory_kib`、配置 `request.max_run_memory_kib` 到 RPC `RunLimits.memory_kib` 统一使用 KiB，不进行字节除法。当前应用与完整初始 SQL 已由 L01 一同切换为结构版本 3，仅接受该版本；版本 2 → 3 由部署端使用单独交付的 SQL 离线升级，见[升级合同](08-llm-code-review-design.md#53-数据库升级职责)。后端与 Worker 需使用同一版 KiB 协议，LLM 增量不修改该协议；实际资源统计和结果字节字段的单位保持原契约。
 
 同一版本的测试数据在一次任务装配中按 `case_index` 读取。正常新提交由 API 将内存中的完整任务直接交给 Scheduler，Scheduler 不再次读源码或题库。启动装入排队任务时才由 Scheduler 读取其固定版本数据。
 

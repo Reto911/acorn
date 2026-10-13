@@ -143,7 +143,7 @@ async fn published_queries_and_fixed_version_creation() {
 
     let mut connection = fixture.connection().await;
     sqlx::raw_sql("BEGIN IMMEDIATE;
-        INSERT INTO problem_versions SELECT problem_id, 2, 'Version two', statement, comparison_mode, published_at_ms + 1 FROM problem_versions WHERE problem_id = 1 AND version_no = 1;
+        INSERT INTO problem_versions (problem_id, version_no, title, statement, comparison_mode, published_at_ms) SELECT problem_id, 2, 'Version two', statement, comparison_mode, published_at_ms + 1 FROM problem_versions WHERE problem_id = 1 AND version_no = 1;
         INSERT INTO problem_version_languages SELECT problem_id, 2, language_id, cpu_time_ms, wall_time_ms, 1 FROM problem_version_languages WHERE problem_id = 1 AND version_no = 1 AND language_id = 'c';
         INSERT INTO test_cases VALUES (1, 2, 1, X'00FF010A', X'FF000A');
         UPDATE problems SET current_version_no = 2 WHERE id = 1;
@@ -306,7 +306,7 @@ async fn terminal_storage_and_immutability() {
         let created = database.create_submission(submitted.clone()).await.unwrap();
         assert!(
             !database
-                .save_terminal(&created.info.id, &terminal)
+                .save_terminal(&created.info.id, &terminal, None)
                 .await
                 .unwrap()
         );
@@ -315,7 +315,7 @@ async fn terminal_storage_and_immutability() {
         assert!(!database.mark_running(&created.info.id).await.unwrap());
         assert!(
             database
-                .save_terminal(&created.info.id, &terminal)
+                .save_terminal(&created.info.id, &terminal, None)
                 .await
                 .unwrap()
         );
@@ -327,7 +327,7 @@ async fn terminal_storage_and_immutability() {
         assert!(stored.info.terminal_at_ms.is_some());
         assert!(
             !database
-                .save_terminal(&created.info.id, &failure)
+                .save_terminal(&created.info.id, &failure, None)
                 .await
                 .unwrap()
         );
@@ -432,7 +432,7 @@ async fn startup_reads_and_conditional_transitions() {
     assert!(database.mark_dispatching(&finished.id).await.unwrap());
     assert!(
         database
-            .save_terminal(&finished.id, &accepted(&fixture.config))
+            .save_terminal(&finished.id, &accepted(&fixture.config), None)
             .await
             .unwrap()
     );
@@ -549,9 +549,9 @@ async fn startup_checks_and_finite_lock_wait() {
     assert!(
         error
             .to_string()
-            .contains("Expected schema version 2, got 1")
+            .contains("Expected schema version 3, got 1")
     );
-    sqlx::query("PRAGMA user_version = 2")
+    sqlx::query("PRAGMA user_version = 3")
         .execute(&mut connection)
         .await
         .unwrap();
@@ -673,6 +673,316 @@ async fn executable_serves_http_and_stops() {
             .len(),
         32
     );
+    connection.close().await.unwrap();
+    fixture.close().await;
+}
+
+/// Build local metadata without starting any external request or queue.
+fn pending_review(
+    trigger: acorn_backend::llm_review::ReviewTrigger,
+) -> acorn_backend::llm_review::ReviewAttempt {
+    acorn_backend::llm_review::ReviewAttempt::pending(
+        trigger,
+        100,
+        "deepseek-flash".into(),
+        "max".into(),
+        "review-policy-v1".into(),
+    )
+    .unwrap()
+}
+
+/// Latest-only persistence rejects old completions, preserves machine results and combines filters.
+#[tokio::test]
+async fn latest_review_persistence_and_rerun() {
+    use acorn_backend::llm_review::{
+        FindingCategory, ReviewDecision, ReviewErrorCode, ReviewFinding, ReviewResult,
+        ReviewStatus, ReviewTrigger,
+    };
+    let fixture = Fixture::new().await;
+    let database = &fixture.database;
+    let created = database.create_submission(request("python")).await.unwrap();
+    let id = &created.info.id;
+    assert_eq!(created.info.review_status, ReviewStatus::Disabled);
+    assert!(
+        database
+            .submission(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .review
+            .is_none()
+    );
+    assert!(database.review_input(id).await.unwrap().is_none());
+    let first = pending_review(ReviewTrigger::Auto);
+    assert!(
+        !database
+            .save_terminal(id, &accepted(&fixture.config), Some(&first))
+            .await
+            .unwrap()
+    );
+    assert!(database.mark_dispatching(id).await.unwrap());
+    assert!(
+        database
+            .save_terminal(id, &accepted(&fixture.config), Some(&first))
+            .await
+            .unwrap()
+    );
+    let machine = database.submission(id).await.unwrap().unwrap();
+    assert_eq!(machine.review.as_ref(), Some(&first));
+    assert_eq!(machine.info.verdict, Some(Verdict::AC));
+    assert!(machine.terminal_details.is_none());
+    let input = database.review_input(id).await.unwrap().unwrap();
+    assert_eq!(input.source.as_bytes(), request("python").source);
+    assert_eq!(input.language_id, "python");
+    assert_eq!(input.verdict, Verdict::AC);
+    assert_eq!(
+        input.title,
+        database
+            .problem_version(1, 1)
+            .await
+            .unwrap()
+            .unwrap()
+            .summary
+            .title
+    );
+    let first_done = first
+        .clone()
+        .succeeded(
+            200,
+            ReviewResult {
+                decision: ReviewDecision::Pass,
+                summary: "未发现约定范围内的疑点".into(),
+                findings: vec![],
+            },
+            Some("response-1".into()),
+            None,
+            input.source.lines().count(),
+        )
+        .unwrap();
+    assert!(database.finish_review(id, &first_done).await.unwrap());
+    assert!(!database.finish_review(id, &first_done).await.unwrap());
+    let second = pending_review(ReviewTrigger::Manual);
+    assert!(!database.start_review(id, None, &second).await.unwrap());
+    assert!(
+        database
+            .start_review(id, Some(&first.id), &second)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !database
+            .start_review(id, Some(&second.id), &pending_review(ReviewTrigger::Manual))
+            .await
+            .unwrap()
+    );
+    assert!(!database.finish_review(id, &first_done).await.unwrap());
+    let rerun = database.submission(id).await.unwrap().unwrap();
+    assert_eq!(rerun.review.as_ref(), Some(&second));
+    assert_eq!(rerun.info.terminal_at_ms, machine.info.terminal_at_ms);
+    assert_eq!(rerun.info.verdict, machine.info.verdict);
+    assert_eq!(rerun.terminal_details, machine.terminal_details);
+    let diagnostic = serde_json::json!({"decision":"PASS","missing":"findings"});
+    let failed = second
+        .failed(
+            300,
+            ReviewErrorCode::ReviewInvalidOutput,
+            None,
+            None,
+            Some(diagnostic),
+        )
+        .unwrap();
+    assert!(database.finish_review(id, &failed).await.unwrap());
+    assert_eq!(
+        database.submission(id).await.unwrap().unwrap().review,
+        Some(failed.clone())
+    );
+    assert!(
+        !database
+            .save_terminal(id, &accepted(&fixture.config), None)
+            .await
+            .unwrap()
+    );
+    let filter = SubmissionFilter {
+        problem_id: Some(1),
+        state: Some(SubmissionState::Finished),
+        verdict: Some(Verdict::AC),
+        review_status: Some(ReviewStatus::Failed),
+    };
+    assert_eq!(
+        database
+            .list_submissions(&filter, 20, 0)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        database
+            .list_submissions(
+                &SubmissionFilter {
+                    verdict: Some(Verdict::CE),
+                    ..filter
+                },
+                20,
+                0
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let third = pending_review(ReviewTrigger::Manual);
+    assert!(
+        database
+            .start_review(id, Some(&failed.id), &third)
+            .await
+            .unwrap()
+    );
+    let mut opinion = ReviewResult {
+        decision: ReviewDecision::Doubtful,
+        summary: "需要复核固定输出".into(),
+        findings: vec![ReviewFinding {
+            category: FindingCategory::TestTargeting,
+            line_start: 1,
+            line_end: 3,
+            evidence: "待核对的源码行为".into(),
+            normal_explanation: "待核对公开题意".into(),
+        }],
+    };
+    // The write boundary must use stored source, even if a caller used an incorrect count.
+    let invalid = third
+        .clone()
+        .succeeded(400, opinion.clone(), None, None, 3)
+        .unwrap();
+    assert!(matches!(
+        database.finish_review(id, &invalid).await,
+        Err(Error::InvalidReview(_))
+    ));
+    assert_eq!(
+        database.submission(id).await.unwrap().unwrap().review,
+        Some(third.clone())
+    );
+    opinion.findings[0].line_end = 2;
+    let doubtful = third.succeeded(400, opinion, None, None, 2).unwrap();
+    assert!(database.finish_review(id, &doubtful).await.unwrap());
+    assert_eq!(
+        database.submission(id).await.unwrap().unwrap().review,
+        Some(doubtful)
+    );
+    fixture.close().await;
+}
+
+/// Fixed policies, explicit interruption and write-boundary validation obey the data contract.
+#[tokio::test]
+async fn review_policy_interruption_and_constraints() {
+    use acorn_backend::llm_review::{
+        DETAILS_MAX_BYTES, ReviewErrorCode, ReviewMode, ReviewStatus, ReviewTrigger,
+    };
+    let fixture = Fixture::new().await;
+    let database = &fixture.database;
+    let original = database.create_submission(request("c")).await.unwrap();
+    assert_eq!(
+        original.task.as_ref().unwrap().review_mode,
+        ReviewMode::Disabled
+    );
+    let mut connection = fixture.connection().await;
+    // Publish a new version through the existing deployment-side fixture pattern.
+    sqlx::raw_sql("BEGIN; INSERT INTO problem_versions (problem_id, version_no, title, statement, published_at_ms, review_mode) VALUES (1, 2, 'New title', 'New statement', 200, 'ENABLE-ANY'); INSERT INTO problem_version_languages SELECT problem_id, 2, language_id, cpu_time_ms, wall_time_ms, memory_kib FROM problem_version_languages WHERE problem_id=1 AND version_no=1; INSERT INTO test_cases SELECT problem_id, 2, case_index, input, expected_output FROM test_cases WHERE problem_id=1 AND version_no=1; UPDATE problems SET current_version_no=2 WHERE id=1; COMMIT;")
+        .execute(&mut connection).await.unwrap();
+    assert_eq!(
+        database.problem(1).await.unwrap().unwrap().review_mode,
+        ReviewMode::EnableAny
+    );
+    assert_eq!(
+        database
+            .queued_task(&original.info.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .review_mode,
+        ReviewMode::Disabled
+    );
+    let newer = database.create_submission(request("c")).await.unwrap();
+    assert_eq!(newer.task.unwrap().review_mode, ReviewMode::EnableAny);
+    let pending = pending_review(ReviewTrigger::Auto);
+    assert!(
+        !database
+            .start_review(&newer.info.id, None, &pending_review(ReviewTrigger::Manual))
+            .await
+            .unwrap()
+    );
+    let mut oversized = pending.clone();
+    oversized.details.model = "x".repeat(DETAILS_MAX_BYTES);
+    database.mark_dispatching(&original.info.id).await.unwrap();
+    assert!(matches!(
+        database
+            .save_terminal(
+                &original.info.id,
+                &accepted(&fixture.config),
+                Some(&oversized)
+            )
+            .await,
+        Err(Error::InvalidReview(_))
+    ));
+    assert_eq!(
+        database
+            .submission(&original.info.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .info
+            .state,
+        SubmissionState::Dispatching
+    );
+    database
+        .save_terminal(
+            &original.info.id,
+            &accepted(&fixture.config),
+            Some(&pending),
+        )
+        .await
+        .unwrap();
+    let input = database
+        .review_input(&original.info.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(input.title, "New title");
+    let machine = database
+        .submission(&original.info.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(database.interrupt_pending_reviews().await.unwrap(), 1);
+    assert_eq!(database.interrupt_pending_reviews().await.unwrap(), 0);
+    let stored = database
+        .submission(&original.info.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let interrupted = stored.review.unwrap();
+    assert_eq!(interrupted.id, pending.id);
+    assert_eq!(interrupted.status, ReviewStatus::Failed);
+    assert_eq!(
+        interrupted.details.requested_at_ms,
+        pending.details.requested_at_ms
+    );
+    assert_eq!(interrupted.details.model, pending.details.model);
+    assert!(interrupted.details.completed_at_ms.is_some());
+    assert_eq!(
+        interrupted.details.error.unwrap().code,
+        ReviewErrorCode::ReviewInterrupted
+    );
+    assert_eq!(stored.info.terminal_at_ms, machine.info.terminal_at_ms);
+    assert_eq!(stored.info.verdict, machine.info.verdict);
+    assert_eq!(stored.terminal_details, machine.terminal_details);
+    for update in [
+        "UPDATE submissions SET review_status='PASS' WHERE state='queued'",
+        "UPDATE submissions SET review_details_json='[]' WHERE review_status='FAILED'",
+        "UPDATE submissions SET review_status='DISABLED' WHERE review_status='FAILED'",
+        "UPDATE problem_versions SET review_mode='UNKNOWN' WHERE version_no=1",
+    ] {
+        assert!(sqlx::query(update).execute(&mut connection).await.is_err());
+    }
     connection.close().await.unwrap();
     fixture.close().await;
 }

@@ -6,17 +6,17 @@ use uuid::Uuid;
 
 use crate::{
     config::Config,
+    llm_review::{ReviewAttempt, ReviewMode, ReviewStatus, ReviewTrigger},
     submissions::{
         CreateSubmission, CreatedSubmission, JudgingTask, Submission, SubmissionFilter,
         SubmissionInfo, SubmissionState, TerminalOutcome, Verdict,
     },
 };
 
-use super::{Database, Error, Result, now_ms, problems::run_limits};
+use super::{Database, Error, Result, now_ms, problems::run_limits, reviews::stored_review};
 
 /// Common list columns; queries using this projection never read source or diagnostics.
-const INFO_COLUMNS: &str =
-    "id, problem_id, version_no, language_id, state, verdict, created_at_ms, terminal_at_ms";
+const INFO_COLUMNS: &str = "id, problem_id, version_no, language_id, state, verdict, review_status, created_at_ms, terminal_at_ms";
 
 impl Database {
     /// Look up a creation key scoped to the deployment-configured test user.
@@ -36,7 +36,7 @@ impl Database {
     /// Read one stored submission and its parsed terminal details.
     pub async fn submission(&self, id: &str) -> Result<Option<Submission>> {
         self.observe("Read submission", false, async {
-            let row = sqlx::query(&format!("SELECT {INFO_COLUMNS}, user_id, source, create_request_key, terminal_details_json FROM submissions WHERE id = ?"))
+            let row = sqlx::query(&format!("SELECT {INFO_COLUMNS}, user_id, source, create_request_key, terminal_details_json, review_id, review_details_json FROM submissions WHERE id = ?"))
                 .bind(id).fetch_optional(&self.pool).await?;
             row.as_ref().map(stored_submission).transpose()
         })
@@ -54,9 +54,10 @@ impl Database {
             let (limit, offset) = self.page(limit, offset)?;
             let state = filter.state.map(SubmissionState::as_str);
             let verdict = filter.verdict.map(Verdict::as_str);
-            let rows = sqlx::query(&format!("SELECT {INFO_COLUMNS} FROM submissions WHERE user_id = ? AND (? IS NULL OR problem_id = ?) AND (? IS NULL OR state = ?) AND (? IS NULL OR verdict = ?) ORDER BY created_at_ms DESC, id DESC LIMIT ? OFFSET ?"))
+            let review_status = filter.review_status.map(ReviewStatus::as_str);
+            let rows = sqlx::query(&format!("SELECT {INFO_COLUMNS} FROM submissions WHERE user_id = ? AND (? IS NULL OR problem_id = ?) AND (? IS NULL OR state = ?) AND (? IS NULL OR verdict = ?) AND (? IS NULL OR review_status = ?) ORDER BY created_at_ms DESC, id DESC LIMIT ? OFFSET ?"))
                 .bind(self.config.test_user.user_id).bind(filter.problem_id).bind(filter.problem_id)
-                .bind(state).bind(state).bind(verdict).bind(verdict).bind(limit).bind(offset)
+                .bind(state).bind(state).bind(verdict).bind(verdict).bind(review_status).bind(review_status).bind(limit).bind(offset)
                 .fetch_all(&self.pool).await?;
             rows.iter().map(info).collect()
         })
@@ -114,6 +115,7 @@ impl Database {
                 language_id: request.language_id,
                 state: SubmissionState::Queued,
                 verdict: None,
+                review_status: ReviewStatus::Disabled,
                 created_at_ms: now_ms()?,
                 terminal_at_ms: None,
             };
@@ -206,17 +208,33 @@ impl Database {
     }
 
     /// Commit all terminal columns atomically; false means the previous state disallowed it.
-    pub async fn save_terminal(&self, id: &str, terminal: &TerminalOutcome) -> Result<bool> {
+    pub async fn save_terminal(
+        &self,
+        id: &str,
+        terminal: &TerminalOutcome,
+        review: Option<&ReviewAttempt>,
+    ) -> Result<bool> {
         self.observe("Save submission terminal", true, async {
+            let review_json = review.map(|review| {
+                if terminal.state != SubmissionState::Finished
+                    || review.details.trigger != ReviewTrigger::Auto
+                    || !matches!(review.status, ReviewStatus::Pending | ReviewStatus::Failed)
+                {
+                    return Err(Error::InvalidReview("Invalid automatic review initial state"));
+                }
+                review.encode(0)
+            }).transpose()?;
             let details = terminal
                 .details
                 .as_ref()
                 .map(serde_json::to_string)
                 .transpose()
                 .map_err(|error| Error::Data(error.into()))?;
-            let changed = sqlx::query("UPDATE submissions SET state = ?, verdict = ?, terminal_details_json = ?, terminal_at_ms = ? WHERE id = ? AND state IN ('dispatching', 'running')")
+            let changed = sqlx::query("UPDATE submissions SET state = ?, verdict = ?, terminal_details_json = ?, terminal_at_ms = ?, review_status = ?, review_id = ?, review_details_json = ? WHERE id = ? AND state IN ('dispatching', 'running')")
                 .bind(terminal.state.as_str()).bind(terminal.verdict.map(Verdict::as_str)).bind(details)
-                .bind(now_ms()?).bind(id).execute(&self.pool).await?;
+                .bind(now_ms()?).bind(review.map_or(ReviewStatus::Disabled, |review| review.status).as_str())
+                .bind(review.map(|review| review.id.as_str())).bind(review_json)
+                .bind(id).execute(&self.pool).await?;
             Ok(changed.rows_affected() == 1)
         })
         .await
@@ -269,7 +287,7 @@ async fn by_key(
     user_id: i64,
     key: &str,
 ) -> Result<Option<Submission>> {
-    let row = sqlx::query(&format!("SELECT {INFO_COLUMNS}, user_id, source, create_request_key, terminal_details_json FROM submissions WHERE user_id = ? AND create_request_key = ?"))
+    let row = sqlx::query(&format!("SELECT {INFO_COLUMNS}, user_id, source, create_request_key, terminal_details_json, review_id, review_details_json FROM submissions WHERE user_id = ? AND create_request_key = ?"))
         .bind(user_id).bind(key).fetch_optional(connection).await?;
     row.as_ref().map(stored_submission).transpose()
 }
@@ -285,6 +303,7 @@ fn info(row: &SqliteRow) -> Result<SubmissionInfo> {
         language_id: row.try_get("language_id")?,
         state: SubmissionState::parse(&state)?,
         verdict: verdict.as_deref().map(Verdict::parse).transpose()?,
+        review_status: ReviewStatus::parse(&row.try_get::<String, _>("review_status")?)?,
         created_at_ms: row.try_get("created_at_ms")?,
         terminal_at_ms: row.try_get("terminal_at_ms")?,
     })
@@ -295,6 +314,7 @@ fn stored_submission(row: &SqliteRow) -> Result<Submission> {
     let details: Option<String> = row.try_get("terminal_details_json")?;
     Ok(Submission {
         info: info(row)?,
+        review: stored_review(row)?,
         user_id: row.try_get("user_id")?,
         source: row.try_get("source")?,
         create_request_key: row.try_get("create_request_key")?,
@@ -325,7 +345,7 @@ async fn load_task(
     config: &Config,
 ) -> Result<JudgingTask> {
     validate_source(&source, config)?;
-    let language = sqlx::query("SELECT v.comparison_mode, l.cpu_time_ms, l.wall_time_ms, l.memory_kib FROM problem_versions v JOIN problem_version_languages l USING (problem_id, version_no) WHERE v.problem_id = ? AND v.version_no = ? AND l.language_id = ?")
+    let language = sqlx::query("SELECT v.comparison_mode, v.review_mode, l.cpu_time_ms, l.wall_time_ms, l.memory_kib FROM problem_versions v JOIN problem_version_languages l USING (problem_id, version_no) WHERE v.problem_id = ? AND v.version_no = ? AND l.language_id = ?")
         .bind(info.problem_id).bind(info.version_no).bind(&info.language_id).fetch_optional(&mut *connection).await?.ok_or(Error::LanguageNotAllowed)?;
     if language.try_get::<String, _>("comparison_mode")? != "trim_trailing_ascii_whitespace" {
         return Err(Error::Data(anyhow::anyhow!(
@@ -386,6 +406,7 @@ async fn load_task(
     Ok(JudgingTask {
         problem_id: info.problem_id,
         version_no: info.version_no,
+        review_mode: ReviewMode::parse(&language.try_get::<String, _>("review_mode")?)?,
         request: SubmitJobRequest {
             job_id: info.id.clone(),
             language_id: info.language_id.clone(),
