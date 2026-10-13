@@ -240,7 +240,7 @@ ACORN_ISOLATE_BOX_ID=202 \
   cargo test -p acorn-worker --locked --test rpc -- --ignored --nocapture
 ```
 
-常规 RPC 测试也会绑定回环随机端口，但使用受控管理器，不要求 Isolate 初始化权限。限制本机 socket 的工具沙箱需在宿主执行这些测试；受控管理器的 GCC/Python 执行不构成真实隔离证据。
+常规 RPC 测试也会绑定回环随机端口，但使用受控管理器，不要求 Isolate 初始化权限。限制本机 socket 的工具沙箱需在宿主执行这些测试；受控管理器的 GCC/Python 执行仅验证编排，不验证真实隔离。
 
 ## Isolate 阶段验收
 

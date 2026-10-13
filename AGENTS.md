@@ -94,11 +94,15 @@ in the relevant design documents and must not be maintained here in duplicate.
   unrelated to the task.
 - Report concrete changes, actual checks and remaining limits. Identify necessary
   follow-up work when it exists. Do not claim unexecuted tests passed or extend
-  recorded results beyond their tested scope. Preserve original evidence and
-  earlier failure provenance.
+  recorded results beyond their tested scope. Keep unresolved failures visible
+  and do not rewrite failed checks as passes.
 
 ## Documentation and Git
 
+- Keep project progress records focused on implemented features, actual check
+  results and remaining work. Exclude machine-specific local paths, temporary
+  artifact inventories and evidence or baseline bookkeeping. Retain necessary
+  technical examples and business requirements.
 - Use stable identifiers or versions for authored documents and their paths,
   rather than calendar dates. Preserve runtime and operational timestamps,
   log examples and original records.
