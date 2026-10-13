@@ -6,7 +6,7 @@ C 与 Python 3 的单文件源码判题系统。后端包含 HTTP API、Schedule
 
 浏览器 GUI 采用 Vue 3、TypeScript 和 Monaco，已完成 F01–F07：题目浏览、C/Python 编辑、本地草稿、主动提交、结果详情、固定版本题面、状态轮询，以及提交历史筛选、分页和详情往返。首版桌面联调已覆盖 C/Python AC、C CE、Python WA 和 C TLE，实际新增与复用记录、UI-01–UI-09 对应关系及未测范围见[前端开发计划](docs/06-frontend-development-plan.md#57-f07首版浏览器联调与操作说明)。交互依据见[GUI 设计](docs/05-frontend-design.md)；健康观测 F08 / H01–H04 已完成，提供 Worker 状态 RPC、后端共享采集、只读 HTTP 快照及 `/health` 系统状态页面，支持自动、手动刷新和独立过期警告；初次实际检查见[健康页面交付记录](docs/06-frontend-development-plan.md#511-f08h04健康页面与最终连通验收)，后续每 10 秒自动获取的实现与验证边界见[补充记录](docs/06-frontend-development-plan.md#512-健康页面每十秒自动获取)。
 
-LLM 代码审查正在实施，合同与 L01–L06 计划见[LLM 设计](docs/08-llm-code-review-design.md)。L01 已完成数据类型、结构版本 3、最新审查读写与历史筛选的数据库基础；具体检查及离线升级交付见[实施记录](docs/08-llm-code-review-design.md#121-l01数据契约与离线升级)。当前后端只接受结构版本 3；已有版本 2 数据库须停服务、备份后使用单独交付的 SQL 升级，不能重跑初始化 SQL。审查客户端、自动和手动接纳、生命周期及 HTTP/GUI 接入仍待 L02–L06，当前判题保持 DISABLED，既有判题和健康验收不扩展为 LLM 验收。
+LLM 代码审查正在实施，合同与 L01–L06 计划见[LLM 设计](docs/08-llm-code-review-design.md)。L01 已完成数据类型、结构版本 3、最新审查读写与历史筛选的数据库基础；L02 已完成可缺省配置、固定指令与 Schema、单次 Responses 客户端和受控 HTTP 检查，见[客户端实施记录](docs/08-llm-code-review-design.md#122-l02审查客户端与策略)。当前后端只接受结构版本 3；已有版本 2 数据库须按[离线升级交付](docs/08-llm-code-review-design.md#1212-离线升级交付)停服务、备份并单独执行升级 SQL，不能重跑初始化 SQL。自动与手动接纳、入口生命周期及 HTTP/GUI 接入仍待 L03–L06；当前 Scheduler 保持 DISABLED，配置 enabled=true 也尚不会启动审查服务。既有判题和健康验收不扩展为 LLM 验收。
 
 ## 浏览器 GUI
 

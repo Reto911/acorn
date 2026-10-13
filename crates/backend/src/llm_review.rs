@@ -1,4 +1,7 @@
-//! L01 review data contract; scheduling and external API calls are added separately.
+//! Bounded latest-review data, fixed policy and a single-call Responses client.
+
+pub mod client;
+pub mod policy;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

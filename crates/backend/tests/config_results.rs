@@ -85,3 +85,104 @@ fn malformed_results_are_rejected() {
         Err(Error::InvalidResult(_))
     ));
 }
+
+/// Legacy and partial review configuration retain defaults and enabled settings enforce budgets.
+#[test]
+fn review_configuration_defaults_and_validation() {
+    use acorn_backend::{config::LlmReviewConfig, llm_review::client::ReviewClient};
+    let example = include_str!("../../../config/backend.example.toml");
+    let legacy = example.split("[llm_review]").next().unwrap();
+    let config = Config::parse(legacy).unwrap();
+    assert!(!config.llm_review.enabled);
+    assert!(ReviewClient::new(&config.llm_review).unwrap().is_none());
+    let partial = Config::parse(&format!("{legacy}\n[llm_review]\nenabled = false\n")).unwrap();
+    assert_eq!(partial.llm_review.model, "deepseek-flash");
+    assert_eq!(partial.llm_review.reasoning_effort, "max");
+    assert_eq!(partial.llm_review.timeout_ms, 120_000);
+    assert_eq!(partial.llm_review.max_concurrent, 2);
+    assert_eq!(partial.llm_review.pending_max_count, 16);
+    assert_eq!(partial.llm_review.max_output_tokens, 10_240);
+    assert_eq!(partial.llm_review.max_request_bytes, 1_048_576);
+    assert_eq!(partial.llm_review.max_response_bytes, 1_048_576);
+    let enabled = LlmReviewConfig {
+        enabled: true,
+        api_key: "test-credential".into(),
+        ..Default::default()
+    };
+    enabled.validate().unwrap();
+    for invalid in [
+        LlmReviewConfig {
+            endpoint: "relative/path".into(),
+            ..enabled.clone()
+        },
+        LlmReviewConfig {
+            api_key: " ".into(),
+            ..enabled.clone()
+        },
+        LlmReviewConfig {
+            model: "".into(),
+            ..enabled.clone()
+        },
+        LlmReviewConfig {
+            reasoning_effort: "medium".into(),
+            ..enabled.clone()
+        },
+        LlmReviewConfig {
+            timeout_ms: 0,
+            ..enabled.clone()
+        },
+        LlmReviewConfig {
+            max_concurrent: 0,
+            ..enabled.clone()
+        },
+        LlmReviewConfig {
+            pending_max_count: 0,
+            ..enabled.clone()
+        },
+        LlmReviewConfig {
+            max_output_tokens: 0,
+            ..enabled.clone()
+        },
+        LlmReviewConfig {
+            max_request_bytes: 0,
+            ..enabled.clone()
+        },
+        LlmReviewConfig {
+            max_response_bytes: 0,
+            ..enabled.clone()
+        },
+        LlmReviewConfig {
+            model: "x".repeat(32_768),
+            ..enabled.clone()
+        },
+    ] {
+        assert!(invalid.validate().is_err());
+    }
+    assert!(
+        ReviewClient::new(&LlmReviewConfig {
+            api_key: "invalid\nheader".into(),
+            ..enabled
+        })
+        .is_err()
+    );
+}
+
+/// Credentials are absent from enclosing Debug output and malformed TOML error chains.
+#[test]
+fn review_configuration_diagnostics_hide_credentials() {
+    let example = include_str!("../../../config/backend.example.toml");
+    let text = example.replace(
+        "api_key = \"\"",
+        "api_key = \"test-secret-must-not-appear\"",
+    );
+    let config = Config::parse(&text).unwrap();
+    assert!(!format!("{config:?}").contains("test-secret-must-not-appear"));
+    let malformed = text.replace(
+        "api_key = \"test-secret-must-not-appear\"",
+        "api_key = [\"test-secret-must-not-appear\"]",
+    );
+    let error = Config::parse(&malformed).unwrap_err();
+    let diagnostic = format!("{error:#}");
+    assert!(diagnostic.contains("Invalid backend TOML configuration"));
+    assert!(!diagnostic.contains("test-secret-must-not-appear"));
+}

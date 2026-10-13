@@ -1,6 +1,6 @@
 # LLM 代码审查设计
 
-状态：设计已批准；L01 数据契约与离线升级已完成，L02–L06 待实施。本文定义 LLM 审查的数据字段、后端流程、HTTP 与前端合同、实施步骤及验收要求。LLM 相关前后端增量统一维护在本文。
+状态：设计已批准；L01 数据契约与离线升级、L02 客户端与策略已完成，L03–L06 待实施。本文定义 LLM 审查的数据字段、后端流程、HTTP 与前端合同、实施步骤及验收要求。LLM 相关前后端增量统一维护在本文。
 
 ## 1. 已确认需求与范围
 
@@ -57,7 +57,7 @@ DeepSeek 接口文档列出 `none`、`low`、`high`、`max`；`minimal` 映射�
 
 该接口将 `developer` 视为 `user`，因此审查规则放在 `instructions`，题面及源码放在单独的 user 输入中。每次审查采用独立、非流式请求，设置 `stream=false`、`store=false`，不依赖会话、先前响应 ID、工具调用或远端后台任务。DeepSeek 文档说明接口无状态；`store=false` 也不被解释为提供商全部日志或缓存的数据保留承诺。
 
-这里只完成官方文档层面的兼容性核对，没有实际调用模型。实施验收仍需覆盖配置的 endpoint、model、思考强度及输出模式。
+设计阶段只完成官方文档层面的兼容性核对，没有实际调用模型；实施阶段的检查和实际调用结果见[第 12.2 节](#122-l02审查客户端与策略)。完整联调仍按 L06 覆盖配置的 endpoint、model、思考强度及输出模式。
 
 ## 3. 后端结构与责任边界
 
@@ -88,7 +88,7 @@ flowchart LR
 | `http` | 手动触发路由、提交详情与历史 DTO、错误响应 |
 | 程序入口 | 启动并监督审查任务，协调正常停机和故障退出 |
 
-HTTP 客户端使用 [reqwest](https://docs.rs/reqwest/latest/reqwest/) 的异步客户端，复用连接；新增依赖只进入后端及 workspace 依赖配置，版本在实施时锁定。首版直接实现所需 Responses 子集，不建立多协议提供商框架。
+HTTP 客户端使用已锁定的 [reqwest 0.13.5](https://docs.rs/reqwest/0.13.5/reqwest/) 异步客户端，复用连接；新增依赖只进入后端及 workspace 依赖配置。首版直接实现所需 Responses 子集，不建立多协议提供商框架。
 
 LLM 网络等待不进入 Worker、判题跟踪或数据库事务，不占用 Scheduler 的待接纳名额。Worker 终态已成功保存后，仍按现有契约及时 ACK；审查的排队、失败或超时不延后该 ACK，也不改变 Worker 节点释放规则。
 
@@ -523,3 +523,35 @@ sqlite3 -bail /path/to/acorn.db 'PRAGMA user_version; PRAGMA foreign_key_check;'
 ```
 
 最后一条应只输出版本号 3，外键检查无记录，再使用原 TOML 启动新版后端。版本 1 不适用此脚本；已有库不执行完整初始化 SQL，升级失败先按原错误处理，不继续启动或只修改版本号。本阶段仅验证临时库，没有代为执行实际部署升级。
+
+### 12.2 L02：审查客户端与策略
+
+L02 已完成。[后端配置](../crates/backend/src/config.rs)和[示例](../config/backend.example.toml)增加可缺省的 llm_review，旧配置保持禁用，部分配置沿用已批准的默认值。启用时检查完整 HTTP(S) URL、非空密钥与模型、none/low/high/max 和正值预算，并复用 L01 的详情构造验证接纳元数据及固定失败记录预算；不发送启动收费探测。配置 Debug 隐藏密钥和 endpoint，TOML 解析错误只保留字节位置，不回显可能含密钥的配置原文。没有 .env 正式加载逻辑、权限位检查或 dotenv 依赖。
+
+[固定策略](../crates/backend/src/llm_review/policy.rs)维护 review-policy-v1 指令及 acorn_code_review Schema。只发送完整源码、语言、固定公开标题和题面及机器 verdict，源码在嵌套 JSON 解码后逐字节保持原样，不预处理或剥离注释。固定 instructions 覆盖第 6.1 节的反作弊范围、说明性注释与实际语言语义的区别、闭区间行号及正常解释要求。Schema 约束字段、枚举和对象形状；UTF-8 字节预算及跨字段规则继续复用 L01 的类型校验，未新增通用 Schema 校验依赖。
+
+[单次客户端](../crates/backend/src/llm_review/client.rs)复用 reqwest 0.13.5 连接池，使用敏感 Bearer header、完整配置 URL、stream=false、store=false 和固定 json_schema，不设置 strict 或其他输出模式。显式关闭 reqwest 协议重试和 HTTP 重定向；每次调用只发送一次 POST。完整请求先序列化并检查实际字节；HTTP 总期限覆盖发送和完整读取，响应逐 chunk 检查上限，超限即停止，不保留部分正文。
+
+解析按顺序拼接 assistant output_text，忽略 reasoning item，不假定首项是正文。仅 completed、无 API 错误或不完整标记且通过类型与业务校验的对象成为有效意见；工具、拒绝、空正文和无效 JSON 均失败。完整模型 JSON 对象可按 L01 预算作为诊断保留，即使响应 incomplete；API 错误正文和完整 Responses 外层对象不进入诊断。Responses 失败时仍保留实际返回的响应 ID 和有效用量；缺失计数保持 null，不推算。英文应用日志只记录约定身份、模型、耗时、HTTP 状态、结果和实际用量，不记录源码、指令、意见正文、诊断或推理内容。
+
+客户端不持有数据库或 Scheduler 句柄：调用方先读取固定输入并释放连接，客户端返回可持久化 ReviewAttempt，之后由调用方按 ID 保存。当前程序入口尚未构造或调度客户端，启用配置不会自动启动审查。独立队列、自动门槛、启动中断与停止接线继续属于 L03，手动 HTTP 服务属于 L04。
+
+#### 12.2.1 实际检查
+
+- `cargo fmt --all -- --check`、`cargo check --workspace --all-targets --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings`：通过。Cargo.lock 已锁定 reqwest 0.13.5；正式后端只增加所需 HTTP/TLS 依赖，测试直接使用已存在于依赖图的 tokio-stream 构造受控响应流。
+- `cargo test -p acorn-backend --locked --lib --test config_results`：八项现有单元测试、五项配置与结果测试通过。新增配置检查覆盖旧配置及部分缺省、启用校验、元数据预算、非法鉴权 header 和密钥不进入 Debug／TOML 错误链。
+- `cargo test -p acorn-backend --locked --test llm_review`：在可绑定回环端口的宿主环境五项通过。使用临时 Axum 服务及假密钥，核对实际请求字段、源码字节和允许输入、有效 PASS/DOUBTFUL、reasoning 首项及多段正文、真实计数与显式零、无效与不完整输出、完整诊断保留、精确请求预算、响应在 EOF 前超限退出、响应读取超时及不重试／不跟随重定向。应用日志捕获中没有假密钥、源码、公开题面或推理内容。此类固定响应和指令文本检查不证明真实模型总能遵守反作弊规则。
+- `cargo test -p acorn-backend --locked --test workflow`：宿主环境二十四项通过，两个真实 Isolate 验收按原规则忽略。默认禁用配置下的既有 HTTP、判题保存与 ACK、启动停机和健康观测继续通过。
+- 变更 Markdown 的本地链接／锚点、代码块闭合及既有标题编号保留、shell 块语法和 `git diff --check`：通过。
+
+#### 12.2.2 一次最小真实调用
+
+按用户授权，使用根目录 .env 中的开发凭据，通过临时验证入口调用正式 ReviewClient。凭据只用于内存配置，正式程序、测试和构建过程均不读取 .env；验证后已移除临时入口。
+
+本次仅发起一次请求，实际使用配置的 Responses endpoint、deepseek-flash、max、10240 token、json_schema 和 review-policy-v1，返回 HTTP 200、完整有效 PASS，摘要认为公开两数求和 Python 样例采用通用读取及求和逻辑。实际用量为输入 961 token、输出 85 token，其中推理 23 token；这些是提供商返回值，不是估算或费用承诺。
+
+使用正式初始化、开发用户和示例题 SQL 建立临时版本 3 库，以 `examples/submissions/a-plus-b.py` 创建源码记录。机器 AC 由夹具直接构造，没有执行 Worker；手动审查初态、固定输入读取、真实客户端返回及按 ID 完成均通过正式数据库方法。最终 PASS、有效意见、响应 ID 和用量保存成功，原机器 verdict 与空 AC 终态详情保持不变。
+
+本次 PASS 验证了单次真实调用和保存流程，不代表整体反作弊效果或后续调用必然得到相同意见。
+
+本阶段没有接入自动或手动审查服务；未运行完整 workspace 测试、真实 Isolate 或浏览器验收。此次真实调用覆盖接口与保存流程，L03–L06 的队列、HTTP、UI 和最终联调仍待实施；下一步按 L03 实现独立队列、自动交接及程序生命周期。

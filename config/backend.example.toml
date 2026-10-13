@@ -46,3 +46,17 @@ failure_diagnostic_max_bytes = 512
 
 [logging]
 level = "info"
+
+[llm_review]
+enabled = false
+endpoint = "https://api.deepseek.com/responses"
+# Fill this server-side credential only when enabling reviews.
+api_key = ""
+model = "deepseek-flash"
+reasoning_effort = "max"
+timeout_ms = 120_000
+max_concurrent = 2
+pending_max_count = 16
+max_output_tokens = 10_240
+max_request_bytes = 1_048_576
+max_response_bytes = 1_048_576

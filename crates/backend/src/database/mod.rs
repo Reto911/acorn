@@ -196,7 +196,7 @@ fn severe_storage_error(error: &sqlx::Error) -> bool {
 }
 
 /// Current UTC Unix milliseconds, with no fabricated fallback timestamp.
-fn now_ms() -> Result<i64> {
+pub(crate) fn now_ms() -> Result<i64> {
     let elapsed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| Error::Data(error.into()))?;

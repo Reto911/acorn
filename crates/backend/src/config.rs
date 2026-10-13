@@ -2,6 +2,7 @@
 
 use std::{
     collections::HashSet,
+    fmt,
     net::SocketAddr,
     path::{Path, PathBuf},
     time::Duration,
@@ -10,6 +11,8 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
 use serde::Deserialize;
+
+use crate::llm_review::{ReviewAttempt, ReviewTrigger, policy::PROMPT_VERSION};
 
 /// Command-line options for the backend process.
 #[derive(Debug, Parser)]
@@ -37,6 +40,9 @@ pub struct Config {
     /// Independent read-only observation cadence and per-check budget.
     #[serde(default)]
     pub health: HealthConfig,
+    /// Optional independent LLM review settings; old configurations keep reviews disabled.
+    #[serde(default)]
+    pub llm_review: LlmReviewConfig,
     /// Source, case and per-case execution ceilings.
     pub request: RequestConfig,
     /// Bounded terminal payload settings, aligned with Workers.
@@ -182,6 +188,123 @@ pub struct LoggingConfig {
     pub level: String,
 }
 
+/// Single-provider Responses settings, read only from backend TOML in formal programs.
+#[derive(Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LlmReviewConfig {
+    /// Whether the later review service may admit work.
+    pub enabled: bool,
+    /// Complete POST URL, with no automatic path suffix.
+    pub endpoint: String,
+    /// Server-side Bearer credential, excluded from Debug output.
+    pub api_key: String,
+    /// Actual requested model name.
+    pub model: String,
+    /// Provider-supported none, low, high or max effort.
+    pub reasoning_effort: String,
+    /// Total HTTP send and response-read deadline, in milliseconds.
+    pub timeout_ms: u64,
+    /// Independent running capacity, consumed by the later queue service.
+    pub max_concurrent: u32,
+    /// Independent pending capacity, consumed by the later queue service.
+    pub pending_max_count: u32,
+    /// Combined visible and reasoning token budget.
+    pub max_output_tokens: u64,
+    /// Complete serialized request byte limit.
+    pub max_request_bytes: usize,
+    /// Response byte limit enforced while reading chunks.
+    pub max_response_bytes: usize,
+}
+
+impl Default for LlmReviewConfig {
+    /// Preserve disabled admission and the approved initial model and budgets.
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: "https://api.deepseek.com/responses".into(),
+            api_key: String::new(),
+            model: "deepseek-flash".into(),
+            reasoning_effort: "max".into(),
+            timeout_ms: 120_000,
+            max_concurrent: 2,
+            pending_max_count: 16,
+            max_output_tokens: 10_240,
+            max_request_bytes: 1_048_576,
+            max_response_bytes: 1_048_576,
+        }
+    }
+}
+
+impl fmt::Debug for LlmReviewConfig {
+    /// Allow enclosing configuration diagnostics without printing credentials or the endpoint.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LlmReviewConfig")
+            .field("enabled", &self.enabled)
+            .field("api_key", &"[redacted]")
+            .field("model", &self.model)
+            .field("reasoning_effort", &self.reasoning_effort)
+            .field("timeout_ms", &self.timeout_ms)
+            .field("max_concurrent", &self.max_concurrent)
+            .field("pending_max_count", &self.pending_max_count)
+            .field("max_output_tokens", &self.max_output_tokens)
+            .field("max_request_bytes", &self.max_request_bytes)
+            .field("max_response_bytes", &self.max_response_bytes)
+            .finish_non_exhaustive()
+    }
+}
+
+impl LlmReviewConfig {
+    /// Validate enabled settings without network access or a charged startup probe.
+    pub fn validate(&self) -> Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        ensure!(
+            reqwest::Url::parse(&self.endpoint)
+                .ok()
+                .is_some_and(
+                    |url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some()
+                ),
+            "llm_review.endpoint must be a complete HTTP(S) URL"
+        );
+        ensure!(
+            !self.api_key.trim().is_empty(),
+            "llm_review.api_key must not be empty"
+        );
+        ensure!(
+            !self.model.trim().is_empty(),
+            "llm_review.model must not be empty"
+        );
+        ensure!(
+            matches!(
+                self.reasoning_effort.as_str(),
+                "none" | "low" | "high" | "max"
+            ),
+            "llm_review.reasoning_effort must be none, low, high or max"
+        );
+        for (name, value) in [
+            ("timeout_ms", self.timeout_ms),
+            ("max_concurrent", u64::from(self.max_concurrent)),
+            ("pending_max_count", u64::from(self.pending_max_count)),
+            ("max_output_tokens", self.max_output_tokens),
+            ("max_request_bytes", self.max_request_bytes as u64),
+            ("max_response_bytes", self.max_response_bytes as u64),
+        ] {
+            ensure!(value > 0, "llm_review.{name} must be positive");
+        }
+        ReviewAttempt::pending(
+            ReviewTrigger::Auto,
+            i64::MIN,
+            self.model.clone(),
+            self.reasoning_effort.clone(),
+            PROMPT_VERSION.into(),
+        )
+        .context("Review admission metadata exceeds persistence budget")?;
+        Ok(())
+    }
+}
+
 impl Config {
     /// Read TOML and validate startup relationships without opening the database.
     pub fn load(path: &Path) -> Result<Self> {
@@ -193,13 +316,18 @@ impl Config {
 
     /// Parse a complete configuration and reject unsupported budgets.
     pub fn parse(text: &str) -> Result<Self> {
-        let config: Self = toml::from_str(text).context("Invalid backend TOML configuration")?;
+        // TOML errors normally echo source lines, which may now contain an API key.
+        let config: Self = toml::from_str(text).map_err(|error: toml::de::Error| {
+            let span = error.span().map(|span| span.start);
+            anyhow::anyhow!("Invalid backend TOML configuration at byte {span:?}")
+        })?;
         config.validate()?;
         Ok(config)
     }
 
     /// Check the configured resource, pagination and endpoint requirements.
     pub fn validate(&self) -> Result<()> {
+        self.llm_review.validate()?;
         ensure!(
             self.health.interval_ms > 0,
             "health.interval_ms must be positive"

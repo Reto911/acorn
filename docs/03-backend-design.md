@@ -2,7 +2,7 @@
 
 状态：已确认，作为首版实现依据。
 
-本文同步[LLM 代码审查设计](08-llm-code-review-design.md)的后端增量合同，L01 已实现 llm_review 数据类型、结构版本 3 和数据库基础操作；审查客户端、队列、HTTP 字段与路由、配置和生命周期仍待 L02–L06。当前 Scheduler 显式保存 DISABLED，入口尚未调用审查启动中断方法，不代表自动审查或停机取消已接通。LLM 的具体策略和实施验收以第 08 篇为依据，文档维护边界见[索引](README.md)。
+本文同步[LLM 代码审查设计](08-llm-code-review-design.md)的后端增量合同，L01 已实现 llm_review 数据类型、结构版本 3 和数据库基础操作，L02 已实现固定策略、单次 Responses 客户端及配置；独立队列、HTTP 字段与路由和生命周期仍待 L03–L06。当前 Scheduler 显式保存 DISABLED，入口尚未调用审查启动中断方法，不代表自动审查或停机取消已接通。LLM 的具体策略和实施验收以第 08 篇为依据，文档维护边界见[索引](README.md)。
 
 实施进度：P06–P10 已完成配置、日志、SQLite 业务访问、开发用户预置、Scheduler、HTTP API，以及启动排队装入、旧在途中断、正常停机与故障退出。源码样例、真实单／双 Worker 联调和独立程序操作验收已完成，实际范围见[开发计划实施记录](04-development-plan.md#7-实施记录)。
 
@@ -30,7 +30,7 @@ LLM 增量在同一进程增加与 Scheduler 平行的 llm_review 模块，机�
 | Worker 客户端 | [Tonic](https://docs.rs/tonic/latest/tonic/) / Prost，依据 `acorn.worker.v1` 协议生成 |
 | HTTP 中间件 | Tower 的 `ServiceBuilder` 组合中间件，tower-http 的 `TraceLayer` 记录请求日志 |
 | 数据库 | SQLite，使用 [SQLx](https://docs.rs/sqlx/latest/sqlx/) 的 `runtime-tokio`、`sqlite` 特性，直接维护 SQL |
-| LLM 客户端（待实施） | 复用 reqwest 异步客户端，Responses API 合同见[第 08 篇第 2 节](08-llm-code-review-design.md#2-api-兼容性核对) |
+| LLM 客户端（L02 已实现） | 复用 reqwest 0.13.5 异步客户端，固定 json_schema、无重试和重定向，Responses API 合同见[第 08 篇第 2 节](08-llm-code-review-design.md#2-api-兼容性核对) |
 | 配置 | TOML，启动时读取并验证 |
 | 日志 | tracing / tracing-subscriber，英文单行文本输出到 stderr |
 
@@ -360,7 +360,7 @@ Scheduler 后台任务意外退出交给程序入口记录错误并触发故障�
 | Scheduler | 待接纳上限、Worker 地址列表、轮询间隔、拒绝后再次尝试间隔 |
 | gRPC | 提交、查询和 ACK deadline，发送与接收消息上限 |
 | 健康观测 | `[health]` 的 `interval_ms` 和 `timeout_ms`，缺省分别为 5_000 和 1_000；均为正值，派生过期阈值 `2 * (interval_ms + timeout_ms)` 必须不溢出 |
-| LLM 审查（待实施） | 可缺省的 `[llm_review]`，缺省不启用；endpoint、密钥、模型、思考强度、独立并发与队列名额、HTTP/token/字节预算见[第 08 篇第 9 节](08-llm-code-review-design.md#9-后端配置预算与错误) |
+| LLM 审查配置（L02 已实现） | 可缺省的 `[llm_review]`，缺省不启用；endpoint、密钥、模型、思考强度、独立并发与队列名额、HTTP/token/字节预算见[第 08 篇第 9 节](08-llm-code-review-design.md#9-后端配置预算与错误) |
 | 任务校验 | 源码、用例数、单个输入和答案、合计字节、运行时间及内存的允许上限 |
 | 结果与日志 | 有界诊断及输出约定、日志级别 |
 
@@ -368,7 +368,7 @@ API 上限与部署的 Worker 规约对齐，Base64 结果和 JSON 请求开销�
 
 日志统一为英文、可读的单行文本，记录提交 ID、题号、语言、Worker 地址、操作和错误原因。创建、分派、终态保存和停机记录为 info；明确拒绝和 ACK 失败为 warn；数据库与后台故障为 error；重复请求和普通轮询为 debug。日志不输出完整源码、测试数据或无界程序输出。
 
-LLM 配置同样只由后端 TOML 读取，正式程序不加载开发用 .env。审查日志字段和保密边界遵守第 08 篇第 9、11 节；未启用时手动请求返回 ReviewUnavailable，满足自动门槛的审查保存 FAILED/ReviewUnavailable，停机时优先使用 ReviewInterrupted。
+LLM 配置已由 L02 接入后端 TOML 读取和启用校验，正式程序不加载开发用 .env。客户端构造不发启动探测；入口创建和监督审查服务留在 L03，当前启用配置尚不会启动审查。配置 Debug 隐藏密钥和 endpoint，TOML 解析错误只报告字节位置，不回显配置原文。审查日志字段和保密边界遵守第 08 篇第 9、11 节；未启用时手动请求返回 ReviewUnavailable，满足自动门槛的审查保存 FAILED/ReviewUnavailable，停机时优先使用 ReviewInterrupted。
 
 LLM 的完整落库详情固定上限为 32 KiB，按序列化后的 UTF-8 字节计量；错误 message 使用后端固定英文说明，最多 512 UTF-8 字节，不新增配置项。完整意见或诊断对象仍各自受 16 KiB 上限约束，组装规则见[第 08 篇第 5.2 节](08-llm-code-review-design.md#52-最近一次详情)。响应读取超过 max_response_bytes（默认 1 MiB）或组装详情超出总预算时，本次审查保存 FAILED/ReviewInvalidOutput；该错误属于审查结果，不是新增 HTTP 错误码。
 
