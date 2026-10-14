@@ -43,9 +43,6 @@ defineEmits<{ start: []; refresh: [] }>()
     >
       {{ reviewStatuses[submission.review_status] }}
     </p>
-    <p class="result-note">
-      代码审查独立于机器判题结论。重新审查接纳后会替换上次结果。
-    </p>
     <p v-if="submission.review_status === 'PENDING'" class="result-note">
       等待或正在审查。
     </p>

@@ -58,7 +58,6 @@ const pageQuery = computed(() => ({
   limit: page.value?.limit ?? query.value.limit,
   offset: page.value?.offset ?? query.value.offset,
 }))
-const timeZone = dateFormat.resolvedOptions().timeZone
 
 function applyFilters() {
   void router.push({
@@ -281,11 +280,6 @@ function changePage(offset: number) {
           >
         </div>
       </nav>
-      <p class="history-note">
-        按创建时间倒序，同时间按提交 ID
-        倒序；列表不自动刷新。新提交可能使分页位置变化，可回到首页并刷新查看最新记录。时间按浏览器本地时区
-        {{ timeZone }} 显示。
-      </p>
     </div>
   </section>
 </template>

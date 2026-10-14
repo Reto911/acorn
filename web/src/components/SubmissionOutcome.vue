@@ -98,7 +98,6 @@ function measurement(value: number | undefined, divisor: number, unit: string) {
           <dd>{{ failedCase.signal ?? '未提供' }}</dd>
         </div>
       </dl>
-      <p class="result-note">资源统计仅属于此失败用例。</p>
       <OutputText
         title="标准输出 stdout"
         :base64="failedCase.stdout_base64"

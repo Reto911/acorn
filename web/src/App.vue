@@ -59,6 +59,6 @@ const route = useRoute()
       />
       <RouterView />
     </main>
-    <footer class="app-footer">Acorn · C / Python 3 单文件判题</footer>
+    <footer class="app-footer">Acorn · 2026</footer>
   </ElConfigProvider>
 </template>

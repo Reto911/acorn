@@ -36,7 +36,6 @@ const {
   () => refreshRequired.value,
   reconcileReview,
 )
-const timeZone = dateFormat.resolvedOptions().timeZone
 </script>
 
 <template>
@@ -120,11 +119,6 @@ const timeZone = dateFormat.resolvedOptions().timeZone
             </dd>
           </div>
         </dl>
-        <p class="result-note">
-          时间按浏览器本地时区
-          {{ timeZone }}
-          显示。返回答题会打开最新题面和本地草稿，草稿并非本次提交的历史源码。
-        </p>
       </section>
       <SubmissionOutcome :submission="submission" />
       <SubmissionReview
