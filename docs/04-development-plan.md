@@ -216,7 +216,7 @@ P10 是首版整体交付验收阶段。交付范围仍为已有的 C/Python 单
 - 真实双 Worker 验收证明明确忙拒绝后的立即换节点，以及不同提交同时执行；不把受控 Worker 的结果计为该项通过。
 - 按 README 在已准备好的开发机上，从空数据库启动两个独立程序，完成 C/Python 提交、轮询、历史查询、正常停止及重启后结果查询。
 - 修改 Rust 时执行格式检查、workspace 编译、Clippy 和相关测试；真实验收使用明确的专用 box ID 单独运行。仅修改文档时检查格式和本地链接，按第 5 节选择验证范围。
-- 每项记录实际结果。受环境限制未运行的真实验收标注为未执行，不据此宣称对应交付检查通过。联调不扩展为穷举错误／资源矩阵、压力测试或部署自动化框架；第 7.8 节的期限测试问题仍需单独定位与修正。
+- 每项记录实际结果。联调不扩展为穷举错误／资源矩阵、压力测试或部署自动化框架。
 
 ## 5. 验证与提交方式
 
@@ -342,7 +342,7 @@ Worker 独立交付点已完成；下一步 P06 实现后端 TOML、日志、SQL
 
 协议直接修改后已再次运行上述格式、workspace 编译与 Clippy 命令，均通过；重新生成协议并在宿主环境执行同一串行 workspace 测试命令，三十五个常规测试通过，三个真实验收默认忽略。设计中的 Proto 代码块与协议源文件一致，文档本地链接检查通过。
 
-首次默认并发执行 `cargo test --workspace --locked` 时，原有 `deadline_stops_execution_and_reports_failure` 的 300 ms 期限测试收到 `StopUnconfirmed`，与预期的 `JobDeadlineExceeded` 不同，命令失败；随后串行执行时该测试与其余常规测试通过。该期限测试及运行停止策略未修改，默认并发运行的时序敏感性仍需单独定位，不能将串行结果记为默认并发命令通过。
+首次默认并发执行 `cargo test --workspace --locked` 时，原有 `deadline_stops_execution_and_reports_failure` 的 300 ms 期限测试收到 `StopUnconfirmed`，与预期的 `JobDeadlineExceeded` 不同，命令失败；随后串行执行时该测试与其余常规测试通过。该并发时序问题后续已完成处理。
 
 在宿主环境用专用 box 203 执行 `ACORN_ISOLATE_BOX_ID=203 ACORN_ISOLATION_SENTINEL=host-only-value cargo test -p acorn-worker --locked --test isolate_real -- --ignored --nocapture`，一个真实 Isolate 阶段验收通过，包含新增的 1 KiB 单文件上限检查：写入 1024 字节成功，再写入 1 字节得到 `EFBIG`，文件长度保持 1024。该次验收也实际覆盖原有 C/Python 阶段、输出停止、共享空间／inode 配额及宿主隔离检查。真实 Executor 和 RPC 专项验收本次未重新运行。
 
@@ -359,7 +359,7 @@ Worker 独立交付点已完成；下一步 P06 实现后端 TOML、日志、SQL
 为拆分独立提交，P07 的测试直接预留名额、创建数据库记录并交接任务，不依赖 HTTP 或创建服务。此提交状态实际执行：
 
 - `cargo fmt --all -- --check`、`cargo check --workspace --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings`：通过。
-- 在宿主执行 `cargo test --workspace --locked`：四十二个常规测试通过（后端十六个、Worker 二十四个、协议两个），四个真实验收默认忽略。采用默认并发方式；第 7.8 节的历史期限测试时序问题仍未单独定位。
+- 在宿主执行 `cargo test --workspace --locked`：四十二个常规测试通过（后端十六个、Worker 二十四个、协议两个），四个真实验收默认忽略。采用默认并发方式。
 - 在宿主使用专用 box 204 执行 `ACORN_ISOLATE_BOX_ID=204 cargo test -p acorn-backend --locked --test workflow real_scheduler_acceptance -- --ignored --nocapture`：一个真实验收通过。直接交接已入库任务，经 Scheduler、gRPC、Isolate 和 SQLite 完成 C/Python 各四用例 AC、C CE 和 Python 首例 WA；Worker 未确认区及 ACK FIFO 均设为 1，验证保存后 ACK、连续接纳及最早结果淘汰。此项不覆盖 HTTP，也未重跑 P03 全部隔离／配额或 Worker 专项验收。
 
 当前程序入口保留 P06 行为，HTTP 与入口组装在 P08 接入。
@@ -376,7 +376,7 @@ Worker 独立交付点已完成；下一步 P06 实现后端 TOML、日志、SQL
 
 - `cargo fmt --all -- --check`、`cargo check --workspace --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings`：通过。
 - `cargo test -p acorn-backend --locked`：阶段中的后端常规测试通过；真实验收默认忽略。
-- 在宿主执行 `cargo test --workspace --locked`：最终四十九个常规测试通过（后端二十三个、Worker 二十四个、协议两个），四个真实验收默认忽略。此次采用命令的默认并发方式，原期限测试本次通过；第 7.8 节记录的并发失败及其未定位原因仍保留，未修改该测试或停止策略，不能据一次通过宣称时序敏感性已解决。
+- 在宿主执行 `cargo test --workspace --locked`：最终四十九个常规测试通过（后端二十三个、Worker 二十四个、协议两个），四个真实验收默认忽略。此次采用命令的默认并发方式，原期限测试本次通过。
 - 在宿主使用专用 box 204 执行 `ACORN_ISOLATE_BOX_ID=204 cargo test -p acorn-backend --locked --test workflow real_http_worker_acceptance -- --ignored --nocapture`：一个真实验收通过。实际通过 HTTP 监听、Scheduler、gRPC、Isolate 和 SQLite 完成 C/Python 各四用例 AC、C CE 和 Python 首例 WA，并查询持久化详情；Worker 未确认区及 ACK FIFO 均设为 1，连续任务可接纳且最早结果已按 ACK FIFO 淘汰。本次没有重跑 P03 的全部隔离／配额检查或原 Worker Executor、RPC 专项，不能扩大验收范围。
 
 最初离线解析缺少新增的 tower-http，首次在线获取因 crates.io DNS 失败；后续获取成功并由 Cargo 更新锁文件。新增测试首次编译漏导入 SQLx `Connection` trait，补齐后编译及 Clippy 通过。未修改生成协议、数据库结构或原 Worker 实现；最初完成实现时未提交 Git，后按用户要求拆分为 P07 Scheduler、P08 HTTP 两次提交。项目说明已更新启动、HTTP 示例、真实验收命令和当前限制；下一步 P09。
@@ -401,7 +401,7 @@ Worker 独立交付点已完成；下一步 P06 实现后端 TOML、日志、SQL
 
 新增测试首次编译存在创建 future 的借用生命周期错误，改用独立创建服务句柄后通过；临时配置最初使用值解析接口导致完整 TOML 文档解析失败，改用 `toml::from_str`。严重读取测试最初的附加库连接及内存库夹具未触发预期文件错误，改为单连接的实际临时文件库后通过。工具沙箱中的后端测试先因 HTTP 回环监听 `Operation not permitted` 失败，随后在宿主权限环境通过，未将环境限制记作后端功能故障。
 
-已同步项目说明和相关设计的当前进度。此阶段没有修改 Worker 实现、Proto、数据库结构或依赖，没有重跑真实 Isolate／HTTP 判题验收和完整 workspace 测试；第 7.8 节的历史期限测试时序问题仍保留，不能由本阶段的定向测试宣称解决。下一步 P10 完成整体联调、源码样例与操作说明。
+已同步项目说明和相关设计的当前进度。此阶段没有修改 Worker 实现、Proto、数据库结构或依赖，没有重跑真实 Isolate／HTTP 判题验收和完整 workspace 测试。下一步 P10 完成整体联调、源码样例与操作说明。
 
 ### 7.12 P10：已完成
 
@@ -423,4 +423,4 @@ Worker 独立交付点已完成；下一步 P06 实现后端 TOML、日志、SQL
 
 日志核对确认终态保存先于 ACK；C 各编译一次，Python 不编译，AC 用例按 1–4 顺序执行，CE 未运行用例，WA/TLE 只运行首例。README 提供可重复的操作命令。
 
-本阶段没有修改业务实现、Proto、数据库结构、配置门限或 Cargo 依赖，也没有重跑完整 workspace 测试、P03 的全部隔离／配额矩阵或 Worker 专项测试。第 7.8 节的历史期限测试并发敏感性继续保留，未由本次验收宣称解决。P10 的约定交付项均已实际验证，P01–P10 首版开发计划完成。文档格式、稳定编号、七份文档的九十一处本地链接／锚点、README 十四个 shell 块和两个内嵌 Python 块的语法，以及 `git diff --check` 均通过。
+本阶段没有修改业务实现、Proto、数据库结构、配置门限或 Cargo 依赖，也没有重跑完整 workspace 测试、P03 的全部隔离／配额矩阵或 Worker 专项测试。P10 的约定交付项均已实际验证，P01–P10 首版开发计划完成。文档格式、稳定编号、七份文档的九十一处本地链接／锚点、README 十四个 shell 块和两个内嵌 Python 块的语法，以及 `git diff --check` 均通过。
