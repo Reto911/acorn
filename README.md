@@ -6,7 +6,7 @@ C 与 Python 3 的单文件源码判题系统。后端包含 HTTP API、Schedule
 
 浏览器 GUI 采用 Vue 3、TypeScript 和 Monaco，已完成 F01–F07：题目浏览、C/Python 编辑、本地草稿、主动提交、结果详情、固定版本题面、状态轮询，以及提交历史筛选、分页和详情往返。首版桌面联调已覆盖 C/Python AC、C CE、Python WA 和 C TLE，实际新增与复用记录、UI-01–UI-09 对应关系及未测范围见[前端开发计划](docs/06-frontend-development-plan.md#57-f07首版浏览器联调与操作说明)。交互依据见[GUI 设计](docs/05-frontend-design.md)；健康观测 F08 / H01–H04 已完成，提供 Worker 状态 RPC、后端共享采集、只读 HTTP 快照及 `/health` 系统状态页面，支持自动、手动刷新和独立过期警告；初次实际检查见[健康页面交付记录](docs/06-frontend-development-plan.md#511-f08h04健康页面与最终连通验收)，后续每 10 秒自动获取的实现与验证边界见[补充记录](docs/06-frontend-development-plan.md#512-健康页面每十秒自动获取)。
 
-LLM 代码审查已完成 L01–L05，合同与后续计划见[LLM 设计](docs/08-llm-code-review-design.md)。已提供结构版本 3、固定策略与客户端、独立队列和生命周期、手动 HTTP 与查询，以及 GUI 审查结果区、启动／重跑、联合轮询和历史状态筛选，见[前端实施记录](docs/08-llm-code-review-design.md#125-l05结果页轮询与历史筛选)。配置 enabled=true 后可手动审查任意 finished 提交；自动审查还须固定题目版本达到门槛，默认策略为 DISABLED。机器结果保存、ACK 和 Worker 本地占用释放后才自动交接，模型等待不占数据库连接。最终联调及完整链路的真实 API 检查留在 L06。当前后端只接受结构版本 3；已有版本 2 数据库须按[离线升级交付](docs/08-llm-code-review-design.md#1212-离线升级交付)停服务、备份并单独执行升级 SQL，不能重跑初始化 SQL。既有判题和健康验收不扩展为完整 LLM 验收。
+LLM 代码审查已完成 L01–L06，合同与实施记录见[LLM 设计](docs/08-llm-code-review-design.md)。已提供结构版本 3、固定策略与客户端、独立队列和生命周期、手动 HTTP 与查询，以及 GUI 审查结果区、启动／重跑、联合轮询和历史状态筛选，见[前端实施记录](docs/08-llm-code-review-design.md#125-l05结果页轮询与历史筛选)。配置 enabled=true 后可手动审查任意 finished 提交；自动审查还须固定题目版本达到门槛，默认策略为 DISABLED。机器结果保存、ACK 和 Worker 本地占用释放后才自动交接，模型等待不占数据库连接。[L06 有限联调](docs/08-llm-code-review-design.md#126-l06有限联调与真实调用)已覆盖实际前后端和临时 SQLite 链路，以及一次 GUI 发起的真实 API 调用、保存和展示；机器终态使用受控 gRPC Worker，不扩展为本次真实 Isolate 验收或批量模型效果保证。当前后端只接受结构版本 3；已有版本 2 数据库须按[离线升级交付](docs/08-llm-code-review-design.md#1212-离线升级交付)停服务、备份并单独执行升级 SQL，不能重跑初始化 SQL。既有判题和健康验收保持原范围。
 
 ## 浏览器 GUI
 

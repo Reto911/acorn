@@ -4,7 +4,7 @@
 
 设计和任务依据见[前端 GUI 设计](../docs/05-frontend-design.md)和[前端开发计划](../docs/06-frontend-development-plan.md)。
 
-L05 已接入 LLM 审查结果区、手动启动及重跑、finished/PENDING 继续轮询和 review_status 历史筛选，见[LLM 设计](../docs/08-llm-code-review-design.md#8-http-与前端增量)。本阶段使用受控 HTTP 响应完成桌面交互检查，实际范围见[实施记录](../docs/08-llm-code-review-design.md#125-l05结果页轮询与历史筛选)；完整后端链路及一次最小真实 API 检查留在 L06，既有 F01–F08 的验收记录保持原范围。
+L05 已接入 LLM 审查结果区、手动启动及重跑、finished/PENDING 继续轮询和 review_status 历史筛选，见[LLM 设计](../docs/08-llm-code-review-design.md#8-http-与前端增量)。L05 使用受控 HTTP 响应完成桌面交互检查，实际范围见[实施记录](../docs/08-llm-code-review-design.md#125-l05结果页轮询与历史筛选)；L06 已完成浏览器连接真实后端及临时 SQLite 的受控联调，以及一次 GUI 发起的真实 API 调用、保存和展示，使用受控 gRPC Worker，详见[联调记录](../docs/08-llm-code-review-design.md#126-l06有限联调与真实调用)。既有 F01–F08 的验收记录保持原范围。
 
 GUI 仅面向桌面浏览器，支持与验收视口宽度不小于 1024 CSS px。移动端及更窄视口不在适配、测试或交付范围，无需检查手机竖屏效果；已有窄屏样式不构成支持承诺或后续维护要求。
 
