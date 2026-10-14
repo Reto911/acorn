@@ -232,7 +232,7 @@ cargo test -p acorn-backend --locked
 
 上述命令在 P01 建立工程后使用；Worker 与后端测试按改动范围选择。真实沙箱验证单独标明 Isolate 和权限前提，不能把测试替身的结果当作真实隔离验证。环境不具备时如实记录未运行。
 
-文档 lint 在 workspace 中统一设为 `deny`，所有 crate 必须继承：公共 API 使用 `missing_docs`，私有项补充使用 `clippy::missing_docs_in_private_items`。自写模块、结构体、字段、方法和函数缺少 Rustdoc 文档时检查失败；生成代码只在包含输出的专用模块局部豁免。检查范围与配置说明见[项目说明](../README.md#构建与检查)。
+文档 lint 在 workspace 中统一设为 `deny`，所有 crate 必须继承：公共 API 使用 `missing_docs`，私有项补充使用 `clippy::missing_docs_in_private_items`。自写模块、结构体、字段、方法和函数缺少 Rustdoc 文档时检查失败；生成代码只在包含输出的专用模块局部豁免。检查范围与配置说明见[项目说明](../README_zh-CN.md#开发检查)。
 
 测试重点是正常业务闭环、接纳与幂等、失败短路、结果保存与 ACK、明确拒绝后的重新分派和既定启动停机规则。失败分支通过可控结果验证，不刻意制造小概率故障、严格时序窗口或庞大的字段组合矩阵。仅在发现实际问题或新增行为时补回归覆盖。
 
@@ -253,7 +253,7 @@ cargo test -p acorn-backend --locked
 
 [worker.proto](../proto/acorn/worker/v1/worker.proto) 与 Worker 设计第 3.2 节的 Proto 一致，包含三个 unary RPC、终态和退出信息的 `oneof`、可选失败用例及统计字段。[构建脚本](../crates/protocol/build.rs) 将消息和客户端、服务端生成到 Cargo 的 `OUT_DIR`，通过 `acorn_protocol::worker::v1` 导出；Worker 的 `rpc` 模块引用服务端接口，后端的 `scheduler::worker_client` 引用客户端。
 
-两个程序入口均支持必填的 `--config <PATH>`、`--help` 和 `--version`。当前传入路径只完成参数解析，随后明确提示服务尚未实现并以状态码 1 退出；不读取 TOML 或启动服务。配置解析分别在 P02、P06 补齐。构建与入口说明见[项目说明](../README.md)。
+两个程序入口均支持必填的 `--config <PATH>`、`--help` 和 `--version`。当前传入路径只完成参数解析，随后明确提示服务尚未实现并以状态码 1 退出；不读取 TOML 或启动服务。配置解析分别在 P02、P06 补齐。构建与入口说明见[项目说明](../README_zh-CN.md)。
 
 本次验证环境为 Rust/Cargo 1.101.0-nightly、protoc 3.21.12。已执行：
 
@@ -287,7 +287,7 @@ workspace 已启用 `missing_docs = "deny"` 和 `clippy::missing_docs_in_private
 
 真实验收使用 Isolate 2.6、普通用户、专用 box、cgroup v2，以及启用用户配额的 ext4 沙箱文件系统。管理员允许普通用户初始化后，实际完成带配额初始化和清理。真实验收在宿主执行环境运行。
 
-通过[项目说明中的命令](../README.md#isolate-阶段验收)单独执行一个真实验收测试，结果通过，实际覆盖：
+通过 [Worker 说明中的命令](../crates/worker/README.md#isolate-阶段检查)单独执行一个真实验收测试，结果通过，实际覆盖：
 
 - C 编译并导出程序，两次使用独立程序副本计算得到 `42`；Python 命令正常执行。取得实际 CPU/墙钟统计，阶段结束后调用清理。
 - Python 持续输出触发 OLE，保留 4096 字节 stdout 和截断标记，原始停止原因保持为输出超限；确认停止后清理。
@@ -409,7 +409,7 @@ Worker 独立交付点已完成；下一步 P06 实现后端 TOML、日志、SQL
 
 单 Worker 真实验收通过 C/Python 各四用例 AC、C CE 零运行用例、Python WA 和 C TLE 各首例短路；核对 CE 诊断、WA 输出及 TLE 失败详情。未确认区和 ACK FIFO 均设为 1，后续样例仍可接纳，最早记录已按 ACK FIFO 淘汰。双 Worker 真实验收使用两个独立地址和 box，观察两个 HTTP 提交同时处于首例执行阶段，各自保存 TLE 并完成跟踪。随后直接用 gRPC 占用一个节点，实际确认 `WorkerBusy`，HTTP 提交在该占用仍运行时经另一节点完成 AC；测试重试间隔为 60 秒，整个等待短于该间隔，不能以定时重试代替立即转交。
 
-[项目说明](../README.md)补齐实际二进制构建、复制配置与 box ID 选择、新库 SQL、从源码文件生成 JSON、新键与同键重传、按 `Location` 有界轮询、历史查询、双 Worker 配置、日志关联、停止顺序及重启查询。说明仍要求部署端预先准备 Linux、Isolate、控制组和用户配额，不安装或更改系统配置。
+[项目说明](../README_zh-CN.md)补齐实际二进制构建、复制配置与 box ID 选择、新库 SQL、从源码文件生成 JSON、新键与同键重传、按 `Location` 有界轮询、历史查询、双 Worker 配置、日志关联、停止顺序及重启查询。说明仍要求部署端预先准备 Linux、Isolate、控制组和用户配额，不安装或更改系统配置。
 
 本次宿主环境：Linux `6.18.40.1-microsoft-standard-WSL2`，Rust/Cargo `1.101.0-nightly`，protoc `3.21.12`，Isolate `2.6`，GCC `15.2.0`，Python `3.14.4`，SQLite CLI `3.46.1`。Isolate 可执行文件由 root 所有并启用 setuid；沙箱根目录位于启用 `quota,usrquota` 的 ext4 文件系统。最初环境没有 `sqlite3` 命令，用户安装后按既定 SQLite CLI 流程完成初始化，未为此增加应用依赖或运行期回退路径。
 

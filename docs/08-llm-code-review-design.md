@@ -606,7 +606,7 @@ L04 已完成。[审查服务](../crates/backend/src/llm_review/service.rs)登�
 
 [HTTP 路由](../crates/backend/src/http/mod.rs)已提供 POST review、稳定业务错误映射及 200／202 和 Location。expected_review_id 必填可空，UUID 规范化后交给服务；HTTP 不持有接纳执行的生命周期。题目最新／指定版本详情返回 review_mode，提交详情返回 review_status 和显式公共 review，历史摘要及筛选支持五个审查状态。公开字段按第 8.1 节固定七键，缺失值保持 null；响应 ID、用量、策略版本及诊断 JSON 保留在后端，不从持久化详情直接透传。审查 FAILED 与 DOUBTFUL 的 GET 仍返回 200。
 
-同步了数据库、后端、前端设计、文档索引、基础开发计划和项目说明；[手动 HTTP 操作](../README.md#手动-llm-审查与查询)给出从最新快照生成预期 ID、主动启动及查询的步骤。GUI 仍待 L05，不将本次 HTTP 验收计入原浏览器结果。
+同步了数据库、后端、前端设计、文档索引、基础开发计划和项目说明；[手动 HTTP 操作](../crates/backend/README.md#手动启动与重跑)给出从最新快照生成预期 ID、主动启动及查询的步骤。GUI 仍待 L05，不将本次 HTTP 验收计入原浏览器结果。
 
 #### 12.4.1 实际检查
 

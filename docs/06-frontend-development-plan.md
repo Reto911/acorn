@@ -170,7 +170,7 @@ F01 已建立 `web/package.json` 和检查脚本。前端变更在 `web/` 执行
 
 ### 4.2 真实浏览器主路径
 
-复用[本地启动说明](../README.md#程序入口)、正式两数求和题和 `examples/submissions/` 五份源码。少量实际任务检查浏览器 → HTTP → Scheduler → Worker → SQLite → 结果页：
+复用[本地启动说明](../README_zh-CN.md#quick-start)、正式两数求和题和 `examples/submissions/` 五份源码。少量实际任务检查浏览器 → HTTP → Scheduler → Worker → SQLite → 结果页：
 
 | 路线 | 检查内容 |
 | --- | --- |
