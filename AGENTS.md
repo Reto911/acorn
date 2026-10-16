@@ -99,6 +99,18 @@ in the relevant design documents and must not be maintained here in duplicate.
 
 ## Documentation and Git
 
+- Keep the root README and the READMEs under `crates/`, `sql/` and `web/`
+  focused on current functionality, installation, Quick Start, configuration,
+  interfaces and usage as relevant to each module. Put development progress,
+  implementation history and validation records in the relevant project
+  documents instead of these READMEs.
+- Keep the root `README.md` in English and `README_zh-CN.md` in Simplified
+  Chinese, with reciprocal language links. Synchronize functional content,
+  commands and configuration examples across both versions when editing them,
+  and keep incoming links and heading anchors valid for the intended language.
+- Write documentation to explain functionality, usage, requirements and design
+  decisions. Omit statements included solely to preempt objections when they
+  add no substantive information.
 - Keep project progress records focused on implemented features, actual check
   results and remaining work. Exclude machine-specific local paths, temporary
   artifact inventories and evidence or baseline bookkeeping. Retain necessary
