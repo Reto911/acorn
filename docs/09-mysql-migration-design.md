@@ -59,7 +59,7 @@ lock_wait_timeout_secs = 3
 
 每条新连接初始化以下设置。它们限定当前连接，不修改整个 MySQL 服务的全局配置；初始化失败由驱动报告，不在每次查询前重复检查。
 
-取得连接的等待范围以 [SQLx 0.8.6 连接池说明](https://docs.rs/crate/sqlx-core/0.8.6/source/src/pool/options.rs)为依据；查询执行和事务等待不计为 acquire 阶段。
+取得连接的等待范围以 [SQLx 0.9.0 连接池说明](https://docs.rs/crate/sqlx-core/0.9.0/source/src/pool/options.rs)为依据；查询执行和事务等待不计为 acquire 阶段。
 
 | 设置 | 含义与用途 |
 | --- | --- |
@@ -69,7 +69,9 @@ lock_wait_timeout_secs = 3
 | STRICT_ALL_TABLES | 对不合法、越界等写入报错，避免仅警告后截断或调整数据 |
 | NO_ENGINE_SUBSTITUTION | 明确要求的存储引擎不可用时拒绝 DDL，不自动改用其他引擎 |
 
-SQL 初始化会话也明确设置所需字符集及严格模式。含义依据 [MySQL SQL 模式](https://dev.mysql.com/doc/refman/8.4/en/sql-mode.html)、[二进制排序规则](https://dev.mysql.com/doc/refman/8.4/en/charset-binary-collations.html)和[隔离级别](https://dev.mysql.com/doc/refman/8.4/en/innodb-transaction-isolation-levels.html)；连接使用现有 [SQLx 0.8.6 接口](https://docs.rs/sqlx/0.8.6/sqlx/mysql/struct.MySqlConnectOptions.html)。
+SQLx 0.9.0 根据列的排序规则区分文本和真正的 binary 数据，文本读取使用 try_get 保留类型匹配、UTF-8 和可空校验，LONGBLOB 继续按原始字节读取。该选择依据[上游文本类型识别修复](https://github.com/transact-rs/sqlx/pull/3924)，保留 utf8mb4_0900_bin 的精确比较合同。MySqlConnectOptions 配置字符集和排序规则，由驱动在连接返回前设置；共同会话入口再设置隔离等级、严格模式及锁等待。禁用 SSL 时启用 mysql-rsa 特性，保留需要 RSA 的 MySQL 密码认证能力。
+
+SQL 初始化会话也明确设置所需字符集及严格模式。含义依据 [MySQL SQL 模式](https://dev.mysql.com/doc/refman/8.4/en/sql-mode.html)、[二进制排序规则](https://dev.mysql.com/doc/refman/8.4/en/charset-binary-collations.html)和[隔离级别](https://dev.mysql.com/doc/refman/8.4/en/innodb-transaction-isolation-levels.html)；连接使用现有 [SQLx 0.9.0 接口](https://docs.rs/sqlx/0.9.0/sqlx/mysql/struct.MySqlConnectOptions.html)。
 
 READ COMMITTED（读已提交）是事务隔离等级；InnoDB 默认使用 REPEATABLE READ（可重复读），部署端可调整默认值。两者都不会普通读取其他事务尚未提交的数据。REPEATABLE READ 的普通一致性读取在同一事务内复用首次读取建立的快照；READ COMMITTED 则每条语句建立新的快照，同一事务内重复查询可能看到其他事务已提交的变化。`SELECT ... FOR UPDATE` 属于锁定读取，不能直接套用普通快照读取的规则。
 
@@ -203,7 +205,7 @@ PENDING 是已经持久化的业务状态，不表示数据库事务仍然打开
 
 ## 6. 错误与健康观测
 
-使用 MySqlDatabaseError::number() 匹配数值错误号，不再对 SQLSTATE 应用 SQLite 的低字节算法，见 [SQLx 错误类型](https://docs.rs/sqlx-mysql/0.8.6/sqlx_mysql/struct.MySqlDatabaseError.html)。
+使用 MySqlDatabaseError::number() 匹配数值错误号，不再对 SQLSTATE 应用 SQLite 的低字节算法，见 [SQLx 错误类型](https://docs.rs/sqlx-mysql/0.9.0/sqlx_mysql/struct.MySqlDatabaseError.html)。
 
 | 场景 | 行为 |
 | --- | --- |

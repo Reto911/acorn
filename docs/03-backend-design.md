@@ -31,7 +31,7 @@ LLM 增量在同一进程增加与 Scheduler 平行的 llm_review 模块，机�
 | 异步执行 | 一个 Tokio runtime，运行 HTTP、Scheduler、gRPC 和数据库异步调用 |
 | Worker 客户端 | [Tonic](https://docs.rs/tonic/latest/tonic/) / Prost，依据 `acorn.worker.v1` 协议生成 |
 | HTTP 中间件 | Tower 的 `ServiceBuilder` 组合中间件，tower-http 的 `TraceLayer` 记录请求日志 |
-| 数据库 | MySQL 8.4／InnoDB，使用 [SQLx 0.8.6](https://docs.rs/sqlx/0.8.6/sqlx/) 的 `runtime-tokio`、`mysql` 特性，直接维护 SQL |
+| 数据库 | MySQL 8.4／InnoDB，使用 [SQLx 0.9.0](https://docs.rs/sqlx/0.9.0/sqlx/) 的 `runtime-tokio`、`mysql`、`mysql-rsa` 特性，直接维护 SQL |
 | LLM 客户端（L02 已实现） | 复用 reqwest 0.13.5 异步客户端，固定 json_schema、无重试和重定向，Responses API 合同见[第 08 篇第 2 节](08-llm-code-review-design.md#2-api-兼容性核对) |
 | 配置 | TOML，启动时读取并验证 |
 | 日志 | tracing / tracing-subscriber，英文单行文本输出到 stderr |

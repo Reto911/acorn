@@ -5,7 +5,7 @@ use acorn_backend::{
     database::{Database, initialize_session},
 };
 use serde::Deserialize;
-use sqlx::{Connection, MySqlConnection};
+use sqlx::{AssertSqlSafe, Connection, MySqlConnection};
 use uuid::Uuid;
 
 /// Non-secret test connection settings, supplied separately from deployment TOML.
@@ -50,14 +50,15 @@ impl Fixture {
             MySqlConnection::connect_with(&config.database.connect_options().unwrap())
                 .await
                 .unwrap();
-        sqlx::query(&format!(
+        // Only the validated alphanumeric prefix and generated UUID enter the identifier.
+        sqlx::query(AssertSqlSafe(format!(
             "CREATE DATABASE `{}` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin",
             config.database.name
-        ))
+        )))
         .execute(&mut connection)
         .await
         .unwrap();
-        sqlx::raw_sql(&format!("USE `{}`", config.database.name))
+        sqlx::raw_sql(AssertSqlSafe(format!("USE `{}`", config.database.name)))
             .execute(&mut connection)
             .await
             .unwrap();
@@ -120,10 +121,13 @@ impl Fixture {
             MySqlConnection::connect_with(&self.config.database.connect_options().unwrap())
                 .await
                 .unwrap();
-        sqlx::query(&format!("DROP DATABASE `{}`", self.config.database.name))
-            .execute(&mut connection)
-            .await
-            .unwrap();
+        sqlx::query(AssertSqlSafe(format!(
+            "DROP DATABASE `{}`",
+            self.config.database.name
+        )))
+        .execute(&mut connection)
+        .await
+        .unwrap();
         connection.close().await.unwrap();
     }
 }

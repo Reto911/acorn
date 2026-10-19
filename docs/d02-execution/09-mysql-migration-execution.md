@@ -4,7 +4,7 @@
 
 ## 1. 当前状态
 
-M01／M02 已完成：驱动、配置、访问层和文档已切为 MySQL，连接池、基础 SQLx 读写、独立建库夹具和子进程基础检查通过。当前共七个工作项已完成，M03／M04、M06、M07 的 13 个工作项待完成。正式部署配置未修改，应用库未初始化。具体待办和完成条件以设计第 10 节为准；原 M05、M08 已按审核结论取消。
+M01／M02 已完成：驱动、配置、访问层和文档已切为 MySQL，连接池、基础 SQLx 读写、独立建库夹具和子进程基础检查通过。SQLx 已修正为 0.9.0，字符串读取恢复 try_get，修正后 29 项相关检查通过，范围见第 7 节。当前共七个工作项已完成，M03／M04、M06、M07 的 13 个工作项待完成。正式部署配置未修改，应用库未初始化。具体待办和完成条件以设计第 10 节为准；原 M05、M08 已按审核结论取消。
 
 ### 1.1 任务完成状态
 
@@ -86,6 +86,8 @@ M01 交付时的后续安排为 M02 切换连接、配置和访问层，并建�
 
 ## 5. M02：连接、配置和访问层
 
+本节保留 SQLx 0.8.6 初次交付时的实现和检查；随后采用上游修复的过程与结果见第 7 节。
+
 ### 5.1 已实现内容
 
 - SQLx 保持 0.8.6，驱动特性改为 mysql 并由 Cargo 更新锁文件；后端运行依赖树已移除 SQLite 驱动和 libsqlite3。配置改为端点、库名、用户及连接预算，删除旧 path／busy_timeout_ms 并拒绝未知字段，连接数默认 4。
@@ -144,4 +146,35 @@ M03 继续实现并验证 1062 竞争读取、审查行锁、条件完成及故�
 
 整理后的 12 份变更 Markdown 文档、225 处有效本地链接／锚点、表格、代码块、32 段 shell 和六段 TOML 示例检查通过；中英文配置字段和命令保持同步，20 个工作项与任务编号保留。三个既有 SQL README 缺失引用仍由 M07 处理。`git diff --check` 通过；本次整理仅改文档，沿用第 5.3 节已完成的代码检查。
 
-下一步在提交当前 MySQL 连接与夹具实现后，采用包含上游文本类型识别修复的 SQLx 版本，恢复字符串字段的 try_get，并验证连接、类型及进程检查。事务并发和故障注入仍按 M03／M04 推进。
+文档整理与当前 MySQL 连接／夹具实现先提交为 `169c3b3`（`feat(db): connect backend and test fixtures to MySQL`），随后执行第 7 节的 SQLx 修正。事务并发和故障注入仍按 M03／M04 推进。
+
+## 7. SQLx 文本类型识别修正
+
+### 7.1 修正内容与依据
+
+- SQLx 及相关依赖锁定为 0.9.0，采用[上游 #3924](https://github.com/transact-rs/sqlx/pull/3924) 对文本排序规则和 binary 数据的区分。原 VARCHAR／LONGTEXT 的 try_get_unchecked 全部恢复为 try_get，保留 SQL 类型匹配、UTF-8、NULL、JSON 和枚举校验；原始字节列继续按 Vec<u8> 读取。
+- 连接选项直接配置 utf8mb4_0900_bin，由驱动在连接返回前执行字符集／排序规则设置；移除旧版 utf8mb4_bin 握手兼容处理和应用 after_connect 内重复的 SET NAMES。隔离等级、严格模式、池和两类锁等待预算保持，MySQL SSL 仍禁用。启用 mysql-rsa 保留无 TLS 时需要 RSA 的密码认证能力。
+- 按 0.9 的 SqlSafeStr 接口适配既有格式化 SQL。应用内 AssertSqlSafe 只包装静态列清单与静态模板；测试夹具只插入经过既有 ASCII 字母数字前缀校验及 UUID 生成的本例库名。请求数据继续全部绑定参数，字符串解码不再跳过类型匹配。
+- 在既有 database 测试中增加 mysql_binary_collation_preserves_text_type_checks：实际 VARCHAR／LONGTEXT 可读为 String，NULL 保持 Option 行为，包含合法 UTF-8 的真实 LONGBLOB 仍拒绝读为 String，并能按 Vec<u8> 原样读取。使用同一正式初始化夹具，无新依赖或自定义驱动补丁。
+- 同步第 03／09 篇当前依赖和连接合同，中英文 README 同步注明 SQLx 0.9.0 要求的 Rust/Cargo 最低版本 1.94.0。第 5 节保留旧版本检查，不将历史兼容处理写成当前实现。
+
+### 7.2 实际检查
+
+| 命令／范围 | 结果 |
+| --- | --- |
+| cargo fmt --all -- --check | 通过 |
+| cargo check --workspace --all-targets --locked | 通过 |
+| cargo clippy --workspace --all-targets --locked -- -D warnings | 通过 |
+| cargo test -p acorn-backend --locked --lib --test config_results | 10 项单元测试及 7 项配置／结果测试通过 |
+| cargo test -p acorn-backend --locked --test database -- --test-threads=1 --skip concurrent_idempotency_and_conflict | 10 项通过，包含新增类型匹配回归、双连接会话、连接池预算、终态／审查 JSON、版本和启动检查；并发同键项未执行 |
+| cargo test -p acorn-backend --locked --test workflow published_queries_and_history_shapes -- --test-threads=1 | 一项通过，覆盖共享夹具、受控 Worker 和 HTTP 题目／历史查询 |
+| cargo test -p acorn-backend --locked --test workflow process_startup_loads_queue_and_interrupts_in_flight -- --test-threads=1 | 一项通过，覆盖子进程配置、既有队列及正常 SIGTERM 收尾 |
+| cargo tree --locked -p acorn-backend --edges normal | SQLx／core／mysql 均为 0.9.0，保留 RSA 认证依赖，不含 SQLite 运行依赖 |
+
+共 29 项相关检查通过。实际 MySQL 仍为 8.4.11；每例独立建库并执行正式 SQL，连接、池及进程收尾后删除本例库，最终只读确认本批测试库无残留。Rust 源码及测试中没有 try_get_unchecked，未保留旧握手排序规则回退。
+
+文档整理及修正涉及的 12 份 Markdown、225 处有效本地链接／锚点、表格、代码块、shell／TOML 示例及中英文配置／命令同步检查通过。20 个设计工作项保持，完成状态仅在实施记录维护；三个既有 SQL README 缺失引用继续留在 M07。`git diff --check` 通过。
+
+### 7.3 验证边界
+
+本次验证覆盖文本类型识别修正及既有基础 MySQL 链路，没有执行全量 workspace 测试、并发同键及审查行锁验收、SQLite 专用故障注入的 MySQL 替换、真实 Isolate／Worker、GUI 或模型调用。M03／M04、M06、M07 的职责和剩余工作不变。

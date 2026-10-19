@@ -82,6 +82,43 @@ fn request(language: &str) -> CreateSubmission {
     }
 }
 
+/// Binary-collated text remains a checked String, while true binary data stays bytes.
+#[tokio::test]
+async fn mysql_binary_collation_preserves_text_type_checks() {
+    let fixture = Fixture::new().await;
+    let submitted = request("c");
+    let created = fixture
+        .database
+        .create_submission(submitted.clone())
+        .await
+        .unwrap();
+    let mut connection = fixture.connection().await;
+    let row = sqlx::query("SELECT v.title, v.statement, s.id, s.source, s.verdict FROM submissions s JOIN problem_versions v USING (problem_id, version_no) WHERE s.id = ?")
+        .bind(&created.info.id).fetch_one(&mut connection).await.unwrap();
+    assert!(!row.try_get::<String, _>("title").unwrap().is_empty());
+    assert!(!row.try_get::<String, _>("statement").unwrap().is_empty());
+    assert_eq!(row.try_get::<String, _>("id").unwrap(), created.info.id);
+    assert!(
+        row.try_get::<Option<String>, _>("verdict")
+            .unwrap()
+            .is_none()
+    );
+    assert!(matches!(
+        row.try_get::<String, _>("verdict"),
+        Err(sqlx::Error::ColumnDecode { .. })
+    ));
+    assert_eq!(
+        row.try_get::<Vec<u8>, _>("source").unwrap(),
+        submitted.source
+    );
+    assert!(matches!(
+        row.try_get::<String, _>("source"),
+        Err(sqlx::Error::ColumnDecode { .. })
+    ));
+    connection.close().await.unwrap();
+    fixture.close().await;
+}
+
 /// Valid AC terminal with no duplicate payload.
 fn accepted(config: &Config) -> TerminalOutcome {
     TerminalOutcome::judged(
@@ -669,7 +706,7 @@ async fn executable_serves_http_and_stops() {
         .fetch_one(&mut connection)
         .await
         .unwrap()
-        .try_get_unchecked("password_hash")
+        .try_get("password_hash")
         .unwrap();
     assert!(hash.starts_with("$argon2id$v=19$m=19456,t=2,p=1$"));
     let parts: Vec<_> = hash.split('$').collect();

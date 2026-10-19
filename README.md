@@ -36,7 +36,7 @@ The backend serves the browser over HTTP JSON and dispatches jobs to Workers ove
 | ------------------------------------------------------ | ----------------------------------------------------------------- |
 | Linux, Isolate, cgroups, and filesystem user quotas    | Isolated execution and resource limits                            |
 | GCC and Python 3                                       | C compilation and Python execution                                |
-| Rust/Cargo                                             | Build the Rust 2024 edition workspace and its locked dependencies |
+| Rust/Cargo 1.94.0 or later                              | Build the Rust 2024 edition workspace and its locked dependencies |
 | `protoc` with proto3 optional support                  | Generate the shared gRPC protocol                                 |
 | MySQL 8.4 / InnoDB and the MySQL command-line client | Initialize and manage the database                                |
 | Node.js 24.x, at least 24.21.0; pnpm 12.11.2           | Install, build, and run the frontend                              |

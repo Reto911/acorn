@@ -51,9 +51,9 @@ impl Database {
             let languages = language_limits(&mut connection, problem_id, summary.version_no).await?;
             Ok(Some(ProblemVersion {
                 summary,
-                statement: row.try_get_unchecked("statement")?,
-                review_mode: ReviewMode::parse(&row.try_get_unchecked::<String, _>("review_mode")?)?,
-                comparison_mode: row.try_get_unchecked("comparison_mode")?,
+                statement: row.try_get("statement")?,
+                review_mode: ReviewMode::parse(&row.try_get::<String, _>("review_mode")?)?,
+                comparison_mode: row.try_get("comparison_mode")?,
                 published_at_ms: row.try_get("published_at_ms")?,
                 languages,
             }))
@@ -67,7 +67,7 @@ fn summary(row: &MySqlRow) -> Result<ProblemSummary> {
     Ok(ProblemSummary {
         problem_id: row.try_get("problem_id")?,
         version_no: row.try_get("version_no")?,
-        title: row.try_get_unchecked("title")?,
+        title: row.try_get("title")?,
     })
 }
 
@@ -82,7 +82,7 @@ async fn language_limits(
     rows.iter()
         .map(|row| {
             Ok(LanguageLimits {
-                language_id: row.try_get_unchecked("language_id")?,
+                language_id: row.try_get("language_id")?,
                 limits: run_limits(row)?,
             })
         })

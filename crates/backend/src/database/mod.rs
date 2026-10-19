@@ -1,8 +1,4 @@
 //! One shared SQLx MySQL pool, explicit queries and short conditional writes.
-//!
-//! Known VARCHAR/LONGTEXT projections use `try_get_unchecked` for string decoding:
-//! SQLx 0.8.6 rejects their server BINARY flag under the required binary collation.
-//! This skips SQL type compatibility only; UTF-8 and nullability remain validated.
 
 mod problems;
 mod reviews;
@@ -209,9 +205,6 @@ pub async fn initialize_session(
     connection: &mut MySqlConnection,
     lock_wait: u32,
 ) -> sqlx::Result<()> {
-    sqlx::query("SET NAMES utf8mb4 COLLATE utf8mb4_0900_bin")
-        .execute(&mut *connection)
-        .await?;
     sqlx::query("SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED")
         .execute(&mut *connection)
         .await?;

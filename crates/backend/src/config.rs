@@ -143,9 +143,7 @@ impl DatabaseConfig {
             .username(&self.username)
             .password(&password)
             .charset("utf8mb4")
-            // SQLx 0.8.6 recognizes this handshake collation. Session setup applies
-            // utf8mb4_0900_bin before any application query is allowed to run.
-            .collation("utf8mb4_bin")
+            .collation("utf8mb4_0900_bin")
             .ssl_mode(MySqlSslMode::Disabled))
     }
 }

@@ -1,7 +1,7 @@
 //! Atomic creation, fixed-version task assembly and conditional business-state writes.
 
 use acorn_protocol::worker::v1::{JobFailure, SubmitJobRequest, TestCase};
-use sqlx::{MySqlConnection, Row, mysql::MySqlRow};
+use sqlx::{AssertSqlSafe, MySqlConnection, Row, mysql::MySqlRow};
 use uuid::Uuid;
 
 use crate::{
@@ -16,6 +16,7 @@ use crate::{
 use super::{Database, Error, Result, now_ms, problems::run_limits, reviews::stored_review};
 
 /// Common list columns; queries using this projection never read source or diagnostics.
+/// Formatted SQL includes only this static projection; all request values remain bound.
 const INFO_COLUMNS: &str = "id, problem_id, version_no, language_id, state, verdict, review_status, created_at_ms, terminal_at_ms";
 
 impl Database {
@@ -36,7 +37,7 @@ impl Database {
     /// Read one stored submission and its parsed terminal details.
     pub async fn submission(&self, id: &str) -> Result<Option<Submission>> {
         self.observe("Read submission", false, async {
-            let row = sqlx::query(&format!("SELECT {INFO_COLUMNS}, user_id, source, create_request_key, terminal_details_json, review_id, review_details_json FROM submissions WHERE id = ?"))
+            let row = sqlx::query(AssertSqlSafe(format!("SELECT {INFO_COLUMNS}, user_id, source, create_request_key, terminal_details_json, review_id, review_details_json FROM submissions WHERE id = ?")))
                 .bind(id).fetch_optional(&self.pool).await?;
             row.as_ref().map(stored_submission).transpose()
         })
@@ -55,7 +56,7 @@ impl Database {
             let state = filter.state.map(SubmissionState::as_str);
             let verdict = filter.verdict.map(Verdict::as_str);
             let review_status = filter.review_status.map(ReviewStatus::as_str);
-            let rows = sqlx::query(&format!("SELECT {INFO_COLUMNS} FROM submissions WHERE user_id = ? AND (? IS NULL OR problem_id = ?) AND (? IS NULL OR state = ?) AND (? IS NULL OR verdict = ?) AND (? IS NULL OR review_status = ?) ORDER BY created_at_ms DESC, id DESC LIMIT ? OFFSET ?"))
+            let rows = sqlx::query(AssertSqlSafe(format!("SELECT {INFO_COLUMNS} FROM submissions WHERE user_id = ? AND (? IS NULL OR problem_id = ?) AND (? IS NULL OR state = ?) AND (? IS NULL OR verdict = ?) AND (? IS NULL OR review_status = ?) ORDER BY created_at_ms DESC, id DESC LIMIT ? OFFSET ?")))
                 .bind(self.config.test_user.user_id).bind(filter.problem_id).bind(filter.problem_id)
                 .bind(state).bind(state).bind(verdict).bind(verdict).bind(review_status).bind(review_status).bind(limit).bind(offset)
                 .fetch_all(&self.pool).await?;
@@ -139,9 +140,9 @@ impl Database {
     pub async fn queued_task(&self, id: &str) -> Result<Option<JudgingTask>> {
         self.observe("Read queued submission", false, async {
             let mut connection = self.pool.acquire().await?;
-            let row = sqlx::query(&format!(
+            let row = sqlx::query(AssertSqlSafe(format!(
                 "SELECT {INFO_COLUMNS}, source FROM submissions WHERE id = ? AND state = 'queued'"
-            ))
+            )))
             .bind(id)
             .fetch_optional(&mut *connection)
             .await?;
@@ -165,7 +166,7 @@ impl Database {
     pub async fn queued_tasks(&self) -> Result<Vec<JudgingTask>> {
         self.observe("Load startup queue", false, async {
             let mut connection = self.pool.acquire().await?;
-            let rows = sqlx::query(&format!("SELECT {INFO_COLUMNS}, source FROM submissions WHERE state = 'queued' ORDER BY created_at_ms, id LIMIT ?"))
+            let rows = sqlx::query(AssertSqlSafe(format!("SELECT {INFO_COLUMNS}, source FROM submissions WHERE state = 'queued' ORDER BY created_at_ms, id LIMIT ?")))
                 .bind(i64::from(self.config.scheduler.pending_max_count) + 1).fetch_all(&mut *connection).await?;
             if rows.len() > self.config.scheduler.pending_max_count as usize {
                 return Err(Error::Data(anyhow::anyhow!(
@@ -287,23 +288,23 @@ async fn by_key(
     user_id: i64,
     key: &str,
 ) -> Result<Option<Submission>> {
-    let row = sqlx::query(&format!("SELECT {INFO_COLUMNS}, user_id, source, create_request_key, terminal_details_json, review_id, review_details_json FROM submissions WHERE user_id = ? AND create_request_key = ?"))
+    let row = sqlx::query(AssertSqlSafe(format!("SELECT {INFO_COLUMNS}, user_id, source, create_request_key, terminal_details_json, review_id, review_details_json FROM submissions WHERE user_id = ? AND create_request_key = ?")))
         .bind(user_id).bind(key).fetch_optional(connection).await?;
     row.as_ref().map(stored_submission).transpose()
 }
 
 /// Decode identity and summary independently of source and terminal detail payloads.
 fn info(row: &MySqlRow) -> Result<SubmissionInfo> {
-    let state: String = row.try_get_unchecked("state")?;
-    let verdict: Option<String> = row.try_get_unchecked("verdict")?;
+    let state: String = row.try_get("state")?;
+    let verdict: Option<String> = row.try_get("verdict")?;
     Ok(SubmissionInfo {
-        id: row.try_get_unchecked("id")?,
+        id: row.try_get("id")?,
         problem_id: row.try_get("problem_id")?,
         version_no: row.try_get("version_no")?,
-        language_id: row.try_get_unchecked("language_id")?,
+        language_id: row.try_get("language_id")?,
         state: SubmissionState::parse(&state)?,
         verdict: verdict.as_deref().map(Verdict::parse).transpose()?,
-        review_status: ReviewStatus::parse(&row.try_get_unchecked::<String, _>("review_status")?)?,
+        review_status: ReviewStatus::parse(&row.try_get::<String, _>("review_status")?)?,
         created_at_ms: row.try_get("created_at_ms")?,
         terminal_at_ms: row.try_get("terminal_at_ms")?,
     })
@@ -311,13 +312,13 @@ fn info(row: &MySqlRow) -> Result<SubmissionInfo> {
 
 /// Deserialize typed JSON once, preserving raw source bytes and original identity.
 fn stored_submission(row: &MySqlRow) -> Result<Submission> {
-    let details: Option<String> = row.try_get_unchecked("terminal_details_json")?;
+    let details: Option<String> = row.try_get("terminal_details_json")?;
     Ok(Submission {
         info: info(row)?,
         review: stored_review(row)?,
         user_id: row.try_get("user_id")?,
         source: row.try_get("source")?,
-        create_request_key: row.try_get_unchecked("create_request_key")?,
+        create_request_key: row.try_get("create_request_key")?,
         terminal_details: details
             .as_deref()
             .map(serde_json::from_str)
@@ -347,9 +348,7 @@ async fn load_task(
     validate_source(&source, config)?;
     let language = sqlx::query("SELECT v.comparison_mode, v.review_mode, l.cpu_time_ms, l.wall_time_ms, l.memory_kib FROM problem_versions v JOIN problem_version_languages l USING (problem_id, version_no) WHERE v.problem_id = ? AND v.version_no = ? AND l.language_id = ?")
         .bind(info.problem_id).bind(info.version_no).bind(&info.language_id).fetch_optional(&mut *connection).await?.ok_or(Error::LanguageNotAllowed)?;
-    if language.try_get_unchecked::<String, _>("comparison_mode")?
-        != "trim_trailing_ascii_whitespace"
-    {
+    if language.try_get::<String, _>("comparison_mode")? != "trim_trailing_ascii_whitespace" {
         return Err(Error::Data(anyhow::anyhow!(
             "Unsupported comparison mode in stored task"
         )));
@@ -408,7 +407,7 @@ async fn load_task(
     Ok(JudgingTask {
         problem_id: info.problem_id,
         version_no: info.version_no,
-        review_mode: ReviewMode::parse(&language.try_get_unchecked::<String, _>("review_mode")?)?,
+        review_mode: ReviewMode::parse(&language.try_get::<String, _>("review_mode")?)?,
         request: SubmitJobRequest {
             job_id: info.id.clone(),
             language_id: info.language_id.clone(),

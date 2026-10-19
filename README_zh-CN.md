@@ -36,7 +36,7 @@ Acorn 是支持 C 和 Python 3 的单文件源码判题系统，提供浏览器�
 | -------------------------------------------- | ------------------------------------- |
 | Linux、Isolate、控制组和文件系统用户配额     | 隔离执行及资源限制                    |
 | GCC、Python 3                                | C 编译和 Python 执行                  |
-| Rust/Cargo                                   | 构建 Rust 2024 edition 工程及锁定依赖 |
+| Rust/Cargo 1.94.0 或更新版本                 | 构建 Rust 2024 edition 工程及锁定依赖 |
 | 支持 proto3 optional 的 `protoc`             | 构建共享 gRPC 协议                    |
 | MySQL 8.4／InnoDB 及 MySQL 命令行客户端 | 初始化和管理数据库                    |
 | Node.js 24.x，至少 24.21.0；pnpm 12.11.2     | 安装、构建和运行前端                  |
