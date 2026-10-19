@@ -15,7 +15,7 @@ Acorn 是支持 C 和 Python 3 的单文件源码判题系统，提供浏览器�
 
 ## 项目结构
 
-后端通过 HTTP JSON 服务浏览器，通过 gRPC 向 Worker 分派任务；Worker 在 Isolate 中执行代码，后端将提交及结果保存到 SQLite。LLM 审查由后端的独立队列执行。
+后端通过 HTTP JSON 服务浏览器，通过 gRPC 向 Worker 分派任务；Worker 在 Isolate 中执行代码，后端将提交及结果保存到 MySQL。LLM 审查由后端的独立队列执行。
 
 | 目录                                         | 内容                                                 |
 | -------------------------------------------- | ---------------------------------------------------- |
@@ -23,7 +23,7 @@ Acorn 是支持 C 和 Python 3 的单文件源码判题系统，提供浏览器�
 | [crates/worker](crates/worker/README.md)     | C/Python 判题执行器、Isolate 封装和 gRPC 服务        |
 | [crates/protocol](crates/protocol/README.md) | Protobuf 消息及生成的 gRPC 客户端、服务端            |
 | [web](web/README.md)                         | Vue 3、TypeScript、Element Plus 和 Monaco 浏览器界面 |
-| [sql](sql/README.md)                         | SQLite 建表脚本及内置两数求和题                      |
+| [sql](sql/README.md)                         | MySQL 建表脚本及内置两数求和题                      |
 | [config](config)                             | 后端和 Worker 的 TOML 配置示例                       |
 | [examples](examples)                         | 开发用户预置 SQL 和提交源码样例                      |
 | [docs](docs/README.md)                       | 架构设计、接口合同和开发记录                         |
@@ -38,7 +38,7 @@ Acorn 是支持 C 和 Python 3 的单文件源码判题系统，提供浏览器�
 | GCC、Python 3                                | C 编译和 Python 执行                  |
 | Rust/Cargo                                   | 构建 Rust 2024 edition 工程及锁定依赖 |
 | 支持 proto3 optional 的 `protoc`             | 构建共享 gRPC 协议                    |
-| SQLite CLI 3.38.0 或更新版本，启用 JSON 函数 | 初始化和管理数据库                    |
+| MySQL 8.4／InnoDB 及 MySQL 命令行客户端 | 初始化和管理数据库                    |
 | Node.js 24.x，至少 24.21.0；pnpm 12.11.2     | 安装、构建和运行前端                  |
 | curl                                         | 从命令行调用 HTTP API                 |
 
@@ -74,19 +74,19 @@ cp config/worker.example.toml "$HOME/.config/acorn/worker.toml"
 cp config/backend.example.toml "$HOME/.config/acorn/backend.toml"
 ```
 
-编辑 `worker.toml`，核对 `sandbox.executable`、`languages.c.compiler` 和 `languages.python.interpreter`，为 `sandbox.box_id` 选择本机空闲且专用于该 Worker 的 ID。后端示例配置连接 `http://127.0.0.1:50051`，数据库路径为启动目录中的 `acorn.db`。
+编辑 `worker.toml`，核对 `sandbox.executable`、`languages.c.compiler` 和 `languages.python.interpreter`，为 `sandbox.box_id` 选择本机空闲且专用于该 Worker 的 ID。后端示例配置连接 `http://127.0.0.1:50051`，数据库由 `database.endpoint`、`name` 和 `username` 指定。
 
 ### 初始化数据库
 
-对新数据库执行一次：
+先由部署管理员创建空数据库 `appdb`，再使用具备 DDL／DML 权限的初始化账户执行以下命令，每条命令会提示输入密码。后端账户只需业务读写权限。
 
 ```sh
-sqlite3 -bail acorn.db < sql/001-initial-schema.sql
-sqlite3 -bail acorn.db < examples/seed-user.sql
-sqlite3 -bail acorn.db < sql/002-example-problem.sql
+mysql --host=127.0.0.1 --port=3306 --user=example_initializer --password --ssl-mode=DISABLED --database=appdb < sql/001-initial-schema.sql
+mysql --host=127.0.0.1 --port=3306 --user=example_initializer --password --ssl-mode=DISABLED --database=appdb < examples/seed-user.sql
+mysql --host=127.0.0.1 --port=3306 --user=example_initializer --password --ssl-mode=DISABLED --database=appdb < sql/002-example-problem.sql
 ```
 
-这会创建结构版本 3、用户 1 和题号 1 的两数求和题，包含 C/Python 限额与 104 个测试用例。后续启动直接复用该数据库。已有库的升级和题目发布规则见 [SQL 说明](sql/README.md)。
+这会创建结构版本 4、用户 1 和题号 1 的两数求和题，包含 C/Python 限额与 104 个测试用例。后续启动直接复用该数据库。初始化针对空库，遇到首个 SQL 错误即停止；后端启动检查结构版本和配置用户。初始化脚本使用 MySQL 方言，应用不导入旧库或自动升级。
 
 ### 启动服务
 
@@ -99,6 +99,9 @@ target/debug/acorn-worker --config "$HOME/.config/acorn/worker.toml"
 终端 B 启动后端：
 
 ```sh
+read -r -s -p 'MySQL 密码：' MYSQL_PASSWORD
+printf '\n'
+export MYSQL_PASSWORD
 target/debug/acorn-backend --config "$HOME/.config/acorn/backend.toml"
 ```
 
@@ -141,12 +144,20 @@ curl --fail-with-body "http://127.0.0.1:8080/api/v1/submissions/$ACORN_SUBMISSIO
 | Worker `server.listen`             | `127.0.0.1:50051`            | gRPC 监听地址                                    |
 | Worker `sandbox.box_id`            | `0`                          | 本机独占的 Isolate box ID                        |
 | 后端 `http.listen`                 | `127.0.0.1:8080`             | HTTP API 监听地址                                |
-| 后端 `database.path`               | `acorn.db`                   | 已初始化的 SQLite 文件，相对路径以启动目录为基准 |
+| 后端 `database.endpoint` | `127.0.0.1:3306` | MySQL 主机和 TCP 端口 |
+| 后端 `database.name` | `appdb` | 已初始化的结构版本 4 数据库 |
+| 后端 `database.username` | `example_user` | 业务读写账户 |
+| 后端 `MYSQL_PASSWORD` | 进程环境变量 | 数据库密码 |
+| 后端 `database.max_connections` | `4` | 共享应用连接池上限 |
+| 后端 `database.acquire_timeout_ms` | `5000` | 整个连接取得过程的预算 |
+| 后端 `database.lock_wait_timeout_secs` | `3` | 会话行锁与元数据锁等待 |
 | 后端 `scheduler.workers`           | `["http://127.0.0.1:50051"]` | Worker 地址列表                                  |
 | 后端 `scheduler.pending_max_count` | `128`                        | 等待 Worker 接纳的提交容量                       |
 | 后端 `llm_review.enabled`          | `false`                      | LLM 审查开关                                     |
 | 前端 `API_PROXY_TARGET`            | `http://127.0.0.1:8080`      | 开发服务的 API 代理目标                          |
 | 前端 `VITE_SOURCE_MAX_BYTES`       | `65536`                      | 提交源码字节上限预检                             |
+
+后端从进程环境读取 `MYSQL_PASSWORD`，MySQL SSL 显式禁用，程序不自动加载 `.env`。连接使用 utf8mb4_0900_bin、READ COMMITTED、严格 SQL 模式和有限锁等待。
 
 请求、消息和结果预算需要在后端与各 Worker 之间对齐。字段以 `_ms`、`_kib`、`_bytes` 标明单位。完整配置见[后端示例](config/backend.example.toml)、[Worker 示例](config/worker.example.toml)和[前端配置说明](web/README.md#配置与-api-代理)。
 
@@ -184,9 +195,11 @@ retry_interval_ms = 1_000
 
 ```sh
 cargo fmt --all -- --check
-cargo check --workspace --locked
+cargo check --workspace --all-targets --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --locked
+cargo test -p acorn-backend --locked --lib --test config_results
 ```
 
 workspace 要求自写公共和私有 Rust 项提供 Rustdoc 文档，各 crate 继承统一 lint 配置。模块测试、协议生成和前端检查命令分别见对应 README；架构和接口细节见[文档索引](docs/README.md)。
+
+数据库和 workflow 检查需要 `MYSQL_PASSWORD` 及[MySQL 测试配置](config/backend-test.example.toml)的私有副本，通过 `ACORN_TEST_DATABASE_CONFIG` 指定。开发账户为每个测试创建和删除独立数据库，见[后端检查说明](crates/backend/README.md#检查命令)。

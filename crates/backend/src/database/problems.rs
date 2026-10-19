@@ -1,7 +1,7 @@
 //! Queries for published current and explicitly selected immutable problem versions.
 
 use acorn_protocol::worker::v1::RunLimits;
-use sqlx::{Row, SqliteConnection, sqlite::SqliteRow};
+use sqlx::{MySqlConnection, Row, mysql::MySqlRow};
 
 use crate::llm_review::ReviewMode;
 use crate::problems::{LanguageLimits, ProblemSummary, ProblemVersion};
@@ -51,9 +51,9 @@ impl Database {
             let languages = language_limits(&mut connection, problem_id, summary.version_no).await?;
             Ok(Some(ProblemVersion {
                 summary,
-                statement: row.try_get("statement")?,
-                review_mode: ReviewMode::parse(&row.try_get::<String, _>("review_mode")?)?,
-                comparison_mode: row.try_get("comparison_mode")?,
+                statement: row.try_get_unchecked("statement")?,
+                review_mode: ReviewMode::parse(&row.try_get_unchecked::<String, _>("review_mode")?)?,
+                comparison_mode: row.try_get_unchecked("comparison_mode")?,
                 published_at_ms: row.try_get("published_at_ms")?,
                 languages,
             }))
@@ -63,17 +63,17 @@ impl Database {
 }
 
 /// Decode list identity without loading statements or test data.
-fn summary(row: &SqliteRow) -> Result<ProblemSummary> {
+fn summary(row: &MySqlRow) -> Result<ProblemSummary> {
     Ok(ProblemSummary {
         problem_id: row.try_get("problem_id")?,
         version_no: row.try_get("version_no")?,
-        title: row.try_get("title")?,
+        title: row.try_get_unchecked("title")?,
     })
 }
 
 /// Read all allowed language budgets in deterministic identifier order.
 async fn language_limits(
-    connection: &mut SqliteConnection,
+    connection: &mut MySqlConnection,
     problem_id: i64,
     version: i64,
 ) -> Result<Vec<LanguageLimits>> {
@@ -82,15 +82,15 @@ async fn language_limits(
     rows.iter()
         .map(|row| {
             Ok(LanguageLimits {
-                language_id: row.try_get("language_id")?,
+                language_id: row.try_get_unchecked("language_id")?,
                 limits: run_limits(row)?,
             })
         })
         .collect()
 }
 
-/// Convert signed SQLite budgets without truncating or wrapping negative data.
-pub(super) fn run_limits(row: &SqliteRow) -> Result<RunLimits> {
+/// Convert signed MySQL budgets without truncating or wrapping negative data.
+pub(super) fn run_limits(row: &MySqlRow) -> Result<RunLimits> {
     Ok(RunLimits {
         cpu_time_ms: unsigned(row.try_get("cpu_time_ms")?)?,
         wall_time_ms: unsigned(row.try_get("wall_time_ms")?)?,

@@ -1,7 +1,7 @@
 //! Atomic creation, fixed-version task assembly and conditional business-state writes.
 
 use acorn_protocol::worker::v1::{JobFailure, SubmitJobRequest, TestCase};
-use sqlx::{Row, SqliteConnection, sqlite::SqliteRow};
+use sqlx::{MySqlConnection, Row, mysql::MySqlRow};
 use uuid::Uuid;
 
 use crate::{
@@ -72,7 +72,7 @@ impl Database {
         self.observe("Create submission transaction", true, async {
             validate_source(&request.source, &self.config)?;
             let key = request.request_key.to_string();
-            let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+            let mut transaction = self.pool.begin().await?;
             if let Some(existing) =
                 by_key(&mut transaction, self.config.test_user.user_id, &key).await?
             {
@@ -283,7 +283,7 @@ impl Database {
 
 /// Read an owner-scoped creation key on the caller's existing connection or transaction.
 async fn by_key(
-    connection: &mut SqliteConnection,
+    connection: &mut MySqlConnection,
     user_id: i64,
     key: &str,
 ) -> Result<Option<Submission>> {
@@ -293,31 +293,31 @@ async fn by_key(
 }
 
 /// Decode identity and summary independently of source and terminal detail payloads.
-fn info(row: &SqliteRow) -> Result<SubmissionInfo> {
-    let state: String = row.try_get("state")?;
-    let verdict: Option<String> = row.try_get("verdict")?;
+fn info(row: &MySqlRow) -> Result<SubmissionInfo> {
+    let state: String = row.try_get_unchecked("state")?;
+    let verdict: Option<String> = row.try_get_unchecked("verdict")?;
     Ok(SubmissionInfo {
-        id: row.try_get("id")?,
+        id: row.try_get_unchecked("id")?,
         problem_id: row.try_get("problem_id")?,
         version_no: row.try_get("version_no")?,
-        language_id: row.try_get("language_id")?,
+        language_id: row.try_get_unchecked("language_id")?,
         state: SubmissionState::parse(&state)?,
         verdict: verdict.as_deref().map(Verdict::parse).transpose()?,
-        review_status: ReviewStatus::parse(&row.try_get::<String, _>("review_status")?)?,
+        review_status: ReviewStatus::parse(&row.try_get_unchecked::<String, _>("review_status")?)?,
         created_at_ms: row.try_get("created_at_ms")?,
         terminal_at_ms: row.try_get("terminal_at_ms")?,
     })
 }
 
 /// Deserialize typed JSON once, preserving raw source bytes and original identity.
-fn stored_submission(row: &SqliteRow) -> Result<Submission> {
-    let details: Option<String> = row.try_get("terminal_details_json")?;
+fn stored_submission(row: &MySqlRow) -> Result<Submission> {
+    let details: Option<String> = row.try_get_unchecked("terminal_details_json")?;
     Ok(Submission {
         info: info(row)?,
         review: stored_review(row)?,
         user_id: row.try_get("user_id")?,
         source: row.try_get("source")?,
-        create_request_key: row.try_get("create_request_key")?,
+        create_request_key: row.try_get_unchecked("create_request_key")?,
         terminal_details: details
             .as_deref()
             .map(serde_json::from_str)
@@ -339,7 +339,7 @@ fn validate_source(source: &[u8], config: &Config) -> Result<()> {
 
 /// Assemble and validate fixed-version task data on the already held connection.
 async fn load_task(
-    connection: &mut SqliteConnection,
+    connection: &mut MySqlConnection,
     info: &SubmissionInfo,
     source: Vec<u8>,
     config: &Config,
@@ -347,7 +347,9 @@ async fn load_task(
     validate_source(&source, config)?;
     let language = sqlx::query("SELECT v.comparison_mode, v.review_mode, l.cpu_time_ms, l.wall_time_ms, l.memory_kib FROM problem_versions v JOIN problem_version_languages l USING (problem_id, version_no) WHERE v.problem_id = ? AND v.version_no = ? AND l.language_id = ?")
         .bind(info.problem_id).bind(info.version_no).bind(&info.language_id).fetch_optional(&mut *connection).await?.ok_or(Error::LanguageNotAllowed)?;
-    if language.try_get::<String, _>("comparison_mode")? != "trim_trailing_ascii_whitespace" {
+    if language.try_get_unchecked::<String, _>("comparison_mode")?
+        != "trim_trailing_ascii_whitespace"
+    {
         return Err(Error::Data(anyhow::anyhow!(
             "Unsupported comparison mode in stored task"
         )));
@@ -406,7 +408,7 @@ async fn load_task(
     Ok(JudgingTask {
         problem_id: info.problem_id,
         version_no: info.version_no,
-        review_mode: ReviewMode::parse(&language.try_get::<String, _>("review_mode")?)?,
+        review_mode: ReviewMode::parse(&language.try_get_unchecked::<String, _>("review_mode")?)?,
         request: SubmitJobRequest {
             job_id: info.id.clone(),
             language_id: info.language_id.clone(),

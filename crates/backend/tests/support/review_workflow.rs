@@ -824,7 +824,7 @@ async fn process_shutdown_drains_registered_manual_admission() {
     assert_eq!(endpoint.count(), 0);
     connection.close().await.unwrap();
     server.close().await;
-    fixture.database.close().await;
+    fixture.close().await;
     endpoint.close().await;
 }
 
@@ -1084,7 +1084,7 @@ async fn process_review_startup_interrupts_without_reposting() {
     assert!(restarted.finish().await.0.success());
     assert_eq!(endpoint.count(), 1);
     server.close().await;
-    fixture.database.close().await;
+    fixture.close().await;
     endpoint.close().await;
 }
 
@@ -1161,7 +1161,7 @@ async fn process_review_shutdown_cancels_and_marks_new_terminals() {
     assert_eq!(server.mock.acks.load(Ordering::SeqCst), 3);
     assert_eq!(endpoint.count(), 1);
     server.close().await;
-    fixture.database.close().await;
+    fixture.close().await;
     endpoint.close().await;
 }
 
@@ -1217,6 +1217,6 @@ async fn review_api_failure_and_critical_completion_failure() {
     assert_eq!(endpoint.count(), 3);
     connection.close().await.unwrap();
     server.close().await;
-    fixture.database.close().await;
+    fixture.close().await;
     endpoint.close().await;
 }

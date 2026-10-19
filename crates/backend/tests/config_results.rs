@@ -21,6 +21,73 @@ fn configuration_relationships() {
     );
 }
 
+/// MySQL endpoint syntax, connection budgets and removal of SQLite fields are enforced.
+#[test]
+fn mysql_configuration_contract() {
+    let example = include_str!("../../../config/backend.example.toml");
+    let defaulted = Config::parse(&example.replace("max_connections = 4\n", "")).unwrap();
+    assert_eq!(defaulted.database.max_connections, 4);
+    for endpoint in ["db.internal:3306", "[::1]:3306"] {
+        let config = Config::parse(&example.replace("127.0.0.1:3306", endpoint)).unwrap();
+        assert_eq!(config.database.address().unwrap().1, 3306);
+    }
+    for endpoint in [
+        "localhost",
+        "localhost:0",
+        "localhost:65536",
+        "::1:3306",
+        "mysql://localhost:3306",
+        ":3306",
+    ] {
+        assert!(
+            Config::parse(&example.replace("127.0.0.1:3306", endpoint)).is_err(),
+            "{endpoint}"
+        );
+    }
+    for (field, invalid) in [
+        ("name = \"appdb\"", "name = \"\""),
+        ("username = \"example_user\"", "username = \" \""),
+        ("max_connections = 4", "max_connections = 0"),
+        ("acquire_timeout_ms = 5_000", "acquire_timeout_ms = 0"),
+        ("lock_wait_timeout_secs = 3", "lock_wait_timeout_secs = 0"),
+        (
+            "lock_wait_timeout_secs = 3",
+            "lock_wait_timeout_secs = 31_536_001",
+        ),
+        ("name = \"appdb\"", "path = \"acorn.db\""),
+        ("acquire_timeout_ms = 5_000", "busy_timeout_ms = 3_000"),
+    ] {
+        assert!(
+            Config::parse(&example.replace(field, invalid)).is_err(),
+            "{invalid}"
+        );
+    }
+    let secret = "MYSQL_TEST_SECRET_MUST_NOT_APPEAR";
+    let invalid = example.replace("name = \"appdb\"", &format!("password = \"{secret}\""));
+    let error = Config::parse(&invalid).unwrap_err().to_string();
+    assert!(!error.contains(secret));
+}
+
+/// A backend without its password fails before trying a network connection.
+#[test]
+fn mysql_password_is_required_at_startup() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("backend.toml");
+    std::fs::write(&path, include_str!("../../../config/backend.example.toml")).unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_acorn-backend"))
+        .arg("--config")
+        .arg(path)
+        .env_remove("MYSQL_PASSWORD")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("MYSQL_PASSWORD must be present")
+    );
+}
+
 /// Old and partial health settings retain defaults; invalid budgets and age overflow fail.
 #[test]
 fn health_configuration_defaults_and_age_limit() {

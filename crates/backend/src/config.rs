@@ -3,7 +3,7 @@
 use std::{
     collections::HashSet,
     fmt,
-    net::SocketAddr,
+    net::{Ipv6Addr, SocketAddr},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -11,6 +11,7 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
 use serde::Deserialize;
+use sqlx::mysql::{MySqlConnectOptions, MySqlSslMode};
 
 use crate::llm_review::{ReviewAttempt, ReviewTrigger, policy::PROMPT_VERSION};
 
@@ -29,7 +30,7 @@ pub struct Cli {
 pub struct Config {
     /// HTTP listener, request body and pagination settings.
     pub http: HttpConfig,
-    /// Existing SQLite file and finite lock wait.
+    /// Existing MySQL database, bounded connection pool and finite lock waits.
     pub database: DatabaseConfig,
     /// Deployment-provided submission owner.
     pub test_user: TestUserConfig,
@@ -65,14 +66,88 @@ pub struct HttpConfig {
     pub max_page_size: u32,
 }
 
-/// SQLite startup settings; the application never creates or migrates this file.
+/// MySQL startup settings; initialization belongs to the deployment account.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DatabaseConfig {
-    /// Database path, relative to the process working directory when not absolute.
-    pub path: PathBuf,
-    /// Positive, finite SQLite lock wait in milliseconds.
-    pub busy_timeout_ms: u64,
+    /// Host and TCP port, with IPv6 addresses enclosed in square brackets.
+    pub endpoint: String,
+    /// Existing database name; applications never create it at startup.
+    pub name: String,
+    /// MySQL account name; MYSQL_PASSWORD supplies its password separately.
+    pub username: String,
+    /// Shared application connection ceiling, defaulting to four.
+    #[serde(default = "default_database_connections")]
+    pub max_connections: u32,
+    /// Positive budget for the entire connection acquisition phase, in milliseconds.
+    pub acquire_timeout_ms: u64,
+    /// Positive session InnoDB and metadata lock wait, in seconds.
+    pub lock_wait_timeout_secs: u32,
+}
+
+/// Preserve the agreed four-connection application pool default.
+fn default_database_connections() -> u32 {
+    4
+}
+
+impl DatabaseConfig {
+    /// Parse the configured host and positive TCP port without resolving DNS.
+    pub fn address(&self) -> Result<(&str, u16)> {
+        let (host, port) = if let Some(ipv6) = self.endpoint.strip_prefix('[') {
+            let (host, port) = ipv6
+                .split_once("]:")
+                .context("database.endpoint must use [IPv6]:port")?;
+            host.parse::<Ipv6Addr>()
+                .context("database.endpoint contains an invalid IPv6 address")?;
+            (host, port)
+        } else {
+            let (host, port) = self
+                .endpoint
+                .rsplit_once(':')
+                .context("database.endpoint must use host:port")?;
+            ensure!(
+                !host.contains(':'),
+                "database.endpoint IPv6 addresses require square brackets"
+            );
+            (host, port)
+        };
+        ensure!(
+            !host.is_empty()
+                && !host.chars().any(|character| {
+                    character.is_whitespace()
+                        || matches!(character, '/' | '@' | '[' | ']' | '?' | '#')
+                }),
+            "database.endpoint must contain only a host and port"
+        );
+        let port: u16 = port
+            .parse()
+            .context("database.endpoint port must fit a TCP port")?;
+        ensure!(port > 0, "database.endpoint port must be positive");
+        Ok((host, port))
+    }
+
+    /// Build credential-bearing options without selecting a database or logging them.
+    ///
+    /// Application and test callers select their own database after construction.
+    /// Configuration parsing remains independent of the process password variable.
+    pub fn connect_options(&self) -> Result<MySqlConnectOptions> {
+        let (host, port) = self.address()?;
+        let password = std::env::var("MYSQL_PASSWORD").map_err(|_| {
+            anyhow::anyhow!(
+                "MYSQL_PASSWORD must be present in the process environment as valid UTF-8"
+            )
+        })?;
+        Ok(MySqlConnectOptions::new()
+            .host(host)
+            .port(port)
+            .username(&self.username)
+            .password(&password)
+            .charset("utf8mb4")
+            // SQLx 0.8.6 recognizes this handshake collation. Session setup applies
+            // utf8mb4_0900_bin before any application query is allowed to run.
+            .collation("utf8mb4_bin")
+            .ssl_mode(MySqlSslMode::Disabled))
+    }
 }
 
 /// The pre-existing user assigned to all new submissions.
@@ -344,7 +419,10 @@ impl Config {
                 u64::from(self.http.default_page_size),
             ),
             ("http.max_page_size", u64::from(self.http.max_page_size)),
-            ("database.busy_timeout_ms", self.database.busy_timeout_ms),
+            (
+                "database.acquire_timeout_ms",
+                self.database.acquire_timeout_ms,
+            ),
             (
                 "scheduler.pending_max_count",
                 u64::from(self.scheduler.pending_max_count),
@@ -416,16 +494,25 @@ impl Config {
         ] {
             ensure!(
                 value > 0 && value <= i64::MAX as u64,
-                "{name} must be positive and fit SQLite's integer range"
+                "{name} must be positive and fit the signed integer range"
             );
         }
         ensure!(
-            !self.database.path.as_os_str().is_empty(),
-            "database.path must not be empty"
+            !self.database.name.trim().is_empty(),
+            "database.name must not be empty"
         );
         ensure!(
-            self.database.busy_timeout_ms <= i32::MAX as u64,
-            "database.busy_timeout_ms exceeds SQLite's range"
+            !self.database.username.trim().is_empty(),
+            "database.username must not be empty"
+        );
+        self.database.address()?;
+        ensure!(
+            self.database.max_connections > 0,
+            "database.max_connections must be positive"
+        );
+        ensure!(
+            (1..=31_536_000).contains(&self.database.lock_wait_timeout_secs),
+            "database.lock_wait_timeout_secs must be between 1 and 31536000"
         );
         ensure!(
             self.test_user.user_id > 0,

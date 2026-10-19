@@ -15,7 +15,7 @@ Acorn is a programming judge for single-file C and Python 3 submissions, with a 
 
 ## Project Structure
 
-The backend serves the browser over HTTP JSON and dispatches jobs to Workers over gRPC. Workers execute code in Isolate, while the backend stores submissions and results in SQLite. LLM reviews run through a separate queue in the backend.
+The backend serves the browser over HTTP JSON and dispatches jobs to Workers over gRPC. Workers execute code in Isolate, while the backend stores submissions and results in MySQL. LLM reviews run through a separate queue in the backend.
 
 | Directory                                    | Contents                                                                 |
 | -------------------------------------------- | ------------------------------------------------------------------------ |
@@ -23,7 +23,7 @@ The backend serves the browser over HTTP JSON and dispatches jobs to Workers ove
 | [crates/worker](crates/worker/README.md)     | C/Python judging executor, Isolate wrapper, and gRPC service             |
 | [crates/protocol](crates/protocol/README.md) | Protobuf messages and generated gRPC clients and servers                 |
 | [web](web/README.md)                         | Browser interface built with Vue 3, TypeScript, Element Plus, and Monaco |
-| [sql](sql/README.md)                         | SQLite schema and the built-in A + B problem                             |
+| [sql](sql/README.md)                         | MySQL schema and the built-in A + B problem                             |
 | [config](config)                             | Example TOML configurations for the backend and Worker                   |
 | [examples](examples)                         | Development user seed SQL and sample submissions                         |
 | [docs](docs/README.md)                       | Architecture, interface contracts, and development records               |
@@ -38,7 +38,7 @@ The backend serves the browser over HTTP JSON and dispatches jobs to Workers ove
 | GCC and Python 3                                       | C compilation and Python execution                                |
 | Rust/Cargo                                             | Build the Rust 2024 edition workspace and its locked dependencies |
 | `protoc` with proto3 optional support                  | Generate the shared gRPC protocol                                 |
-| SQLite CLI 3.38.0 or later with JSON functions enabled | Initialize and manage the database                                |
+| MySQL 8.4 / InnoDB and the MySQL command-line client | Initialize and manage the database                                |
 | Node.js 24.x, at least 24.21.0; pnpm 12.11.2           | Install, build, and run the frontend                              |
 | curl                                                   | Call the HTTP API from the command line                           |
 
@@ -74,19 +74,19 @@ cp config/worker.example.toml "$HOME/.config/acorn/worker.toml"
 cp config/backend.example.toml "$HOME/.config/acorn/backend.toml"
 ```
 
-Edit `worker.toml` to check `sandbox.executable`, `languages.c.compiler`, and `languages.python.interpreter`. Choose an available `sandbox.box_id` dedicated to this Worker on the host. The example backend configuration connects to `http://127.0.0.1:50051` and uses `acorn.db` in the working directory.
+Edit `worker.toml` to check `sandbox.executable`, `languages.c.compiler`, and `languages.python.interpreter`. Choose an available `sandbox.box_id` dedicated to this Worker on the host. The example backend configuration connects to `http://127.0.0.1:50051` and selects the MySQL database configured by `database.endpoint`, `name`, and `username`.
 
 ### Initialize the Database
 
-Run these commands once for a new database:
+Have a deployment administrator create an empty `appdb` database. Use an initialization account with DDL/DML permissions to run the following commands once; each command prompts for its password. The backend account only needs business read/write permissions.
 
 ```sh
-sqlite3 -bail acorn.db < sql/001-initial-schema.sql
-sqlite3 -bail acorn.db < examples/seed-user.sql
-sqlite3 -bail acorn.db < sql/002-example-problem.sql
+mysql --host=127.0.0.1 --port=3306 --user=example_initializer --password --ssl-mode=DISABLED --database=appdb < sql/001-initial-schema.sql
+mysql --host=127.0.0.1 --port=3306 --user=example_initializer --password --ssl-mode=DISABLED --database=appdb < examples/seed-user.sql
+mysql --host=127.0.0.1 --port=3306 --user=example_initializer --password --ssl-mode=DISABLED --database=appdb < sql/002-example-problem.sql
 ```
 
-This creates schema version 3, user 1, and the A + B problem with ID 1, C/Python resource limits, and 104 test cases. Reuse this database on subsequent starts. See the [SQL guide](sql/README.md) for existing database upgrades and problem publishing rules.
+This creates schema version 4, user 1, and the A + B problem with ID 1, C/Python resource limits, and 104 test cases. Reuse this database on subsequent starts. Initialize an empty database and stop at the first SQL error. The backend validates the schema version and configured user at startup. The initialization scripts use MySQL syntax; the application does not import old databases or upgrade them automatically.
 
 ### Start the Services
 
@@ -99,6 +99,9 @@ target/debug/acorn-worker --config "$HOME/.config/acorn/worker.toml"
 Start the backend in terminal B:
 
 ```sh
+read -r -s -p 'MySQL password: ' MYSQL_PASSWORD
+printf '\n'
+export MYSQL_PASSWORD
 target/debug/acorn-backend --config "$HOME/.config/acorn/backend.toml"
 ```
 
@@ -141,12 +144,20 @@ Both the backend and Worker read TOML through `--config <PATH>`; restart the ser
 | Worker `server.listen`                | `127.0.0.1:50051`            | gRPC listening address                                                     |
 | Worker `sandbox.box_id`               | `0`                          | Isolate box ID reserved on this host                                       |
 | Backend `http.listen`                 | `127.0.0.1:8080`             | HTTP API listening address                                                 |
-| Backend `database.path`               | `acorn.db`                   | Initialized SQLite file; relative paths resolve from the working directory |
+| Backend `database.endpoint` | `127.0.0.1:3306` | MySQL host and TCP port |
+| Backend `database.name` | `appdb` | Initialized schema version 4 database |
+| Backend `database.username` | `example_user` | Business read/write account |
+| Backend `MYSQL_PASSWORD` | Process environment | Database password |
+| Backend `database.max_connections` | `4` | Shared application pool ceiling |
+| Backend `database.acquire_timeout_ms` | `5000` | Entire connection acquisition budget |
+| Backend `database.lock_wait_timeout_secs` | `3` | Session row and metadata lock wait |
 | Backend `scheduler.workers`           | `["http://127.0.0.1:50051"]` | Worker endpoint list                                                       |
 | Backend `scheduler.pending_max_count` | `128`                        | Capacity for submissions awaiting Worker admission                         |
 | Backend `llm_review.enabled`          | `false`                      | Enable LLM reviews                                                         |
 | Frontend `API_PROXY_TARGET`           | `http://127.0.0.1:8080`      | API proxy target for the development server                                |
 | Frontend `VITE_SOURCE_MAX_BYTES`      | `65536`                      | Source byte limit checked before submission                                |
+
+The backend reads `MYSQL_PASSWORD` from its process environment and uses MySQL with SSL disabled. It does not load `.env` automatically. Connections use utf8mb4_0900_bin, READ COMMITTED, strict SQL mode, and finite lock waits.
 
 Align request, message, and result budgets between the backend and all Workers. Field suffixes `_ms`, `_kib`, and `_bytes` indicate units. See the [backend example](config/backend.example.toml), [Worker example](config/worker.example.toml), and [frontend configuration guide](web/README.md#配置与-api-代理) for the complete settings.
 
@@ -184,9 +195,11 @@ For frontend deployment, build `web/dist/`, serve it with a static server, and p
 
 ```sh
 cargo fmt --all -- --check
-cargo check --workspace --locked
+cargo check --workspace --all-targets --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --locked
+cargo test -p acorn-backend --locked --lib --test config_results
 ```
 
 The workspace requires Rustdoc for authored public and private Rust items, and each crate inherits the shared lint configuration. See the module READMEs for tests, protocol generation, and frontend checks, and the [documentation index](docs/README.md) for architecture and interface details.
+
+Database and workflow checks require `MYSQL_PASSWORD` and a private copy of [the MySQL test configuration](config/backend-test.example.toml), selected by `ACORN_TEST_DATABASE_CONFIG`. The development account creates and deletes a separate database for each test; see the [backend checks](crates/backend/README.md#检查命令).

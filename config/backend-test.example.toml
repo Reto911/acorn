@@ -1,0 +1,11 @@
+# Set ACORN_TEST_DATABASE_CONFIG to a private copy of this file.
+# MYSQL_PASSWORD supplies this development account's password.
+# The account must create, initialize and drop acorntest-prefixed databases.
+[database]
+endpoint = "127.0.0.1:3306"
+# Each test appends a UUID to this 1-32 character alphanumeric prefix.
+name = "acorntest"
+username = "example_test_user"
+max_connections = 4
+acquire_timeout_ms = 5_000
+lock_wait_timeout_secs = 3

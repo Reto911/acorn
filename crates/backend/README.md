@@ -1,6 +1,6 @@
 # acorn-backend
 
-acorn-backend 是 Acorn 的 HTTP 后端，使用 Axum、Tokio 和 SQLx。它管理题目查询、提交创建、Worker 调度、SQLite 持久化、健康观测及 LLM 代码审查。
+acorn-backend 是 Acorn 的 HTTP 后端，使用 Axum、Tokio 和 SQLx。它管理题目查询、提交创建、Worker 调度、MySQL 持久化、健康观测及 LLM 代码审查。
 
 ## 功能与模块
 
@@ -9,7 +9,7 @@ acorn-backend 是 Acorn 的 HTTP 后端，使用 Axum、Tokio 和 SQLx。它管�
 | `http`                    | JSON API、分页筛选、请求限制和错误响应                     |
 | `problems`、`submissions` | 题目版本查询、幂等创建、提交详情和历史                     |
 | `scheduler`               | 有界内存队列、Worker 选择、gRPC 分派与轮询、保存结果后 ACK |
-| `database`                | SQLite 访问、短事务和条件状态更新                          |
+| `database`                | MySQL 访问、短事务和条件状态更新                          |
 | `llm_review`              | 自动及手动审查、独立队列、模型调用和最新意见保存           |
 | `health`                  | 数据库与 Worker 共享采集、最近观测缓存                     |
 | `config`、`logging`       | TOML 配置和英文 stderr 日志                                |
@@ -18,7 +18,7 @@ acorn-backend 是 Acorn 的 HTTP 后端，使用 Axum、Tokio 和 SQLx。它管�
 
 ## 启动
 
-先按 [SQL 说明](../../sql/README.md#初始化)初始化数据库并预置用户、题目，再按 [Worker 说明](../worker/README.md#启动)启动节点。在仓库根目录执行：
+先按 [初始化说明](../../docs/09-mysql-migration-design.md#7-sql-改写与全新初始化)初始化数据库并预置用户、题目，再按 [Worker 说明](../worker/README.md#启动)启动节点。在仓库根目录执行：
 
 ```sh
 cargo build -p acorn-backend --locked
@@ -26,13 +26,16 @@ mkdir -p "$HOME/.config/acorn"
 cp config/backend.example.toml "$HOME/.config/acorn/backend.toml"
 ```
 
-编辑配置，核对数据库文件、用户 ID 和 Worker 地址，然后启动：
+编辑配置，核对 MySQL 端点、库名、账户、用户 ID 和 Worker 地址，然后启动：
 
 ```sh
+read -r -s -p 'MySQL 密码：' MYSQL_PASSWORD
+printf '\n'
+export MYSQL_PASSWORD
 target/debug/acorn-backend --config "$HOME/.config/acorn/backend.toml"
 ```
 
-相对数据库路径以进程启动目录为基准。命令行也支持 `--help` 和 `--version`。
+应用连接已初始化的 MySQL 8.4／InnoDB 数据库，只接受结构版本 4。启动检查版本及预置用户，缺少密码时明确失败。命令行也支持 `--help` 和 `--version`。
 
 ## 配置
 
@@ -41,7 +44,7 @@ target/debug/acorn-backend --config "$HOME/.config/acorn/backend.toml"
 | 配置节       | 主要设置                                    | 示例值                              |
 | ------------ | ------------------------------------------- | ----------------------------------- |
 | `http`       | 监听地址、JSON 请求上限、默认及最大页长     | `127.0.0.1:8080`，512 KiB，20 / 100 |
-| `database`   | 已有数据库文件、锁等待时间                  | `acorn.db`，3000 ms                 |
+| `database` | 端点、库名、用户名、连接池上限及等待预算 | `127.0.0.1:3306`、`appdb`、4 个连接、5000 ms 取得等待、3 秒锁等待 |
 | `test_user`  | 所有提交的归属用户 ID                       | `1`                                 |
 | `scheduler`  | Worker 列表、待接纳容量、轮询及节点重试间隔 | 128 个名额，100 / 1000 ms           |
 | `grpc`       | 各 RPC 超时、消息发送及接收上限             | 1000 ms，16 MiB / 1 MiB             |
@@ -50,6 +53,8 @@ target/debug/acorn-backend --config "$HOME/.config/acorn/backend.toml"
 | `health`     | 每轮采集后的间隔、单项探测超时              | 5000 / 1000 ms                      |
 | `llm_review` | 审查开关、模型地址、凭据、并发和预算        | 默认关闭；详见下文                  |
 | `logging`    | 日志过滤级别                                | `info`                              |
+
+数据库密码由进程环境变量 `MYSQL_PASSWORD` 提供，TOML 只保存非秘密连接字段；正式程序不自动加载 `.env`。MySQL SSL 显式禁用。API、Scheduler、审查与健康采集共用连接池，每条新连接设置 utf8mb4_0900_bin、READ COMMITTED、严格模式及两类锁等待。取得连接的等待预算与查询、锁等待分别计量；模型和 Worker 网络等待不借用数据库连接。
 
 后端的任务、执行及结果预算须与所有 Worker 对齐。待接纳容量包含已预留、已排队和正在等待 Worker 接纳的提交；Worker 接纳后释放该名额。
 
@@ -177,15 +182,19 @@ Ctrl-C 或 SIGTERM 停止新提交、新分派和审查接纳，等待在途判�
 在仓库根目录执行：
 
 ```sh
-cargo test -p acorn-backend --locked
+cargo test -p acorn-backend --locked --lib --test config_results
+ACORN_TEST_DATABASE_CONFIG=/path/to/mysql-test.toml \
+  cargo test -p acorn-backend --locked --test database --test workflow -- --test-threads=1
 ```
+
+数据库和 workflow 检查同时需要进程 `MYSQL_PASSWORD`；测试 TOML 采用 [backend-test.example.toml](../../config/backend-test.example.toml) 的字段，其中 name 是 1–32 位 ASCII 字母数字库名前缀，每例追加随机 UUID。测试账户需具备该前缀范围内的建库、DDL／DML 及删库权限，拒写和表锁检查另需 TRIGGER／LOCK TABLES。夹具通过三个正式 SQL 初始化独立库，正常收尾先停止服务、关闭连接池再删除本例库；失败残留由开发端处置。测试不自动加载 `.env`，测试账户权限与正式应用账户分开配置。
 
 使用已配置沙箱的主机检查真实单／双 Worker 链路，选择空闲的专用 box ID：
 
 ```sh
-ACORN_ISOLATE_BOX_ID=204 \
+ACORN_TEST_DATABASE_CONFIG=/path/to/mysql-test.toml ACORN_ISOLATE_BOX_ID=204 \
   cargo test -p acorn-backend --locked --test workflow real_http_worker_acceptance -- --ignored --nocapture
-ACORN_ISOLATE_BOX_ID=205 ACORN_ISOLATE_BOX_ID_2=206 \
+ACORN_TEST_DATABASE_CONFIG=/path/to/mysql-test.toml ACORN_ISOLATE_BOX_ID=205 ACORN_ISOLATE_BOX_ID_2=206 \
   cargo test -p acorn-backend --locked --test workflow real_two_workers_acceptance -- --ignored --nocapture
 ```
 

@@ -1,4 +1,4 @@
-//! P06 acceptance using the shipped schema, seed user and example problem in real SQLite.
+//! P06 acceptance using the shipped schema, seed user and example problem in real MySQL.
 
 use acorn_backend::{
     config::Config,
@@ -10,69 +10,66 @@ use acorn_backend::{
 };
 use acorn_protocol::worker::v1::{self as proto, failed_case::Exit};
 use base64::{Engine, prelude::BASE64_STANDARD};
-use sqlx::{Connection, Row, SqliteConnection, sqlite::SqliteConnectOptions};
+use sqlx::{Connection, Row};
 use uuid::Uuid;
 
-/// An independently initialized temporary database and application handle.
-struct Fixture {
-    /// Keeps all SQLite files alive until pool shutdown.
-    directory: tempfile::TempDir,
-    /// Validated settings aligned with the Worker sample.
-    config: Config,
-    /// Actual single-connection application database.
-    database: Database,
-}
+#[path = "support/database.rs"]
+mod database_fixture;
+use database_fixture::Fixture;
 
-impl Fixture {
-    /// Initialize with exactly the deployment scripts before opening the application.
-    async fn new() -> Self {
-        let directory = tempfile::tempdir().unwrap();
-        let mut config =
-            Config::parse(include_str!("../../../config/backend.example.toml")).unwrap();
-        config.database.path = directory.path().join("acorn.db");
-        let mut connection = SqliteConnection::connect_with(
-            &SqliteConnectOptions::new()
-                .filename(&config.database.path)
-                .create_if_missing(true)
-                .foreign_keys(true),
-        )
+/// Each application connection receives the same session contract and shares a finite pool.
+#[tokio::test]
+async fn mysql_pool_sessions_and_acquisition() {
+    let fixture = Fixture::new().await;
+    let mut config = fixture.config.database.clone();
+    config.max_connections = 2;
+    config.acquire_timeout_ms = 500;
+    let pool = acorn_backend::database::connect_pool(&config)
         .await
         .unwrap();
-        for script in [
-            include_str!("../../../sql/001-initial-schema.sql"),
-            include_str!("../../../examples/seed-user.sql"),
-            include_str!("../../../sql/002-example-problem.sql"),
-        ] {
-            sqlx::raw_sql(script)
-                .execute(&mut connection)
-                .await
-                .unwrap();
-        }
-        connection.close().await.unwrap();
-        let database = Database::open(&config).await.unwrap();
-        Self {
-            directory,
-            config,
-            database,
-        }
+    let mut first = pool.acquire().await.unwrap();
+    let mut second = pool.acquire().await.unwrap();
+    let mut ids = Vec::new();
+    for connection in [&mut first, &mut second] {
+        let row = sqlx::query("SELECT CAST(CONNECTION_ID() AS SIGNED) AS connection_id, @@character_set_connection AS charset, @@collation_connection AS collation, @@transaction_isolation AS isolation_level, @@sql_mode AS sql_mode, CAST(@@innodb_lock_wait_timeout AS SIGNED) AS row_wait, CAST(@@lock_wait_timeout AS SIGNED) AS metadata_wait")
+            .fetch_one(&mut **connection).await.unwrap();
+        ids.push(row.try_get::<i64, _>("connection_id").unwrap());
+        assert_eq!(row.try_get::<String, _>("charset").unwrap(), "utf8mb4");
+        assert_eq!(
+            row.try_get::<String, _>("collation").unwrap(),
+            "utf8mb4_0900_bin"
+        );
+        assert_eq!(
+            row.try_get::<String, _>("isolation_level").unwrap(),
+            "READ-COMMITTED"
+        );
+        let modes = row.try_get::<String, _>("sql_mode").unwrap();
+        assert!(modes.split(',').any(|mode| mode == "STRICT_ALL_TABLES"));
+        assert!(
+            modes
+                .split(',')
+                .any(|mode| mode == "NO_ENGINE_SUBSTITUTION")
+        );
+        assert_eq!(
+            row.try_get::<i64, _>("row_wait").unwrap(),
+            i64::from(config.lock_wait_timeout_secs)
+        );
+        assert_eq!(
+            row.try_get::<i64, _>("metadata_wait").unwrap(),
+            i64::from(config.lock_wait_timeout_secs)
+        );
     }
-
-    /// External deployment connection for publishing fixtures and acquiring a SQLite lock.
-    async fn connection(&self) -> SqliteConnection {
-        SqliteConnection::connect_with(
-            &SqliteConnectOptions::new()
-                .filename(&self.config.database.path)
-                .foreign_keys(true),
-        )
-        .await
-        .unwrap()
-    }
-
-    /// Finish database work before removing the temporary files.
-    async fn close(self) {
-        self.database.close().await;
-        drop(self.directory);
-    }
+    assert_ne!(ids[0], ids[1]);
+    assert!(matches!(
+        pool.acquire().await,
+        Err(sqlx::Error::PoolTimedOut)
+    ));
+    drop(first);
+    let restored = pool.acquire().await.unwrap();
+    drop(restored);
+    drop(second);
+    pool.close().await;
+    fixture.close().await;
 }
 
 /// Create raw source without trimming or newline normalization.
@@ -142,7 +139,7 @@ async fn published_queries_and_fixed_version_creation() {
     assert_eq!(stored.info.state, SubmissionState::Queued);
 
     let mut connection = fixture.connection().await;
-    sqlx::raw_sql("BEGIN IMMEDIATE;
+    sqlx::raw_sql("START TRANSACTION;
         INSERT INTO problem_versions (problem_id, version_no, title, statement, comparison_mode, published_at_ms) SELECT problem_id, 2, 'Version two', statement, comparison_mode, published_at_ms + 1 FROM problem_versions WHERE problem_id = 1 AND version_no = 1;
         INSERT INTO problem_version_languages SELECT problem_id, 2, language_id, cpu_time_ms, wall_time_ms, 1 FROM problem_version_languages WHERE problem_id = 1 AND version_no = 1 AND language_id = 'c';
         INSERT INTO test_cases VALUES (1, 2, 1, X'00FF010A', X'FF000A');
@@ -259,7 +256,7 @@ async fn terminal_storage_and_immutability() {
     let fixture = Fixture::new().await;
     let config = &fixture.config;
     let database = &fixture.database;
-    let ce_bytes = vec![0, 255, 128, b'\n'];
+    let ce_bytes = [0, 255, 128, b'\n'].repeat(16_384);
     let ce = TerminalOutcome::judged(
         &proto::JudgeResult {
             verdict: proto::Verdict::CompileError as i32,
@@ -523,42 +520,61 @@ async fn invalid_task_data_and_foreign_keys() {
     fixture.close().await;
 }
 
-/// Existing-file, schema, user and finite-lock-wait requirements report actual errors.
+/// Existing-database, schema, user and finite-lock-wait requirements report actual errors.
 #[tokio::test]
 async fn startup_checks_and_finite_lock_wait() {
     let fixture = Fixture::new().await;
     let mut missing = fixture.config.clone();
-    missing.database.path = fixture.directory.path().join("missing.db");
+    missing.database.name = format!("{}missing", fixture.config.database.name);
     assert!(matches!(Database::open(&missing).await, Err(Error::Sql(_))));
-    assert!(!missing.database.path.exists());
-    missing.database.path = fixture.config.database.path.clone();
+    let mut connection = fixture.connection().await;
+    let absent: Option<String> = sqlx::query_scalar(
+        "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?",
+    )
+    .bind(&missing.database.name)
+    .fetch_optional(&mut connection)
+    .await
+    .unwrap();
+    assert!(absent.is_none());
+    missing.database.name = fixture.config.database.name.clone();
     missing.test_user.user_id = 999;
     assert!(matches!(
         Database::open(&missing).await,
         Err(Error::Data(_))
     ));
-    let mut connection = fixture.connection().await;
-    sqlx::query("PRAGMA user_version = 1")
+    sqlx::query("UPDATE schema_version SET version = 1 WHERE id = 1")
         .execute(&mut connection)
         .await
         .unwrap();
     let error = match Database::open(&fixture.config).await {
         Err(error) => error,
-        Ok(_) => panic!("Legacy byte-unit schema must be rejected"),
+        Ok(_) => panic!("Unexpected schema version must be rejected"),
     };
     assert!(
         error
             .to_string()
-            .contains("Expected schema version 3, got 1")
+            .contains("Expected schema version 4, got 1")
     );
-    sqlx::query("PRAGMA user_version = 3")
+    sqlx::query("DELETE FROM schema_version WHERE id = 1")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    assert!(matches!(
+        Database::open(&fixture.config).await,
+        Err(Error::Data(_))
+    ));
+    sqlx::query("INSERT INTO schema_version (id, version) VALUES (1, 4)")
         .execute(&mut connection)
         .await
         .unwrap();
     let mut fast = fixture.config.clone();
-    fast.database.busy_timeout_ms = 50;
+    fast.database.lock_wait_timeout_secs = 1;
     let database = Database::open(&fast).await.unwrap();
-    sqlx::query("BEGIN IMMEDIATE")
+    sqlx::raw_sql("START TRANSACTION")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("SELECT id FROM users WHERE id = 1 FOR UPDATE")
         .execute(&mut connection)
         .await
         .unwrap();
@@ -569,7 +585,7 @@ async fn startup_checks_and_finite_lock_wait() {
     .await
     .unwrap();
     assert!(matches!(result, Err(Error::Sql(_))));
-    sqlx::query("ROLLBACK")
+    sqlx::raw_sql("ROLLBACK")
         .execute(&mut connection)
         .await
         .unwrap();
@@ -591,17 +607,15 @@ async fn executable_serves_http_and_stops() {
     let fixture = Fixture::new().await;
     use std::{process::Stdio, time::Duration};
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-    let text = include_str!("../../../config/backend.example.toml")
-        .replace(
-            "\"acorn.db\"",
-            &format!("{:?}", fixture.config.database.path),
-        )
-        .replace("127.0.0.1:8080", "127.0.0.1:0");
+    let mut config = fixture.process_config();
+    config["http"]["listen"] = "127.0.0.1:0".into();
+    let text = toml::to_string(&config).unwrap();
     let path = fixture.directory.path().join("backend.toml");
     std::fs::write(&path, text).unwrap();
     let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_acorn-backend"))
         .arg("--config")
         .arg(path)
+        .env("MYSQL_PASSWORD", std::env::var("MYSQL_PASSWORD").unwrap())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
@@ -655,7 +669,7 @@ async fn executable_serves_http_and_stops() {
         .fetch_one(&mut connection)
         .await
         .unwrap()
-        .try_get("password_hash")
+        .try_get_unchecked("password_hash")
         .unwrap();
     assert!(hash.starts_with("$argon2id$v=19$m=19456,t=2,p=1$"));
     let parts: Vec<_> = hash.split('$').collect();

@@ -6,6 +6,8 @@
 
 实施进度：P06–P10 已完成配置、日志、SQLite 业务访问、开发用户预置、Scheduler、HTTP API，以及启动排队装入、旧在途中断、正常停机与故障退出。源码样例、真实单／双 Worker 联调和独立程序操作验收已完成，实际范围见[开发计划实施记录](04-development-plan.md#7-实施记录)。
 
+MySQL 的连接、配置、事务和故障合同以[迁移设计](09-mysql-migration-design.md)为依据；迁移实际过程和检查结果见[实施记录](d02-execution/09-mysql-migration-execution.md)。
+
 ## 1. 目标与范围
 
 后端是单个 Rust 进程，内含 HTTP API、Scheduler 和数据库访问模块。前端通过 HTTP JSON 查询题目、提交单文件源码并轮询结果；Scheduler 通过 unary gRPC 向独立 Worker 推送任务、轮询状态和确认结果。
@@ -29,12 +31,12 @@ LLM 增量在同一进程增加与 Scheduler 平行的 llm_review 模块，机�
 | 异步执行 | 一个 Tokio runtime，运行 HTTP、Scheduler、gRPC 和数据库异步调用 |
 | Worker 客户端 | [Tonic](https://docs.rs/tonic/latest/tonic/) / Prost，依据 `acorn.worker.v1` 协议生成 |
 | HTTP 中间件 | Tower 的 `ServiceBuilder` 组合中间件，tower-http 的 `TraceLayer` 记录请求日志 |
-| 数据库 | SQLite，使用 [SQLx](https://docs.rs/sqlx/latest/sqlx/) 的 `runtime-tokio`、`sqlite` 特性，直接维护 SQL |
+| 数据库 | MySQL 8.4／InnoDB，使用 [SQLx 0.8.6](https://docs.rs/sqlx/0.8.6/sqlx/) 的 `runtime-tokio`、`mysql` 特性，直接维护 SQL |
 | LLM 客户端（L02 已实现） | 复用 reqwest 0.13.5 异步客户端，固定 json_schema、无重试和重定向，Responses API 合同见[第 08 篇第 2 节](08-llm-code-review-design.md#2-api-兼容性核对) |
 | 配置 | TOML，启动时读取并验证 |
 | 日志 | tracing / tracing-subscriber，英文单行文本输出到 stderr |
 
-具体依赖版本在实施时统一选择和锁定。随 SQLite 驱动构建的 SQLite 必须满足初始 SQL 对 STRICT 表和 JSON 函数的要求。
+依赖版本由 Cargo.lock 锁定。数据库初始化会话及应用连接设置 utf8mb4_0900_bin 和严格模式，保留外键、CHECK 和原始字节存储；后端连接显式禁用 MySQL SSL。
 
 ```mermaid
 flowchart LR
@@ -51,7 +53,7 @@ flowchart LR
             Scheduler[队列与调度] --> Client[worker_client]
         end
     end
-    Database --> SQLite[(acorn.db)]
+    Database --> MySQL[(MySQL)]
     Client -->|提交、轮询、ACK| Worker[独立 Worker 进程]
     Review -->|Responses API| LLM[外部模型]
 ```
@@ -89,21 +91,21 @@ LLM 增量在创建及启动装入 JudgingTask 时携带固定版本的 review_m
 
 ## 4. 数据库访问与预置数据
 
-API 与 Scheduler 共享一个 SQLx `SqlitePool`，首版固定 `max_connections = 1`，数据库访问依次使用该连接。SQLx 异步调用直接运行在后端已有的 Tokio runtime 内；SQLite 的阻塞调用由 SQLx 内部后台线程处理，见[运行时支持](https://docs.rs/sqlx/latest/sqlx/#runtime-support)和[SQLite 连接说明](https://docs.rs/sqlx/latest/sqlx/sqlite/struct.SqliteConnection.html)。
+API、Scheduler、llm_review 与健康采集共享一个 SQLx `MySqlPool`，`database.max_connections` 默认 4。`database.acquire_timeout_ms` 限制整个连接取得过程，`lock_wait_timeout_secs` 分别设置会话 InnoDB 与元数据锁等待；查询时间不计为 acquire 阶段。SQLx MySQL 异步调用直接运行在已有 Tokio runtime 内，连接和等待范围见[迁移配置合同](09-mysql-migration-design.md#31-配置密码与连接池)。
 
-llm_review 复用该单连接池和 Tokio runtime。读取审查输入后先归还连接，再请求模型；模型网络等待不占用数据库连接、事务或 Scheduler 待接纳名额。
+llm_review 复用该共享池和 Tokio runtime。读取审查输入后先归还连接，再请求模型；模型网络等待不占用数据库连接、事务或 Scheduler 待接纳名额。
 
-`Database::probe_read()` 复用该连接池和 `Database::observe` 的只读错误边界，执行 `SELECT id FROM users LIMIT 1` 的可选行查询，空表也成功。采集预算覆盖连接池等待及 SQL；超时不承诺底层 SQLite 同时停止，仍受既有有限 busy timeout 约束。普通读取错误只降低该次观测，实际返回的严重存储错误仍通知既有故障退出流程。
+`Database::probe_read()` 复用该连接池和 `Database::observe` 的只读错误边界，执行 `SELECT id FROM users LIMIT 1` 的可选行查询，空表也成功。采集预算覆盖连接池等待及 SQL，超时表示在预算内没有取得读取结果，不承诺服务端在同一时刻结束工作。普通读取错误只降低该次观测，实际返回的严重存储错误仍通知既有故障退出流程。
 
-一个数据库操作使用一个连接，完成一次查询或一个短事务后归还；占用连接和事务均不能跨越 gRPC、模型 HTTP 调用或等待内存队列交接。创建提交仍使用 `BEGIN IMMEDIATE`；LLM 的结构和审查写入增量遵守[数据库设计](02-database-design.md)。连接显式启用 `foreign_keys` 并配置有限 busy timeout。使用参数绑定的普通 SQL 查询和类型映射。
+一个数据库操作使用一个连接，完成一次查询或一个短事务后归还；占用连接和事务均不能跨越 gRPC、模型 HTTP 调用或等待内存队列交接。应用每条新连接设置 READ COMMITTED、严格 SQL 模式及有限锁等待，SQL 使用参数绑定。MySQL 的同键竞争与审查行锁按[迁移事务合同](09-mysql-migration-design.md#5-运行期提交和审查事务)由 M03 接通与验证。
 
-服务使用已初始化的 `acorn.db`，启动时检查结构版本及配置引用，不自动修改已有结构或执行升级。
+服务连接 TOML 指定的端点、库名及用户，以进程环境变量 MYSQL_PASSWORD 提供密码，不自动加载 .env。启动只读取 schema_version 中 id=1 的版本 4，并检查配置用户存在；缺少密码、缺少版本行、版本不符或用户不存在均拒绝启动，已建立的池在检查失败后关闭。应用不建库、建表或自动升级。
 
 部署预置的测试用户必须存在，题目按数据库设计在事务内发布，包含至少一个用例和允许语言的正值预算。测试用户的密码哈希字段保留，当前后端不执行密码验证或生成登录凭据。
 
 后端仍验证语言、用例数量、数据大小和限额：源码按 UTF-8 编码后的长度计量；输入、期望输出及总载荷按原始字节计量。HTTP 请求体、gRPC 消息和原始任务载荷各有独立上限。
 
-内存限额从 SQLite `memory_kib`、配置 `request.max_run_memory_kib` 到 RPC `RunLimits.memory_kib` 统一使用 KiB，不进行字节除法。当前应用与完整初始 SQL 已由 L01 一同切换为结构版本 3，仅接受该版本；版本 2 → 3 由部署端使用单独交付的 SQL 离线升级，见[升级合同](08-llm-code-review-design.md#53-数据库升级职责)。后端与 Worker 需使用同一版 KiB 协议，LLM 增量不修改该协议；实际资源统计和结果字节字段的单位保持原契约。
+内存限额从 MySQL `memory_kib`、配置 `request.max_run_memory_kib` 到 RPC `RunLimits.memory_kib` 统一使用 KiB，不进行字节除法。当前初始化结构为版本 4，采用空库全新部署；此前 SQLite 版本 2 → 3 的记录仅保留原交付范围。后端与 Worker 使用同一版 KiB 协议，LLM 和本次数据库迁移不修改该协议；实际资源统计和结果字节字段的单位保持原契约。
 
 同一版本的测试数据在一次任务装配中按 `case_index` 读取。正常新提交由 API 将内存中的完整任务直接交给 Scheduler，Scheduler 不再次读源码或题库。启动装入排队任务时才由 Scheduler 读取其固定版本数据。
 
@@ -111,7 +113,7 @@ P06 的 [`Database`](../crates/backend/src/database/mod.rs) 提供题目列表�
 
 终态先由 [`TerminalOutcome`](../crates/backend/src/submissions.rs) 按已知用例数和原始字节预算校验结果形状，再执行单条条件 UPDATE，同时原子提交状态、独立 verdict、JSON 详情和终态时间。P07 的 Worker 客户端校验完整响应的 Job ID、运行状态、阶段及进度与终态消息对应关系。数据库错误保留 SQLx 原始原因，业务查重与校验错误使用独立类型；P09 在数据库操作边界区分普通只读、关键写入与严重存储故障，通过共享通知保留首个致命错误并交给入口监督，通知不依赖 HTTP 等待者的生命周期。
 
-配置示例见 [backend.example.toml](../config/backend.example.toml)。`scheduler.workers` 使用 Tonic endpoint URI；数据库路径相对于进程工作目录。HTTP 体积按源码最坏 JSON 转义开销预留，gRPC 门限按原始任务／结果另加协议空间校验，Base64 JSON 长度不复用二进制消息门限。入口完成配置、结构版本、预置用户检查和启动任务处理后，启动 Scheduler、共享健康采集及 HTTP 服务，不要求 Worker 启动时即可连接；新任务的实际接纳和失联仍按第 7 节处理。
+配置示例见 [backend.example.toml](../config/backend.example.toml)。`scheduler.workers` 使用 Tonic endpoint URI；MySQL endpoint 使用 host:port，IPv6 为 [address]:port，配置和日志不包含数据库密码。HTTP 体积按源码最坏 JSON 转义开销预留，gRPC 门限按原始任务／结果另加协议空间校验，Base64 JSON 长度不复用二进制消息门限。入口完成配置、结构版本、预置用户检查和启动任务处理后，启动 Scheduler、共享健康采集及 HTTP 服务，不要求 Worker 启动时即可连接；新任务的实际接纳和失联仍按第 7 节处理。
 
 ## 5. HTTP 接口
 
@@ -309,7 +311,7 @@ LLM 增量按固定版本 review_mode 与已校验机器结果判断门槛，在
 ### 8.1 启动
 
 1. 加载并校验 TOML，初始化日志；检查至少一个且不重复的 Worker 地址、正值门限和配置测试用户。
-2. 打开已初始化的数据库，检查结构版本，启用外键和数据库连接配置。
+2. 读取进程数据库密码，连接已初始化的 MySQL 数据库，设置每条新连接并检查结构版本及配置用户。
 3. 将 `dispatching` 和 `running` 记录保存为 `failed / SchedulerInterrupted`，已有终态不变。
 4. 检查现有 `queued` 数量不超过待接纳上限，按 `created_at_ms, id` 装入完整任务；超限报错退出，由部署端调整上限。
 5. 创建 Worker 客户端句柄，启动 Scheduler、共享健康采集和 HTTP 服务；全部启动检查成功后才接纳 HTTP 提交。健康缓存初始可为 `unknown`，无需等待首轮探测成功。
@@ -332,7 +334,7 @@ LLM 增量收到停止信号即关闭手动和自动审查接纳，取消未完�
 
 ### 8.3 数据库及后台故障
 
-连接配置有限 `busy_timeout_ms`，对 SQLite 支持的锁竞争先有限等待。运行期普通只读操作失败时，记录英文错误，当前 HTTP 操作返回 `500 InternalError`，后端继续运行。此规则覆盖题目、提交历史和结果查询，以及创建写事务开始前的幂等查询；例如查询锁等待耗尽或连接池等待超时。这类失败可能随锁释放或负载回落而恢复，单次失败不作为进程退出依据。健康读取探测的普通失败只更新缓存，健康 HTTP 读取该缓存仍返回 `200`。
+连接取得与行锁／元数据锁分别配置有限等待。运行期普通只读操作失败时，记录英文错误，当前 HTTP 操作返回 `500 InternalError`，后端继续运行。此规则覆盖题目、提交历史和结果查询，以及创建写事务开始前的幂等查询；例如池等待、普通网络断连和服务端查询错误。这类失败可能随锁释放或负载回落而恢复，单次失败不作为进程退出依据。健康读取探测的普通失败只更新缓存，健康 HTTP 读取该缓存仍返回 `200`。
 
 关键写入包括创建提交的写事务开始、执行和提交，业务状态转换、终态保存，以及启动时旧在途记录的中断写入。上述操作发生数据库错误，经过适用的有限锁等待仍无法完成时，记录英文错误并触发故障退出；未成功保存的结果不 ACK，也不能声称已将任务保存为失败。预期的查重与业务校验错误正常返回，不触发进程退出。
 
@@ -340,7 +342,7 @@ LLM 增量的审查接纳、完成和中断写入同属关键数据库写入；�
 
 明确的磁盘满、I/O 故障和数据库损坏等严重存储故障，无论发生在读取还是写入时，均触发故障退出，不适用普通只读失败的继续运行规则。
 
-有限等待是 SQLite 的连接机制，不是重新执行判题。其行为及与其他错误的区别见 [busy timeout](https://www.sqlite.org/c3ref/busy_timeout.html)与[结果码说明](https://www.sqlite.org/rescode.html)。
+MySQL 错误按驱动提供的数值编号分类；普通网络 I/O 不代表服务端磁盘损坏。初始严重存储映射为 1114、1712、1810、1811、1812、1817，锁等待 1205、死锁 1213 和 COMMIT 结果不明按关键写入处理，不自动重试。事务结束及具体故障验收以[迁移错误合同](09-mysql-migration-design.md#6-错误与健康观测)为准。
 
 Scheduler 后台任务意外退出交给程序入口记录错误并触发故障退出，避免 HTTP 继续接纳而没有实际调度。SQLx 操作错误按上述操作类型和故障性质处理，不将所有 SQLx 错误统一视为致命故障。健康采集任务本身异常结束时，入口记录错误而继续判题服务，不自动重建任务，已有观测随后按单调年龄投影为 `stale`；严重数据库故障仍遵守既有退出规则。
 
@@ -355,7 +357,7 @@ Scheduler 后台任务意外退出交给程序入口记录错误并触发故障�
 | 类别 | 配置内容 |
 | --- | --- |
 | HTTP | 监听地址、请求体上限、列表默认及最大页长 |
-| 数据库 | `acorn.db` 路径、有限 `busy_timeout_ms` |
+| 数据库 | 端点、库名、用户名、连接池上限、连接取得与锁等待预算；密码从进程 MYSQL_PASSWORD 读取 |
 | 测试用户 | 已预置的 `user_id` |
 | Scheduler | 待接纳上限、Worker 地址列表、轮询间隔、拒绝后再次尝试间隔 |
 | gRPC | 提交、查询和 ACK deadline，发送与接收消息上限 |

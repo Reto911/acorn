@@ -1,6 +1,6 @@
 # MySQL 迁移设计与执行方案
 
-状态：v2，已获用户批准，M01 已完成；结构和预置 SQL 已转换并通过独立空库的 SQL 验证。D01–D04、密码供给方式及 READ COMMITTED 已确认，当前无待决设计事项。当前后端程序仍使用 SQLite 版本 3，M02–M04 接通后仅使用 MySQL，通过新库初始化完成整体重新部署。[审核记录](d01-review/09-mysql-migration-review.md)与[实施记录](d02-execution/09-mysql-migration-execution.md)单独维护。
+版本：v2。本文定义 MySQL 迁移的合同、设计依据、实施任务和验收要求；审核讨论见[审核记录](d01-review/09-mysql-migration-review.md)，实际过程、完成状态和检查结果见[实施记录](d02-execution/09-mysql-migration-execution.md)。
 
 ## 1. 目标与审核范围
 
@@ -15,26 +15,26 @@
 
 结构版本从 4 开始，当前不考虑 SSL。已确认的连接密码供给方式见第 3.1 节。具体任务使用第 10 节的待办清单跟踪；本次没有增加账户功能、题目管理 API、自动数据库升级或通用恢复框架。
 
-## 2. 当前实现与改动位置
+## 2. 改动范围
 
-当前后端仍使用 SQLite 结构版本 3；M01 已将初始 SQL 转为 MySQL 结构版本 4，包含 `users`、`problems`、`problem_versions`、`problem_version_languages`、`test_cases`、`submissions` 六张业务表及 schema_version 表。迁移期间参考[数据库设计](02-database-design.md)、[后端设计](03-backend-design.md)和 [LLM 审查设计](08-llm-code-review-design.md)的业务合同；实现变更时同步相关现行设计。
+迁移覆盖六张业务表 users、problems、problem_versions、problem_version_languages、test_cases、submissions，以及保存版本的 schema_version 表。业务合同以[数据库设计](02-database-design.md)、[后端设计](03-backend-design.md)和 [LLM 审查设计](08-llm-code-review-design.md)为依据；跨模块合同变更时同步实现、调用方和文档。
 
-| 位置 | 当前依赖 | 迁移内容 |
-| --- | --- | --- |
-| [workspace 依赖](../Cargo.toml) | SQLx 0.8.6 的 `sqlite` 特性 | 保留版本，正式驱动改为 `mysql`，移除 SQLite 特性并更新锁文件 |
-| [数据库模块](../crates/backend/src/database/mod.rs)及其三个子模块 | 单连接 SqlitePool、SQLite 行／连接类型、PRAGMA、短写事务 | MySQL 连接池、类型解码、版本读取、事务和错误分类 |
-| [后端配置](../crates/backend/src/config.rs)和[示例](../config/backend.example.toml) | 文件路径、busy_timeout_ms | 端点、库名、用户、密码供给、连接池和有限锁等待 |
-| [初始结构](../sql/001-initial-schema.sql)、[示例题](../sql/002-example-problem.sql)、[开发用户](../examples/seed-user.sql) | 已转换为 MySQL DDL、时间函数及二进制字面量，独立库 SQL 验证通过 | 保留现有预置内容，初始化结构版本 4 |
-| [数据库测试](../crates/backend/tests/database.rs)、[workflow](../crates/backend/tests/workflow.rs)及其夹具 | 临时文件库、SQLite 锁和触发器 | 独立 MySQL 测试库、对应事务及受控错误 |
-| [程序入口](../crates/backend/src/main.rs)、[健康采集](../crates/backend/src/health.rs) | 共享句柄及现有失败通知 | 保留服务生命周期，接入新的连接和故障分类 |
+| 位置 | 迁移职责 |
+| --- | --- |
+| [workspace 依赖](../Cargo.toml) | 使用 SQLx 的 mysql 特性，锁定依赖并移除 SQLite 运行支持 |
+| [数据库模块](../crates/backend/src/database/mod.rs)及其三个子模块 | MySQL 连接池、类型解码、结构版本检查、短事务、幂等竞争及故障分类 |
+| [后端配置](../crates/backend/src/config.rs)和[示例](../config/backend.example.toml) | 端点、库名、用户、进程密码、连接池及有限等待，替换文件路径与 busy_timeout_ms |
+| [初始结构](../sql/001-initial-schema.sql)、[示例题](../sql/002-example-problem.sql)、[开发用户](../examples/seed-user.sql) | MySQL 结构版本 4、完整约束及原有预置内容 |
+| [数据库测试](../crates/backend/tests/database.rs)、[workflow](../crates/backend/tests/workflow.rs)及其夹具 | 独立测试库、正式 SQL 初始化、进程配置，以及 MySQL 锁／拒写注入 |
+| [程序入口](../crates/backend/src/main.rs)、[健康采集](../crates/backend/src/health.rs) | 共用数据库句柄及失败通知，保持服务生命周期和观测合同 |
 
-索引引用的 `sql/README.md` 当前缺失，M07 补齐与实际实现一致的初始化和使用说明。旧阶段的 SQLite 验收仍按其原范围保留，不作为 MySQL 验收结果。
+SQL README 的初始化和使用说明由 M07 维护；历史 SQLite 验收不代替 MySQL 验收。
 
 ## 3. 连接、配置与启动
 
 ### 3.1 配置、密码与连接池
 
-已确认使用以下后端配置，将端点、库名和用户名分开填写；密码由进程环境变量 `MYSQL_PASSWORD` 提供。此配置接口在 M02 实现前不能用于当前程序。
+后端使用以下配置，将端点、库名和用户名分开填写；密码由进程环境变量 `MYSQL_PASSWORD` 提供。
 
 ```toml
 [database]
@@ -46,7 +46,7 @@ acquire_timeout_ms = 5_000
 lock_wait_timeout_secs = 3
 ```
 
-- `endpoint` 为 host:port，IPv6 使用 `[address]:port`；name 和 username 非空。使用 MySqlConnectOptions 的字段接口配置，密码不拼接进 URL。
+- `endpoint` 为 host:port，IPv6 使用 `[address]:port`；name 和 username 非空；连接数及取得预算为正，锁等待范围为 1–31,536,000 秒。使用 MySqlConnectOptions 的字段接口配置，密码不拼接进 URL。
 - 正式后端读取 MYSQL_PASSWORD，缺少时在启动阶段明确报错；配置对象 Debug 和日志不输出密码，也不输出包含凭据的完整连接选项。
 - `.env` 中的 MYSQL_ENDPOINT、MYSQL_DATABASE、MYSQL_USERNAME 分别对应上述非秘密配置，MYSQL_PASSWORD 对应进程密码变量。开发阶段可由临时入口按需读取用户提供的 .env，构造配置并向后端／测试子进程传入密码；正式程序不自动加载 .env，不新增 dotenv 依赖。正式部署由启动环境提供该变量。
 - 当前显式使用 `MySqlSslMode::Disabled`，不增加 SSL 配置项或 TLS 接入步骤。现有 LLM 客户端的 TLS 不受影响。
@@ -123,7 +123,7 @@ LONGTEXT 也覆盖终态 Base64 JSON 和固定 32 KiB 的审查详情。当前�
 3. 使用 ALTER TABLE 添加 problems 到版本表的联合外键。
 4. 创建索引，最后写入结构版本行。
 
-保留机器终态字段关系、审查字段关系、枚举和 JSON 对象检查。M01 已在实际 MySQL 8.4.11 上验证正值 CHECK 与 RESTRICT 外键组合；后续出现影响合同的兼容性问题时修订设计，不直接删除业务约束。
+保留机器终态字段关系、审查字段关系、枚举和 JSON 对象检查。正值 CHECK 与 RESTRICT 外键需要共同满足；出现影响合同的兼容性问题时修订设计，不直接删除业务约束。
 
 保留用户历史、版本语言关联和 verdict 历史索引；排队索引改为 `(state, created_at_ms, id)`，覆盖启动查询。联合主键已有的关联前缀不重复建索引，不预建所有筛选组合。
 
@@ -230,7 +230,7 @@ COMMIT 结果不明的例子：后端发出 COMMIT，MySQL 已成功提交，但
 
 整体重新部署的初始化流程：准备空 MySQL 数据库 → 执行初始结构 → 执行开发用户 → 执行示例题 → 提供配置与密码变量 → 启动后端及 Worker、前端 → 完成一份公开样例提交与结果查询。SQL 脚本不清空已有业务库，目标库需先为空。
 
-以下命令针对已转换的 MySQL SQL，目标必须为独立空库；客户端默认在首个错误时停止，不使用 `--force`。先由开发／部署端准备数据库及具备所需 DDL、DML 权限的初始化账户。账户文件提供连接端点、用户和密码；后端使用自己的配置和进程密码变量。M02–M04 完成前，当前后端仍不能连接此库，不能使用 SQLite CLI 执行这些脚本。
+以下命令针对 MySQL SQL，初始化目标必须为空库；客户端默认在首个错误时停止，不使用 `--force`。先由开发／部署端准备数据库及具备所需 DDL、DML 权限的初始化账户。账户文件提供连接端点、用户和密码；后端使用自己的配置和进程密码变量。运行闭环须满足 M01–M04 的完成条件。
 
 ```sh
 mysql --defaults-extra-file=/path/to/mysql-client.cnf --ssl-mode=DISABLED --database=appdb < sql/001-initial-schema.sql
@@ -240,15 +240,15 @@ mysql --defaults-extra-file=/path/to/mysql-client.cnf --ssl-mode=DISABLED --data
 
 ## 10. 可执行任务与待办清单
 
-M01–M04 构成 MySQL 运行闭环的同一代码交付批次，各步随合同变化同步文档。任务编号沿用现有编号；实际执行和检查结果写入[实施记录](d02-execution/09-mysql-migration-execution.md)，只有完成条件实际满足才勾选。当前 M01 已完成，其他任务未开始。
+M01–M04 构成 MySQL 运行闭环的同一代码交付批次，各步随合同变化同步文档。任务编号沿用现有编号；实际执行和检查结果写入[实施记录](d02-execution/09-mysql-migration-execution.md)，设计仅定义工作项和完成条件，任务完成状态在实施记录中维护。
 
 ### 10.1 M01：MySQL 结构和预置 SQL
 
 依赖：D01／D03 及字段差异 D04 已确认。产物为三个 MySQL SQL 脚本及第 02 篇相关结构合同。
 
-- [x] 将初始结构改为 InnoDB、版本 4，落实字段、外键、CHECK 和索引。
-- [x] 直接转换开发用户与示例题 SQL，保留题面、限额及 104 个用例的原始内容。
-- [x] 在独立空 MySQL 库执行初始化，读取预置数据并完成 V01 的结构／预置部分；同步初始化说明。
+- 将初始结构改为 InnoDB、版本 4，落实字段、外键、CHECK 和索引。
+- 直接转换开发用户与示例题 SQL，保留题面、限额及 104 个用例的原始内容。
+- 在独立空 MySQL 库执行初始化，读取预置数据并完成 V01 的结构／预置部分；同步初始化说明。
 
 完成条件：DDL 和三个脚本可在目标版本执行，约束与预置内容符合第 4／7 节；不以本步结果声称后端已接通。
 
@@ -256,21 +256,25 @@ M01–M04 构成 MySQL 运行闭环的同一代码交付批次，各步随合同
 
 依赖：M01；TOML 非秘密配置与进程密码变量方式已确认。产物为 Cargo／锁文件、配置、数据库四个模块和 MySQL 测试夹具。
 
-- [ ] 将 SQLx 驱动切换到 MySQL，移除 SQLite 运行依赖和相关入口。
-- [ ] 实现端点／库名／用户名配置、进程密码读取、禁用 SSL、连接池初始化及版本检查，隐藏凭据。
-- [ ] 修改数据库连接／行类型和参数解码；将测试夹具与子进程配置改为独立 MySQL 库，使用专用测试 TOML 及进程密码。
-- [ ] 同步第 02／03 篇连接合同、backend README 和根中英文 README 的相关配置与命令。
+- 将 SQLx 驱动切换到 MySQL，移除 SQLite 运行依赖和相关入口。
+- 实现端点／库名／用户名配置、进程密码读取、禁用 SSL、连接池初始化及版本检查，隐藏凭据。
+- 修改数据库连接／行类型和参数解码；将测试夹具与子进程配置改为独立 MySQL 库，使用专用测试 TOML 及进程密码。
+- 同步第 02／03 篇连接合同、backend README 和根中英文 README 的相关配置与命令。
 
 完成条件：受影响目标可编译，能够通过共同连接入口读写新库；正式后端与测试均不依赖 SQLite。
+
+实施顺序为配置与驱动 → 共同连接入口与会话设置 → 行／连接类型及参数解码 → 独立库与子进程夹具 → 同步文档与基础检查。基础检查覆盖至少两条应用连接的会话设置、池预算、版本／用户启动校验，以及文本、可空值、UUID、原始字节和 JSON 往返。
+
+M02 负责连接和类型适配；1062 竞争读取、审查行锁、条件完成和数值错误分类的完整实现归 M03，锁注入和拒写触发器适配归 M04。基础读写检查不代替 V02–V04 的并发和故障验收，真实 Worker／GUI 验收归 M06。
 
 ### 10.3 M03：事务和故障边界
 
 依赖：M02；沿用已确认的原业务合同及普通只读网络故障分类 D04；隔离等级使用第 3.1 节已确认的 READ COMMITTED。
 
-- [ ] 共用原有提交的比较／装配流程，加入限定的 1062 竞争读取，实现审查行锁接纳和短事务条件完成。
-- [ ] 保留终态／自动审查初态原子保存、保存后 ACK 和独立短操作生命周期，接入 MySQL 数值错误分类。
-- [ ] 在实际多连接下复用并发创建、手动审查及迟到结果检查，完成 V02–V04 的对应实现检查。
-- [ ] 同步第 02／03 篇事务和故障合同、第 07 篇读取失败含义及第 08 篇审查存储说明。
+- 共用原有提交的比较／装配流程，加入限定的 1062 竞争读取，实现审查行锁接纳和短事务条件完成。
+- 保留终态／自动审查初态原子保存、保存后 ACK 和独立短操作生命周期，接入 MySQL 数值错误分类。
+- 在实际多连接下复用并发创建、手动审查及迟到结果检查，完成 V02–V04 的对应实现检查。
+- 同步第 02／03 篇事务和故障合同、第 07 篇读取失败含义及第 08 篇审查存储说明。
 
 完成条件：第 5 节业务语义保留，第 6 节分类准确；正常幂等竞争不退出，关键写入失败不伪造保存或 ACK。
 
@@ -278,10 +282,10 @@ M01–M04 构成 MySQL 运行闭环的同一代码交付批次，各步随合同
 
 依赖：M02，与 M03 配合。产物为可执行的 database／workflow／配置和进程测试。
 
-- [ ] 将 SQLite 锁注入改为 MySQL 实际机制：目标行锁验证关键写入等待；独立控制连接的 LOCK TABLES users WRITE 及会话 lock_wait_timeout 验证普通读取失败和释放后的恢复，不假设普通 SELECT 被行写锁阻塞。
-- [ ] 将现有终态／审查拒写触发器适配为 MySQL SIGNAL，保留原业务断言；完成 V01–V04 的相关检查。
-- [ ] 按既有生命周期停止服务、关闭池并删除本例测试库；失败残留由开发端处理，不增加清库扫描。
-- [ ] 完成第 11 节的格式、编译、必需 Clippy 和相关测试，实际结果写入实施记录。
+- 将 SQLite 锁注入改为 MySQL 实际机制：目标行锁验证关键写入等待；独立控制连接的 LOCK TABLES users WRITE 及会话 lock_wait_timeout 验证普通读取失败和释放后的恢复，不假设普通 SELECT 被行写锁阻塞。
+- 将现有终态／审查拒写触发器适配为 MySQL SIGNAL，保留原业务断言；完成 V01–V04 的相关检查。
+- 按既有生命周期停止服务、关闭池并删除本例测试库；失败残留由开发端处理，不增加清库扫描。
+- 完成第 11 节的格式、编译、必需 Clippy 和相关测试，实际结果写入实施记录。
 
 完成条件：受影响测试和 Rust 必需检查通过，未执行的实际环境检查明确保留，不扩展为故障／状态排列测试。
 
@@ -289,8 +293,8 @@ M01–M04 构成 MySQL 运行闭环的同一代码交付批次，各步随合同
 
 依赖：M03、M04。使用用户已准备的 MySQL 服务及独立验证库，按需使用获准的开发凭据。
 
-- [ ] 按第 7 节从空库执行初始化，启动正式后端与真实 Worker，完成既有单 Worker 真实 HTTP 验收一次。
-- [ ] 用受控 Responses 检查一条审查的保存和 GUI 展示，核对结果及历史页面；记录 V05 实际范围。
+- 按第 7 节从空库执行初始化，启动正式后端与真实 Worker，完成既有单 Worker 真实 HTTP 验收一次。
+- 用受控 Responses 检查一条审查的保存和 GUI 展示，核对结果及历史页面；记录 V05 实际范围。
 
 完成条件：MySQL 上真实判题闭环和受控审查展示通过。应用库 appdb 的实际初始化属于整体重新部署操作，不在设计审核阶段执行。
 
@@ -298,9 +302,9 @@ M01–M04 构成 MySQL 运行闭环的同一代码交付批次，各步随合同
 
 依赖：M06。
 
-- [ ] 核查第 02、03、07、08 篇及文档索引已按实现同步；补齐 SQL README。
-- [ ] 同步 backend、根英文／简体中文 README 的功能、初始化、配置和命令；web README 仅更新受影响内容。
-- [ ] 检查文档格式、编号、链接及示例语法，将实际结果和剩余工作写入独立实施记录。
+- 核查第 02、03、07、08 篇及文档索引已按实现同步；补齐 SQL README。
+- 同步 backend、根英文／简体中文 README 的功能、初始化、配置和命令；web README 仅更新受影响内容。
+- 检查文档格式、编号、链接及示例语法，将实际结果和剩余工作写入独立实施记录。
 
 完成条件：按说明可以全新初始化和启动，当前功能与已验证范围表述准确，正式实现不再提供 SQLite 支持。
 
@@ -322,7 +326,7 @@ V05 复用既有 C/Python AC、C CE、Python WA、C TLE 路线；没有相关新
 
 ### 11.2 命令与环境
 
-以下使用项目已有检查命令；专用测试 TOML 接口 ACORN_TEST_DATABASE_CONFIG 及 MYSQL_PASSWORD 密码读取由 M02 实现后才可使用，当前不运行这些代码检查。
+测试使用 ACORN_TEST_DATABASE_CONFIG 指定专用 TOML，以进程 MYSQL_PASSWORD 提供密码，正式测试不自动读取 .env。命令实际执行范围和受限项写入实施记录。
 
 ```sh
 cargo fmt --all -- --check
@@ -335,13 +339,13 @@ ACORN_TEST_DATABASE_CONFIG=/path/to/mysql-test.toml ACORN_ISOLATE_BOX_ID=204 \
   cargo test -p acorn-backend --locked --test workflow real_http_worker_acceptance -- --ignored --nocapture
 ```
 
-测试 TOML 提供端点、账户及连接预算，测试夹具创建独立库，不直接使用 appdb 做测试。测试文件串行调度控制库及连接数量，V02 在单例内部并发并实际使用多个连接。正式后端不需要测试账户的建库权限。
+测试 TOML 示例见 [backend-test.example.toml](../config/backend-test.example.toml)，提供端点、账户及连接预算；name 为 1–32 位 ASCII 字母数字前缀，每例追加 UUID 生成独立库名。开发账户须有此前缀下的建库、结构初始化、读写和删库权限；M04 另需 TRIGGER 和 LOCK TABLES。夹具每例执行三个正式 SQL，子进程配置仅包含非秘密字段；收尾先停止服务、关闭连接及池，再删除本例库，不直接使用 appdb 做测试。测试文件串行调度控制库及连接数量，V02 在单例内部并发并实际使用多个连接。正式后端不需要测试账户的建库权限。
 
 前端源码不变时，仅为 V05 执行已有 pnpm build 并检查相关页面。真实验收另需现有 Isolate、配额和专用 box 环境；环境缺失时记录未执行。各批 Rust 变更按仓库要求完成必需检查；检查已通过且没有新变化或问题时不重复执行。
 
 ## 12. 审核与实施记录入口
 
-- [09 审核记录](d01-review/09-mysql-migration-review.md)：已确认决策、问题解释、差异和审核结论；当前无待决设计事项。
-- [09 实施记录](d02-execution/09-mysql-migration-execution.md)：实际完成的工作、检查结果和剩余事项；当前 M01 已完成，M02–M04、M06、M07 未开始。
+- [09 审核记录](d01-review/09-mysql-migration-review.md)：已确认决策、问题解释、差异和审核结论。
+- [09 实施记录](d02-execution/09-mysql-migration-execution.md)：实际完成的工作、检查结果和剩余事项。
 
 设计正文维护当前合同和待办步骤，审核讨论与实际执行结果分别存放，不将未执行的验证写成通过。

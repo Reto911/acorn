@@ -1,6 +1,6 @@
 //! Latest review reads, conditional persistence and explicit startup interruption.
 
-use sqlx::{Row, sqlite::SqliteRow};
+use sqlx::{Row, mysql::MySqlRow};
 
 use crate::{
     llm_review::{ReviewAttempt, ReviewDetails, ReviewErrorCode, ReviewStatus},
@@ -50,10 +50,10 @@ impl Database {
                 let source: Vec<u8> = row.try_get("source")?;
                 Ok(ReviewInput {
                     source: String::from_utf8(source).map_err(|error| Error::Data(error.into()))?,
-                    language_id: row.try_get("language_id")?,
-                    title: row.try_get("title")?,
-                    statement: row.try_get("statement")?,
-                    verdict: Verdict::parse(&row.try_get::<String, _>("verdict")?)?,
+                    language_id: row.try_get_unchecked("language_id")?,
+                    title: row.try_get_unchecked("title")?,
+                    statement: row.try_get_unchecked("statement")?,
+                    verdict: Verdict::parse(&row.try_get_unchecked::<String, _>("verdict")?)?,
                 })
             }).transpose()
         }).await
@@ -89,12 +89,12 @@ impl Database {
                 return Err(Error::InvalidReview("Admission requires a fresh pending review"));
             }
             let json = review.encode(0)?;
-            let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+            let mut transaction = self.pool.begin().await?;
             let row = sqlx::query("SELECT state, review_status, review_id, review_details_json FROM submissions WHERE id = ?")
                 .bind(id).fetch_optional(&mut *transaction).await?;
             let admission = match row {
                 None => ReviewAdmission::NotFound,
-                Some(row) if row.try_get::<String, _>("state")? != "finished" => ReviewAdmission::NotFinished,
+                Some(row) if row.try_get_unchecked::<String, _>("state")? != "finished" => ReviewAdmission::NotFinished,
                 Some(row) => {
                     let current = stored_review(&row)?;
                     if let Some(pending) = current.as_ref().filter(|attempt| attempt.status == ReviewStatus::Pending) {
@@ -121,7 +121,7 @@ impl Database {
             if !matches!(review.status, ReviewStatus::Pass | ReviewStatus::Doubtful | ReviewStatus::Failed) {
                 return Err(Error::InvalidReview("Completion requires a terminal review"));
             }
-            let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+            let mut transaction = self.pool.begin().await?;
             let source: Option<Vec<u8>> = sqlx::query_scalar("SELECT source FROM submissions WHERE id = ? AND review_id = ? AND review_status = 'PENDING'")
                 .bind(id).bind(&review.id).fetch_optional(&mut *transaction).await?;
             let Some(source) = source else {
@@ -143,7 +143,7 @@ impl Database {
     /// The program entry point invokes this before admission; it never re-enqueues work.
     pub async fn interrupt_pending_reviews(&self) -> Result<u64> {
         self.observe("Interrupt old pending reviews", true, async {
-            let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+            let mut transaction = self.pool.begin().await?;
             let rows = sqlx::query("SELECT id, review_status, review_id, review_details_json FROM submissions WHERE review_status = 'PENDING'")
                 .fetch_all(&mut *transaction).await?;
             let completed_at_ms = now_ms()?;
@@ -152,7 +152,7 @@ impl Database {
                 let review = stored_review(&row)?.ok_or(Error::InvalidReview("Pending review is missing"))?
                     .failed(completed_at_ms, ReviewErrorCode::ReviewInterrupted, None, None, None)?;
                 count += sqlx::query("UPDATE submissions SET review_status = 'FAILED', review_details_json = ? WHERE id = ? AND review_id = ? AND review_status = 'PENDING'")
-                    .bind(review.encode(0)?).bind(row.try_get::<String, _>("id")?).bind(&review.id)
+                    .bind(review.encode(0)?).bind(row.try_get_unchecked::<String, _>("id")?).bind(&review.id)
                     .execute(&mut *transaction).await?.rows_affected();
             }
             transaction.commit().await?;
@@ -162,16 +162,16 @@ impl Database {
 }
 
 /// Parse the latest attempt separately from machine terminal details.
-pub(super) fn stored_review(row: &SqliteRow) -> Result<Option<ReviewAttempt>> {
-    let status = ReviewStatus::parse(&row.try_get::<String, _>("review_status")?)?;
+pub(super) fn stored_review(row: &MySqlRow) -> Result<Option<ReviewAttempt>> {
+    let status = ReviewStatus::parse(&row.try_get_unchecked::<String, _>("review_status")?)?;
     if status == ReviewStatus::Disabled {
         return Ok(None);
     }
-    let json: String = row.try_get("review_details_json")?;
+    let json: String = row.try_get_unchecked("review_details_json")?;
     let details: ReviewDetails =
         serde_json::from_str(&json).map_err(|error| Error::Data(error.into()))?;
     Ok(Some(ReviewAttempt {
-        id: row.try_get("review_id")?,
+        id: row.try_get_unchecked("review_id")?,
         status,
         details,
     }))

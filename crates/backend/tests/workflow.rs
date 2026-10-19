@@ -1,4 +1,4 @@
-//! Contracts over SQLite, backend processes, HTTP and controlled or real Workers.
+//! Contracts over MySQL, backend processes, HTTP and controlled or real Workers.
 
 #[path = "support/review_workflow.rs"]
 mod review_workflow;
@@ -448,7 +448,7 @@ async fn health_status_failures_and_recovery_keep_admission_open() {
         assert_eq!(body["workers"][0]["error_code"], expected_code);
         let public = body.to_string();
         assert!(!public.contains(&harness.servers[0].address));
-        assert!(!public.contains(harness.fixture.config.database.path.to_str().unwrap()));
+        assert!(!public.contains(&harness.fixture.config.database.endpoint));
         assert!(!public.contains("Controlled"));
         let permit = harness.scheduler.reserve().unwrap();
         drop(permit);
@@ -510,7 +510,7 @@ async fn health_worker_timeout_and_stop_between_rounds() {
 async fn health_database_read_failure_and_timeout_recover() {
     let mut fixture = Fixture::new().await;
     fixture.database.close().await;
-    fixture.config.database.busy_timeout_ms = 50;
+    fixture.config.database.lock_wait_timeout_secs = 1;
     fixture.database = Database::open(&fixture.config).await.unwrap();
     let mut connection = fixture.connection().await;
     sqlx::query("DELETE FROM users")
@@ -589,7 +589,7 @@ async fn health_database_read_failure_and_timeout_recover() {
     assert_eq!(server.mock.acks.load(Ordering::SeqCst), 0);
     server.close().await;
     connection.close().await.unwrap();
-    fixture.database.close().await;
+    fixture.close().await;
 }
 
 /// Full queues reject new records but known queued and terminal keys remain idempotent.
@@ -1147,7 +1147,7 @@ async fn process_startup_loads_queue_and_interrupts_in_flight() {
     let (status, logs) = backend.finish().await;
     assert_eq!(status.code(), Some(0), "{logs}");
     server.close().await;
-    fixture.database.close().await;
+    fixture.close().await;
 }
 
 /// Excess queued work aborts startup before HTTP or any Worker RPC can begin.
@@ -1165,14 +1165,14 @@ async fn process_rejects_startup_queue_overflow() {
     assert!(!logs.contains("Backend HTTP listening"));
     assert_eq!(server.mock.submits.load(Ordering::SeqCst), 0);
     server.close().await;
-    fixture.database.close().await;
+    fixture.close().await;
 }
 
 /// Ordinary query and preflight lock failures return 500 and recover after the external unlock.
 #[tokio::test]
 async fn process_read_failures_keep_serving() {
     let mut fixture = Fixture::new().await;
-    fixture.config.database.busy_timeout_ms = 75;
+    fixture.config.database.lock_wait_timeout_secs = 1;
     let mut backend = BackendProcess::spawn(&fixture);
     let address = backend.listening().await;
     let mut connection = fixture.connection().await;
@@ -1209,7 +1209,7 @@ async fn process_read_failures_keep_serving() {
     assert!(logs.contains("Read problem list"));
     assert!(logs.contains("Read creation key"));
     connection.close().await.unwrap();
-    fixture.database.close().await;
+    fixture.close().await;
 }
 
 /// Failed creation writes exit promptly even while an unrelated Worker remains running.
@@ -1217,7 +1217,7 @@ async fn process_read_failures_keep_serving() {
 async fn process_creation_failure_exits_without_draining_workers() {
     use tokio::io::AsyncWriteExt;
     let mut fixture = Fixture::new().await;
-    fixture.config.database.busy_timeout_ms = 75;
+    fixture.config.database.lock_wait_timeout_secs = 1;
     let running = fixture.queued("python").await;
     let server = RpcServer::start(Mode::Running, fixture.database.clone()).await;
     fixture.config.scheduler.workers = vec![server.address.clone()];
@@ -1265,7 +1265,7 @@ async fn process_creation_failure_exits_without_draining_workers() {
     connection.close().await.unwrap();
     drop(stream);
     server.close().await;
-    fixture.database.close().await;
+    fixture.close().await;
 }
 
 /// Normal shutdown saves in-flight work, keeps queries available and resumes queued work on restart.
@@ -1359,7 +1359,7 @@ async fn process_shutdown_drains_running_and_restart_loads_queued() {
     let (status, logs) = restarted.finish().await;
     assert_eq!(status.code(), Some(0), "{logs}");
     restarted_server.close().await;
-    fixture.database.close().await;
+    fixture.close().await;
 }
 
 /// A terminal-write fault overrides an ongoing normal shutdown without ACK or waiting other work.
@@ -1407,7 +1407,7 @@ async fn process_fault_during_shutdown_does_not_wait_other_worker() {
     connection.close().await.unwrap();
     first.close().await;
     second.close().await;
-    fixture.database.close().await;
+    fixture.close().await;
 }
 
 /// A creation admitted before stopping may reserve after its preflight and finish local handoff.

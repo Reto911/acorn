@@ -1,4 +1,4 @@
-//! Real SQLite and gRPC fixtures with controlled, deterministic Worker responses.
+//! Real MySQL and gRPC fixtures with controlled, deterministic Worker responses.
 
 pub mod real;
 
@@ -14,7 +14,7 @@ use std::{
 };
 
 use acorn_backend::{
-    config::{Config, HealthConfig},
+    config::HealthConfig,
     database::Database,
     health::Health,
     http,
@@ -32,7 +32,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use serde_json::{Value, json};
-use sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
+use sqlx::Connection;
 use tokio::{
     io::{AsyncBufReadExt, BufReader, Lines},
     net::TcpListener,
@@ -47,65 +47,14 @@ use tonic::{
 use tower::ServiceExt;
 use uuid::Uuid;
 
-/// Actual initialized database, never mocked SQL behavior.
-pub struct Fixture {
-    /// Temporary database and process-test files.
-    pub directory: tempfile::TempDir,
-    /// Deployment-aligned limits, changed by each test before assembling services.
-    pub config: Config,
-    /// Shared single-connection application pool.
-    pub database: Database,
-}
+pub mod database;
+pub use database::Fixture;
 
 impl Fixture {
-    /// Initialize through the shipped SQL files and check the same startup contract.
-    pub async fn new() -> Self {
-        let directory = tempfile::tempdir().unwrap();
-        let mut config =
-            Config::parse(include_str!("../../../../config/backend.example.toml")).unwrap();
-        config.database.path = directory.path().join("acorn.db");
-        let mut connection = SqliteConnection::connect_with(
-            &SqliteConnectOptions::new()
-                .filename(&config.database.path)
-                .create_if_missing(true)
-                .foreign_keys(true),
-        )
-        .await
-        .unwrap();
-        for script in [
-            include_str!("../../../../sql/001-initial-schema.sql"),
-            include_str!("../../../../examples/seed-user.sql"),
-            include_str!("../../../../sql/002-example-problem.sql"),
-        ] {
-            sqlx::raw_sql(script)
-                .execute(&mut connection)
-                .await
-                .unwrap();
-        }
-        connection.close().await.unwrap();
-        let database = Database::open(&config).await.unwrap();
-        Self {
-            directory,
-            config,
-            database,
-        }
-    }
-
-    /// Deployment-side connection for controlled publication and lock contention.
-    pub async fn connection(&self) -> SqliteConnection {
-        SqliteConnection::connect_with(
-            &SqliteConnectOptions::new()
-                .filename(&self.config.database.path)
-                .foreign_keys(true),
-        )
-        .await
-        .unwrap()
-    }
-
     /// Publish a second immutable version while retaining all original version data.
     pub async fn publish_next(&self) {
         let mut connection = self.connection().await;
-        sqlx::raw_sql("BEGIN IMMEDIATE;
+        sqlx::raw_sql("START TRANSACTION;
             INSERT INTO problem_versions (problem_id, version_no, title, statement, comparison_mode, published_at_ms) SELECT problem_id, 2, 'New title', statement, comparison_mode, published_at_ms + 1 FROM problem_versions WHERE problem_id = 1 AND version_no = 1;
             INSERT INTO problem_version_languages SELECT problem_id, 2, language_id, cpu_time_ms + 1, wall_time_ms, memory_kib FROM problem_version_languages WHERE problem_id = 1 AND version_no = 1;
             INSERT INTO test_cases SELECT problem_id, 2, case_index, input, expected_output FROM test_cases WHERE problem_id = 1 AND version_no = 1;
@@ -142,12 +91,8 @@ pub struct BackendProcess {
 impl BackendProcess {
     /// Write a temporary deployment config and start the actual backend executable.
     pub fn spawn(fixture: &Fixture) -> Self {
-        let mut config: toml::Value =
-            toml::from_str(include_str!("../../../../config/backend.example.toml")).unwrap();
+        let mut config = fixture.process_config();
         config["http"]["listen"] = "127.0.0.1:0".into();
-        config["database"]["path"] = fixture.config.database.path.to_str().unwrap().into();
-        config["database"]["busy_timeout_ms"] =
-            (fixture.config.database.busy_timeout_ms as i64).into();
         config["scheduler"]["pending_max_count"] =
             i64::from(fixture.config.scheduler.pending_max_count).into();
         config["scheduler"]["workers"] = toml::Value::Array(
@@ -183,6 +128,7 @@ impl BackendProcess {
         let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_acorn-backend"))
             .arg("--config")
             .arg(path)
+            .env("MYSQL_PASSWORD", std::env::var("MYSQL_PASSWORD").unwrap())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
@@ -646,7 +592,7 @@ impl Harness {
         for server in self.servers {
             server.close().await;
         }
-        self.fixture.database.close().await;
+        self.fixture.close().await;
     }
 
     /// Observe an expected fatal dispatcher error rather than claiming normal shutdown.

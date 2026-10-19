@@ -1,4 +1,8 @@
-//! One shared SQLx SQLite pool, explicit queries and short conditional writes.
+//! One shared SQLx MySQL pool, explicit queries and short conditional writes.
+//!
+//! Known VARCHAR/LONGTEXT projections use `try_get_unchecked` for string decoding:
+//! SQLx 0.8.6 rejects their server BINARY flag under the required binary collation.
+//! This skips SQL type compatibility only; UTF-8 and nullability remain validated.
 
 mod problems;
 mod reviews;
@@ -13,12 +17,12 @@ use std::{
 };
 
 use sqlx::{
-    SqlitePool,
-    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    MySqlConnection, MySqlPool,
+    mysql::{MySqlDatabaseError, MySqlPoolOptions},
 };
 use tokio::sync::watch;
 
-use crate::config::Config;
+use crate::config::{Config, DatabaseConfig};
 
 /// Database and business errors remain distinguishable at the HTTP boundary.
 #[derive(Debug, thiserror::Error)]
@@ -47,7 +51,7 @@ pub enum Error {
     /// Review data violates the fixed shape or persistence budget.
     #[error("Invalid review: {0}")]
     InvalidReview(&'static str),
-    /// SQLx preserves the actual SQLite failure and its context.
+    /// SQLx preserves the actual MySQL failure and its context.
     #[error("Database operation failed: {0}")]
     Sql(#[from] sqlx::Error),
     /// Startup configuration references or pre-existing task data are inconsistent.
@@ -58,11 +62,11 @@ pub enum Error {
 /// Typed database operation result, preserving business errors and storage failures.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Cloneable backend database handle; clones share the same single-connection pool.
+/// Cloneable backend database handle; clones share one bounded connection pool.
 #[derive(Clone)]
 pub struct Database {
-    /// The only backend SQLite pool; never held across RPC or Scheduler handoff.
-    pool: SqlitePool,
+    /// Shared MySQL pool; connections are never held across RPC or queue handoff.
+    pool: MySqlPool,
     /// Fixed owner and deployment resource ceilings.
     config: Arc<Config>,
     /// First fatal storage error, retained for process supervision beyond HTTP disconnects.
@@ -72,22 +76,17 @@ pub struct Database {
 impl Database {
     /// Open an existing database, checking schema version and configured test user.
     pub async fn open(config: &Config) -> Result<Self> {
-        let options = SqliteConnectOptions::new()
-            .filename(&config.database.path)
-            .create_if_missing(false)
-            .foreign_keys(true)
-            .busy_timeout(Duration::from_millis(config.database.busy_timeout_ms));
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await?;
+        let pool = connect_pool(&config.database).await?;
         let checked = async {
-            let version: i64 = sqlx::query_scalar("PRAGMA user_version")
-                .fetch_one(&pool)
-                .await?;
-            if version != 3 {
+            let version: Option<i64> =
+                sqlx::query_scalar("SELECT version FROM schema_version WHERE id = 1")
+                    .fetch_optional(&pool)
+                    .await?;
+            let version = version
+                .ok_or_else(|| Error::Data(anyhow::anyhow!("Schema version row is missing")))?;
+            if version != 4 {
                 return Err(Error::Data(anyhow::anyhow!(
-                    "Expected schema version 3, got {version}"
+                    "Expected schema version 4, got {version}"
                 )));
             }
             let exists: bool =
@@ -108,7 +107,10 @@ impl Database {
             pool.close().await;
             return Err(error);
         }
-        tracing::info!(path = %config.database.path.display(), user_id = config.test_user.user_id, "Backend database validated");
+        tracing::info!(
+            user_id = config.test_user.user_id,
+            "Backend database validated"
+        );
         Ok(Self {
             pool,
             config: Arc::new(config.clone()),
@@ -164,12 +166,12 @@ impl Database {
         result
     }
 
-    /// Await release and closure of the shared connection at process shutdown.
+    /// Await release and closure of all shared connections at process shutdown.
     pub async fn close(&self) {
         self.pool.close().await;
     }
 
-    /// Enforce configured list page bounds and SQLite's signed offset range.
+    /// Enforce configured list page bounds and the signed offset range.
     fn page(&self, limit: u32, offset: u64) -> Result<(i64, i64)> {
         if limit == 0 || limit > self.config.http.max_page_size {
             return Err(Error::InvalidRequest(
@@ -178,22 +180,52 @@ impl Database {
         }
         Ok((
             i64::from(limit),
-            i64::try_from(offset)
-                .map_err(|_| Error::InvalidRequest("Page offset exceeds SQLite's integer range"))?,
+            i64::try_from(offset).map_err(|_| {
+                Error::InvalidRequest("Page offset exceeds the signed integer range")
+            })?,
         ))
     }
 }
 
-/// Recognize direct SQLx I/O errors and SQLite I/O, corruption, disk-full or invalid-file codes.
-///
-/// Extended SQLite codes retain the primary code in their least significant byte.
+/// Open the bounded application pool and initialize each new session once.
+pub async fn connect_pool(config: &DatabaseConfig) -> Result<MySqlPool> {
+    let options = config
+        .connect_options()
+        .map_err(Error::Data)?
+        .database(&config.name);
+    let lock_wait = config.lock_wait_timeout_secs;
+    Ok(MySqlPoolOptions::new()
+        .max_connections(config.max_connections)
+        .acquire_timeout(Duration::from_millis(config.acquire_timeout_ms))
+        .after_connect(move |connection, _| {
+            Box::pin(async move { initialize_session(connection, lock_wait).await })
+        })
+        .connect_with(options)
+        .await?)
+}
+
+/// Apply application session settings to a new pool or independent control connection.
+pub async fn initialize_session(
+    connection: &mut MySqlConnection,
+    lock_wait: u32,
+) -> sqlx::Result<()> {
+    sqlx::query("SET NAMES utf8mb4 COLLATE utf8mb4_0900_bin")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query("SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query("SET SESSION sql_mode = 'STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION', innodb_lock_wait_timeout = ?, lock_wait_timeout = ?")
+        .bind(lock_wait).bind(lock_wait).execute(connection).await?;
+    Ok(())
+}
+
+/// Recognize explicit server storage faults without treating network I/O as disk damage.
 fn severe_storage_error(error: &sqlx::Error) -> bool {
-    matches!(error, sqlx::Error::Io(_))
-        || error
-            .as_database_error()
-            .and_then(|error| error.code())
-            .and_then(|code| code.parse::<i32>().ok())
-            .is_some_and(|code| matches!(code & 0xff, 10 | 11 | 13 | 26))
+    error
+        .as_database_error()
+        .and_then(|error| error.try_downcast_ref::<MySqlDatabaseError>())
+        .is_some_and(|error| matches!(error.number(), 1114 | 1712 | 1810 | 1811 | 1812 | 1817))
 }
 
 /// Current UTC Unix milliseconds, with no fabricated fallback timestamp.
@@ -206,51 +238,14 @@ pub(crate) fn now_ms() -> Result<i64> {
 
 #[cfg(test)]
 mod tests {
-    //! Fatal storage classification uses a real SQLite invalid-file error.
+    //! Network transport failures retain the ordinary-read error boundary.
 
     use super::*;
 
-    /// A read encountering a corrupt database notifies supervision and preserves its error.
-    #[tokio::test]
-    async fn severe_read_failure_notifies_supervision() {
-        let directory = tempfile::tempdir().unwrap();
-        let corrupt = directory.path().join("corrupt.db");
-        std::fs::write(&corrupt, [0xff; 4096]).unwrap();
-        let database = Database {
-            pool: SqlitePoolOptions::new()
-                .max_connections(1)
-                .connect_with(
-                    SqliteConnectOptions::new()
-                        .filename(directory.path().join("healthy.db"))
-                        .create_if_missing(true),
-                )
-                .await
-                .unwrap(),
-            config: Arc::new(
-                Config::parse(include_str!("../../../../config/backend.example.toml")).unwrap(),
-            ),
-            failure: watch::channel(None).0,
-        };
-        let result = database
-            .observe("Read corrupt database", false, async {
-                sqlx::query("ATTACH DATABASE ? AS corrupt")
-                    .bind(corrupt.to_str().unwrap())
-                    .execute(&database.pool)
-                    .await?;
-                sqlx::query("SELECT * FROM corrupt.sqlite_schema")
-                    .fetch_all(&database.pool)
-                    .await?;
-                Ok(())
-            })
-            .await;
-        assert!(
-            matches!(&result, Err(Error::Sql(error)) if severe_storage_error(error)),
-            "{result:?}"
-        );
-        let error = tokio::time::timeout(Duration::from_secs(1), database.failure())
-            .await
-            .unwrap();
-        assert!(error.to_string().contains("not a database"), "{error}");
-        database.close().await;
+    /// A lost network connection is not an explicit MySQL server storage fault.
+    #[test]
+    fn network_failure_is_not_storage_damage() {
+        let error = sqlx::Error::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset));
+        assert!(!severe_storage_error(&error));
     }
 }

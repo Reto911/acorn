@@ -61,12 +61,12 @@ DeepSeek 接口文档列出 `none`、`low`、`high`、`max`；`minimal` 映射�
 
 ## 3. 后端结构与责任边界
 
-新增与 Scheduler 平行的 `llm_review` 模块，共用现有 Tokio runtime 和 SQLx 单连接池。Scheduler 只负责根据机器终态决定是否触发，并在数据库提交后做一次进程内交接；审查模块独立管理队列、并发、HTTP 请求与审查状态。
+与 Scheduler 平行的 `llm_review` 模块共用现有 Tokio runtime 和 SQLx 有界 MySQL 连接池。Scheduler 只负责根据机器终态决定是否触发，并在数据库提交后做一次进程内交接；审查模块独立管理队列、并发、HTTP 请求与审查状态。MySQL 配置和并发适配以[迁移设计](09-mysql-migration-design.md)为依据，本文历史 L01–L06 记录保留其原验证范围。
 
 ```mermaid
 flowchart LR
     Worker[Worker 判题] -->|gRPC 终态| Scheduler
-    Scheduler -->|原子保存判题结果和审查初态| DB[(SQLite)]
+    Scheduler -->|原子保存判题结果和审查初态| DB[(MySQL)]
     Scheduler -->|判题结果持久化后 ACK| Worker
     Scheduler -->|交接提交 ID 和审查 ID| Review[llm_review]
     UI[提交结果页] -->|手动启动或重跑| HTTP[HTTP API]
@@ -195,7 +195,7 @@ LLM 网络等待不进入 Worker、判题跟踪或数据库事务，不占用 Sc
 
 ### 5.3 数据库升级职责
 
-本功能将数据库结构从版本 2 升为版本 3，仓库中的 `sql/001-initial-schema.sql` 同步提供版本 3 的完整新库结构。
+本节描述 L01 当时的 SQLite 版本 2 → 3 交付。当前仓库中的 `sql/001-initial-schema.sql` 已按[MySQL 迁移设计](09-mysql-migration-design.md)提供版本 4 全新初始化结构，不用于本节的旧库升级。
 
 已有库的版本 2 → 3 升级 SQL 和执行命令由实现方单独提供，不生成或保留仓库内的迁移脚本。交付前在临时数据库核对升级 SQL、旧记录默认值及查询；新库结构和升级后的结构应一致。
 
@@ -283,7 +283,7 @@ LLM 网络等待不进入 Worker、判题跟踪或数据库事务，不占用 Sc
 
 采用单个内存 FIFO 队列及配置的最大并发，待执行名额与运行并发分别有界；不复用 Scheduler 信号量。队列只持有 ID 和必要元数据。
 
-运行任务先将已保存的源码、固定版本题面和 verdict 读到内存，归还数据库连接，再调用审查客户端；取得响应后重新获取连接，以本次 review_id 为条件保存结果。现有连接池只有一个连接，模型请求期间不得占用它，以免阻塞判题保存和页面查询。
+运行任务先将已保存的源码、固定版本题面和 verdict 读到内存，归还数据库连接，再调用审查客户端；取得响应后重新获取连接，以本次 review_id 为条件保存结果。现有 MySQL 连接池由 API、Scheduler、审查和健康采集共用，模型请求期间不得借出连接，以免占用判题保存和页面查询的池预算。
 
 重跑替换该提交的审查字段，不新增历史表；后台只处理已经交接到内存队列的任务，不会定时扫描数据库寻找 PENDING 或 FAILED 重新发送。旧 PENDING 按启动中断规则结束，FAILED 由用户手动重跑。
 

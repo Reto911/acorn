@@ -228,6 +228,6 @@ impl RealHarness {
         for worker in self.workers {
             worker.close().await;
         }
-        self.fixture.database.close().await;
+        self.fixture.close().await;
     }
 }
