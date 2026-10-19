@@ -13,3 +13,4 @@ LLM 增量合同以[LLM 代码审查设计](08-llm-code-review-design.md)为依�
 - [前端开发计划](06-frontend-development-plan.md)：F01–F07 首版 GUI 任务、接口依赖与验收，F08 健康观测及初次连通验收记录，后续每 10 秒自动获取的实现与验证边界。
 - [健康观测设计与实施计划](07-health-observation-design.md)：已确认的 F08 契约，H01–H04 已实现 Worker 状态 RPC、后端共享采集、只读 HTTP、支持自动获取及手动刷新的健康页面和独立过期警告；包含实施步骤与有限验收。
 - [LLM 代码审查设计](08-llm-code-review-design.md)：L01–L06 已完成；定义 Responses API 接入、判题后自动门槛及手动审查、最新意见持久化、后端独立队列、提交页面 UI、实施步骤及有限联调和一次真实调用记录。
+- [MySQL 迁移设计与执行方案](09-mysql-migration-design.md)：v2，已批准、尚未实施；仅支持 MySQL，整体重新部署及新库初始化，不保留旧数据；D04、密码供给与 READ COMMITTED 已确认，明确 LLM 审查资源边界，包含任务待办清单和有限验收。[审核记录](d01-review/09-mysql-migration-review.md)与[实施记录](d02-execution/09-mysql-migration-execution.md)分别维护。

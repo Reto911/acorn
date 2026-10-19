@@ -99,6 +99,10 @@ in the relevant design documents and must not be maintained here in duplicate.
 
 ## Documentation and Git
 
+- Store newly authored review records in `docs/d01-review/` and execution
+  records in `docs/d02-execution/`. Use the same document number prefix as the
+  corresponding design document. Existing historical records stay in place
+  unless their relocation is explicitly requested.
 - Keep the root README and the READMEs under `crates/`, `sql/` and `web/`
   focused on current functionality, installation, Quick Start, configuration,
   interfaces and usage as relevant to each module. Put development progress,
