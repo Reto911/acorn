@@ -14,6 +14,7 @@
 - [健康观测设计与实施计划](07-health-observation-design.md)：Worker 状态 RPC、后端共享采集、只读 HTTP、健康页面的刷新与过期语义，以及实施和验收要求。
 - [LLM 代码审查设计](08-llm-code-review-design.md)：Responses API 接入、自动及手动审查、最新意见持久化、独立队列、资源与生命周期边界、页面交互及验收要求。
 - [MySQL 迁移设计与执行方案](09-mysql-migration-design.md)：迁移范围与设计依据、全新初始化、配置与连接池、存储和事务合同、错误处理、任务划分及验收要求。
-- [Kafka 判题通信设计与实施计划](10-kafka-judging-design.md)：Scheduler 与 Worker 的任务投递、状态回传、MySQL 交接及接纳容量、独立成员观测、Kafka 健康、消费生命周期、整体部署与任务验收；可勾选的[任务清单](d02-execution/10-kafka-judging-execution.md#4-任务清单)按设计任务编号跟踪。
-- [用户注册、登录与会话设计](11-user-authentication-design.md)：MySQL 账号、后端内存 Session、Cookie 与请求校验、个人提交隔离、前端账号切换、全新部署及实施验收方案；可勾选的[开发清单](d02-execution/11-user-authentication-execution.md#3-开发清单)按 U01–U05 细分步骤、依赖与完成条件。
-- [本人历史源码查看与审查行号定位设计](12-submission-source-design.md)：独立源码读取接口、本人归属、只读展示、LF 行号与审查疑点定位、身份清理及实施验收方案；可勾选的[开发清单](d02-execution/12-submission-source-execution.md#2-开发清单)细化源码接口、只读编辑器、结果页联动和整体验收与使用说明的入口、依赖及完成条件。
+- [Kafka 判题通信设计与实施计划](10-kafka-judging-design.md)：Scheduler 与 Worker 的任务投递、状态回传、MySQL 交接及接纳容量、独立成员观测、Kafka 健康、消费生命周期、整体部署与任务验收。
+- [用户注册、登录与会话设计](11-user-authentication-design.md)：MySQL 账号、后端内存 Session、Cookie 与请求校验、个人提交隔离、前端账号切换、全新部署及实施验收方案。
+- [本人历史源码查看与审查行号定位设计](12-submission-source-design.md)：独立源码读取接口、本人归属、只读展示、LF 行号与审查疑点定位、身份清理及实施验收方案。
+- [Python 判题脚本设计](13-checker-scripts-design.md)：统一脚本存储与任务装配、文件输入和 JSON 结果协议、同提交沙箱复用、可选资源限额、trim／浮点预设、实施任务与验收要求。

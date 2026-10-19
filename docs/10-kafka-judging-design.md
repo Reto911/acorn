@@ -2,6 +2,8 @@
 
 版本：v20。本文规定后端与 Worker 之间的 Kafka 任务投递、状态回传、接纳容量及部署方案。消息发布等待 broker 确认，消费位点使用 safe 异步提交且不逐条等待回执；配套修复按第 12 节推进。实施时同步受影响的现行设计、协议、调用方和配置说明；进度及检查结果见[实施记录](d02-execution/10-kafka-judging-execution.md#4-任务清单)。
 
+下一版的 checker 任务字段和预算增量见[判题脚本设计第 3 节](13-checker-scripts-design.md#3-任务装配与消息)。它保持本篇 topic、交付、重复执行、位点与终态选择合同；当前消息结构尚未增加这些字段，实施进度见[脚本实施记录](d02-execution/13-checker-scripts-execution.md)。
+
 ## 1. 目标、依据与范围
 
 ### 1.1 技术基础
@@ -103,6 +105,8 @@ flowchart LR
 消费组名按部署环境固定，示例为 `acorn-judge-workers-v1` 与 `acorn-backend-judge-events-v1`。程序使用 `auto.offset.reset=error`；首次部署由部署端初始化新组位点，后续从已提交位点继续，不自动回到 earliest/latest。保留过期、位点丢失或 topic 被重建时明确报错，交部署端处理受影响记录。位点重置与首次初始化见[Kafka 管理说明](https://kafka.apache.org/43/operations/basic-kafka-operations/)。
 
 ### 4.2 Protobuf 负载
+
+以下列出现行负载。脚本版本在 SubmitJobRequest 增加 checker 源码、参数和可选限额，GetJobReply 结构保持不变，按[第 13 篇消息合同](13-checker-scripts-design.md#32-proto-增量)同步生成协议并调整两端预算，不增加新的消息封装。
 
 直接复用[现有协议](../proto/acorn/worker/v1/worker.proto)中的消息，通过现有 Cargo/Prost 流程生成。任务和事件分别由 topic 区分，消息主版本由 topic 后缀表达。
 

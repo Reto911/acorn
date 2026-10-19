@@ -2,6 +2,8 @@
 
 本文定义 MySQL 8.4／InnoDB、结构版本 4 的数据合同；迁移任务见[迁移设计](09-mysql-migration-design.md)，实际过程和验证结果见[实施记录](d02-execution/09-mysql-migration-execution.md)。
 
+结构版本 5 的脚本表、题目脚本引用／参数及 checker 限额覆盖按[判题脚本设计第 2 节](13-checker-scripts-design.md#2-数据模型与源码副本)实施。该增量尚未写入现有 SQL 与存储实现；下面保留结构版本 4 的合同，实施时统一替换，进度见[脚本实施记录](d02-execution/13-checker-scripts-execution.md)。
+
 数据访问由后端[数据库模块](../crates/backend/src/database/mod.rs)提供，使用[题目类型](../crates/backend/src/problems.rs)与[提交和终态类型](../crates/backend/src/submissions.rs)。审查字段、固定版本策略和最近一次意见遵守[LLM 数据合同](08-llm-code-review-design.md#5-数据库增量)，数据库错误按[后端故障契约](03-backend-design.md#83-数据库及后台故障)报告。开发用户脚本见 [seed-user.sql](../examples/seed-user.sql)。
 
 按[MySQL 迁移设计](09-mysql-migration-design.md)从空库初始化，不保留旧数据；结构版本 4 标记新库结构。内存限额使用 KiB，实际结果中的内存统计使用字节。
@@ -97,6 +99,8 @@ MySQL 不允许对自增列使用原有的正值 CHECK，显式用户／题目 I
 版本、语言限额、全部测试用例和发布指针在同一事务中写入。发布分配下一个版本号并更新指针，不提供将最新指针切回旧版本的入口。首版不持久化可编辑草稿；已发布内容不可修改，修改题面、测试、限额、比较规则或自动审查模式时创建新版本。自动门槛使用提交固定版本的模式，不随最新发布指针变化。
 
 首版 `comparison_mode` 只允许默认值：删除整个输出字节串末尾的 ASCII 空白 HT、LF、VT、FF、CR、SPACE，再逐字节比较，内部空白保持不变。Worker 执行相同固定规则，RPC 不增加未使用的规则参数；其他规则在扩展协议与执行器后启用，当前拒绝发布不支持的值。
+
+脚本版本将移除 comparison_mode，以脚本引用和参数替代。题目版本仍固定题目数据、参数与限额，但引用的脚本源码允许原地修改；任务采用装配时读到的副本，具体边界见[脚本引用合同](13-checker-scripts-design.md#22-装配时取得源码)。
 
 引用版本的表使用完整的 `(problem_id, version_no)`，不另外生成版本 UUID。版本不可变固定题目数据与限额，不提供工具链版本或跨 Worker 的可复现保证。
 

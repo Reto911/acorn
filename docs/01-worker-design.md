@@ -4,6 +4,8 @@
 
 基础判题的实际过程与检查见[Worker 与后端实施记录](d02-execution/04-development-execution.md#7-实施记录)，状态 RPC 和健康页面的交付见[前端与健康观测实施记录](d02-execution/06-frontend-development-execution.md#58-f08h01worker-状态-rpc)。
 
+本篇描述现有 Worker 实现。下一版的统一 Python 校验、任务字段、文件对接、同提交沙箱复用及可选 checker 限额遵守[判题脚本设计](13-checker-scripts-design.md)；实施时同步替换下述固定比较和每阶段初始化合同，当前实现状态见[脚本实施记录](d02-execution/13-checker-scripts-execution.md)。
+
 ## 1. 目标与范围
 
 Worker 是独立运行的判题进程，从 Kafka 消费任务并发布运行快照和终态，提供只读状态 RPC。一个 Worker 同时只执行一个 Job，一个 Job 的全部阶段和测试用例依次执行。消息交付和分区归属遵守[Kafka 设计](10-kafka-judging-design.md)。
@@ -224,6 +226,8 @@ Python 计划没有编译阶段，跳过步骤 2～5，以原始源码作为待�
 
 ### 5.2 按顺序运行与比较
 
+以下是现行固定比较流程；脚本版本的用户运行、checker 校验与结论归因见[第 13 篇第 4 节](13-checker-scripts-design.md#4-脚本协议)。
+
 程序准备完成后，对请求数组中的每个用例依次执行以下操作：
 
 1. 初始化新的运行沙箱，放入 C 编译产物或 Python 源码的独立副本及当前输入。
@@ -261,6 +265,8 @@ P04 的 [`Executor`](../crates/worker/src/executor.rs) 接收已接纳请求、�
 执行失败代码为 `PreparationFailed`（私有文件或语言准备失败）、`InvalidJob`（内部调用缺少运行限额）、`SandboxError`（已停止或尚未启动的阶段故障）、`JobDeadlineExceeded`（总期限到达）、`WorkerShutdown`（内部停机）和 `StopUnconfirmed`（停止未确认）。诊断最多保留 512 个 UTF-8 字节，包含在配置预留的结果协议空间内；这些代码属于 Job 结果，不是 RPC 拒绝原因。
 
 ## 6. 统一沙箱接口
+
+以下接口对应现行每阶段初始化与清理。脚本版本将环境生命周期提升到同一 Job 内复用，并分离用户与 checker 环境，资源统计与释放按[第 13 篇第 5 节](13-checker-scripts-design.md#5-沙箱与资源)实施。
 
 Worker 调用一次完整的阶段执行操作，输入为 `SandboxRunSpec`，输出为 `SandboxRunOutcome`。编译阶段与运行阶段共用同一接口，不向业务层暴露一套独立清理状态机。
 
