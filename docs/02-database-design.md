@@ -1,20 +1,20 @@
 # 数据库设计
 
-状态：基础判题设计及 LLM 的 L01–L04 已实现，当前结构版本 3；L05 已接入 GUI，L06 有限联调及一次真实审查的保存、展示已通过，范围见[实施记录](08-llm-code-review-design.md#126-l06有限联调与真实调用)。
+状态：MySQL 迁移 M01 已完成，初始结构及预置 SQL 已转换为 MySQL 8.4／InnoDB、结构版本 4，并通过独立空库的 SQL 验证。后端代码仍使用 SQLite 结构版本 3；连接、事务与测试由 M02–M04 接通，当前后端不能使用这些 MySQL SQL 初始化的数据库。迁移进度和实际验证范围见[实施记录](d02-execution/09-mysql-migration-execution.md)。
 
 本文同步[LLM 代码审查设计](08-llm-code-review-design.md#5-数据库增量)的数据合同，审查字段、类型、固定版本策略读取、最新审查条件读写和数据库历史筛选已由 L01 实现；客户端由 L02 实现，自动接纳与启动中断由 L03 接通，L04 已接入手动短事务、HTTP 审查查询及状态筛选。现行设计与既有实施记录的维护边界见[文档索引](README.md)。
 
 P06 已实现后端[数据库模块](../crates/backend/src/database/mod.rs)、[题目类型](../crates/backend/src/problems.rs)与[提交和终态类型](../crates/backend/src/submissions.rs)。P07/P08 的 Scheduler 和 HTTP 已使用创建、固定版本任务装配、条件状态和终态写入方法；P09 已将启动读取／中断方法接入入口，并按[后端故障契约](03-backend-design.md#83-数据库及后台故障)报告关键写入与严重存储错误。P10 已从空数据库启动独立程序，验证样例结果、保存后 ACK 和后端重启后查询。开发用户脚本见 [seed-user.sql](../examples/seed-user.sql)。
 
-结构版本 2 将版本语言表的 `memory_bytes` 改为 `memory_kib`，以 KiB 保存内存限额并直接装配新的 RPC 字段；实际结果中的内存统计仍为字节。L01 已将完整初始 SQL 与应用版本检查一同切换为 `PRAGMA user_version = 3`；版本 2 → 3 的升级 SQL 和执行命令单独交付，不纳入仓库，实际交付和检查见[第 08 篇实施记录](08-llm-code-review-design.md#121-l01数据契约与离线升级)。部署端停服务、备份后离线升级，应用不自动升级。旧提交新增审查字段默认 DISABLED，不补跑审查；已有库不重跑完整初始化 SQL。具体升级合同见[第 08 篇第 5.3 节](08-llm-code-review-design.md#53-数据库升级职责)。版本 1 的内存单位转换仍须由部署端处理，不能只修改结构版本号或将原字节值直接当作 KiB。
+本次按[MySQL 迁移设计](09-mysql-migration-design.md)全新部署，不保留旧数据。结构版本 4 标记新库结构，不表示执行过 SQLite 升级；此前版本 2 → 3 的 SQL 和实际检查保留在[原实施记录](08-llm-code-review-design.md#121-l01数据契约与离线升级)，不用于 MySQL 初始化。内存限额继续使用 KiB，实际结果中的内存统计仍为字节。
 
-初始建表语句见 [001-initial-schema.sql](../sql/001-initial-schema.sql)，执行说明见 [SQL 使用说明](../sql/README.md)。
+初始建表语句见 [001-initial-schema.sql](../sql/001-initial-schema.sql)，当前初始化步骤见[迁移设计第 7 节](09-mysql-migration-design.md#7-sql-改写与全新初始化)；SQL 目录说明由 M07 补齐。
 
 [002-example-problem.sql](../sql/002-example-problem.sql) 提供随正式发布保留的两数求和题及 C/Python 限额、用例，在新库建表后装入；它不改变结构版本或创建用户。
 
 ## 1. 范围与职责
 
-使用一个 SQLite 数据库 `acorn.db`，保存用户、题库、提交历史、业务状态和有界结果。[Worker 设计](01-worker-design.md)规定执行与结果契约。
+目标系统使用一个 MySQL 8.4 数据库，业务表采用 InnoDB，保存用户、题库、提交历史、业务状态和有界结果。[Worker 设计](01-worker-design.md)规定执行与结果契约。仅支持全新初始化，应用不建表或自动升级；M01 只交付 SQL，后端连接切换由 M02 完成。
 
 API、Scheduler 与 llm_review 属于同一后端进程，见[后端设计](03-backend-design.md)。基础判题闭环使用部署预置并由配置指定的单一测试用户，不启用登录鉴权；题目也由本地预置。LLM 审查沿用该归属与访问范围。
 
@@ -33,19 +33,22 @@ API、Scheduler 与 llm_review 属于同一后端进程，见[后端设计](03-b
 
 | 类型 | 表示 |
 | --- | --- |
-| 用户、题目 ID | 使用 SQLite `INTEGER PRIMARY KEY` 自动分配正整数；正常插入递增，不承诺连续编号或已删除编号永不复用 |
-| Submission ID | API 生成的 UUID，存为 `TEXT PRIMARY KEY`，作为不透明的 Job ID 交给 Worker |
-| 版本身份 | `(problem_id, version_no)` 联合主键，版本号在题目内从 1 递增 |
-| 时间戳 | `INTEGER`，UTC Unix 毫秒，字段以 `_at_ms` 结尾 |
-| 限额与统计 | `INTEGER`，明确使用毫秒、微秒或字节；未知统计保持缺失 |
-| 源码及测试数据 | `BLOB`，保留原始字节；大小需要时使用 `length()` |
-| 题面、密码哈希 | `TEXT`；密码哈希使用包含算法、参数、盐和哈希值的编码字符串 |
-| 状态与结论 | `TEXT` 固定枚举，使用 `CHECK` |
-| 终态详情 | 有界、类型化 JSON，不重复保存独立的状态或结论列 |
+| 用户、题目 ID | 有符号 `BIGINT AUTO_INCREMENT PRIMARY KEY`；Rust、HTTP 和显式预置继续使用正值 i64，不承诺连续编号 |
+| Submission ID、幂等键、审查 ID | 规范 UUID 文本，使用 `VARCHAR(36)`；Submission ID 作为不透明的 Job ID 交给 Worker |
+| 版本身份 | 有符号 `BIGINT`，`(problem_id, version_no)` 联合主键，版本号在题目内从 1 递增 |
+| 时间戳 | 有符号 `BIGINT`，UTC Unix 毫秒，字段以 `_at_ms` 结尾 |
+| 限额与统计 | 有符号 `BIGINT`，明确使用 ms、KiB 或 bytes 等既有单位；未知统计保持缺失 |
+| 源码及测试数据 | `LONGBLOB`，保留编码、换行及空字节；大小使用 `OCTET_LENGTH()` |
+| 用户名 | `VARCHAR(255)`，完整唯一键，最多 255 字符 |
+| 展示名称、题目标题、题面、密码哈希 | `LONGTEXT`；密码哈希保留包含算法、参数、盐和哈希值的编码字符串 |
+| 状态与结论 | `VARCHAR(32)` 固定枚举，使用 `CHECK`；语言为 `VARCHAR(16)`，比较模式为 `VARCHAR(64)` |
+| 终态和审查详情 | 可空 `LONGTEXT`，附 JSON 对象检查；复用有界应用类型，不重复保存独立的状态或结论列 |
 
 除明确标注可空外，字段均为 `NOT NULL`。ID 不是内容摘要或鉴权凭据。数据库结构版本统一管理，不在每条业务记录中重复保存。
 
-用户与已发布题目不提供硬删除入口，因此首版不要求 `AUTOINCREMENT` 的永不复用保证；整数自动分配的语义见 [SQLite 官方说明](https://www.sqlite.org/autoinc.html)。
+文本使用 `utf8mb4 COLLATE utf8mb4_0900_bin`，枚举与唯一键比较区分大小写、重音和末尾空格。初始化会话启用 `STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION`，避免越界写入被静默截断；应用连接设置由 M02 接入。
+
+MySQL 不允许对自增列使用原有的正值 CHECK，显式用户／题目 ID 正值由预置 SQL 和后端输入边界保证，不增加触发器；数据库不再拒绝所有人工写入的非正主键。这与用户名 255 字符上限均为[已确认差异](09-mysql-migration-design.md#43-d04-已确认的差异)。`LONGBLOB` 覆盖 65,536 字节边界，应用接纳预算及服务端传输限制仍然生效，列容量不扩大用户可提交的数据范围。
 
 源码、用例数量、单项和合计字节上限遵守 Worker 请求契约。运行、编译、输出、沙箱和通信门限保存在各服务的启动配置中；题目指定的单用例限额保存在版本语言表中。
 
@@ -56,7 +59,7 @@ API、Scheduler 与 llm_review 属于同一后端进程，见[后端设计](03-b
 | 字段 | 用途与约束 |
 | --- | --- |
 | `id` | 自动分配的整数主键 |
-| `username_normalized` | 唯一用户名，用于账号查找 |
+| `username_normalized` | 最多 255 字符，精确比较的完整唯一用户名，用于账号查找 |
 | `display_name` | 展示名称 |
 | `password_hash` | Argon2id 密码哈希的完整编码字符串 |
 | `role` | `student` / `admin` |
@@ -88,7 +91,7 @@ API、Scheduler 与 llm_review 属于同一后端进程，见[后端设计](03-b
 | `title` | 版本标题 |
 | `statement` | 版本题面的 Markdown 源文；原文保存，浏览器按[前端设计](05-frontend-design.md#32-答题页面)禁用内嵌 HTML 渲染 |
 | `comparison_mode` | 比较规则保留字段，默认 `trim_trailing_ascii_whitespace` |
-| `review_mode`（版本 3，已实现） | 自动审查模式，`DISABLED` / `ENABLE-ANY` / `ENABLE-ALL`，默认 `DISABLED`；门槛见[第 08 篇第 4.1 节](08-llm-code-review-design.md#41-根据现有结果判断) |
+| `review_mode` | 自动审查模式，`DISABLED` / `ENABLE-ANY` / `ENABLE-ALL`，默认 `DISABLED`；门槛见[第 08 篇第 4.1 节](08-llm-code-review-design.md#41-根据现有结果判断) |
 | `published_at_ms` | 发布时刻 |
 
 版本、语言限额、全部测试用例和发布指针在同一事务中写入。发布分配下一个版本号并更新指针，不提供将最新指针切回旧版本的入口。首版不持久化可编辑草稿；已发布内容不可修改，修改题面、测试、限额、比较规则或自动审查模式时创建新版本。自动门槛使用提交固定版本的模式，不随最新发布指针变化。
@@ -117,8 +120,8 @@ API、Scheduler 与 llm_review 属于同一后端进程，见[后端设计](03-b
 | --- | --- |
 | `problem_id`、`version_no` | 联合外键关联题目版本 |
 | `case_index` | 从 1 开始的执行顺序，版本内连续且唯一 |
-| `input` | 输入 BLOB，可以为空 |
-| `expected_output` | 期望输出 BLOB，可以为空 |
+| `input` | 输入 LONGBLOB，可以为空 |
+| `expected_output` | 期望输出 LONGBLOB，可以为空 |
 
 联合主键为 `(problem_id, version_no, case_index)`。读取时使用 `ORDER BY case_index`；组装 RPC 后由数组顺序表达相同顺序。失败用例通过 Submission 固定版本和返回的序号定位。
 
@@ -126,7 +129,7 @@ API、Scheduler 与 llm_review 属于同一后端进程，见[后端设计](03-b
 
 ### 3.6 submissions
 
-此表保存提交历史、源码、机器业务状态和唯一机器终态；版本 3 增加最近一次 LLM 审查。运行队列与 Worker 路由常驻 Scheduler 内存，不在数据库中保存分派地址或确认状态。
+此表保存提交历史、源码、机器业务状态、唯一机器终态及最近一次 LLM 审查。运行队列与 Worker 路由常驻 Scheduler 内存，不在数据库中保存分派地址或确认状态。
 
 | 字段 | 用途与约束 |
 | --- | --- |
@@ -134,16 +137,16 @@ API、Scheduler 与 llm_review 属于同一后端进程，见[后端设计](03-b
 | `user_id` | 外键关联 `users(id)`，确定历史归属 |
 | `problem_id`、`version_no` | 固定题目版本 |
 | `language_id` | 固定提交语言；与版本组成联合外键，关联 `problem_version_languages` 的完整主键 |
-| `source` | 非空、有界的原始源码 BLOB |
+| `source` | 非空、有界的原始源码 LONGBLOB |
 | `create_request_key` | 创建幂等键，`UNIQUE(user_id, create_request_key)` |
 | `state` | `queued` / `dispatching` / `running` / `finished` / `failed`，创建时为 `queued` |
 | `verdict` | 可空；`finished` 时为 `AC` / `WA` / `CE` / `RE` / `TLE` / `MLE` / `OLE` |
 | `terminal_details_json` | 可空；编译诊断、失败用例或执行失败详情，不含重复的 verdict |
 | `created_at_ms` | 创建时间，供历史排序和启动时装入队列使用 |
 | `terminal_at_ms` | 可空；业务终态写入时刻，不表示旧程序实际停止的时刻 |
-| `review_status`（版本 3，已实现） | `DISABLED` / `PENDING` / `DOUBTFUL` / `PASS` / `FAILED`，默认 `DISABLED` |
-| `review_id`（版本 3，已实现） | 可空 TEXT，每次接纳新审查生成的 UUID，用于条件完成和重跑并发控制 |
-| `review_details_json`（版本 3，已实现） | 可空 JSON 对象，序列化后最多 32768 UTF-8 字节，包含最近一次意见或诊断、全部元数据及错误；错误 message 为后端固定英文说明，最多 512 UTF-8 字节，完整合同见[第 08 篇第 5.2 节](08-llm-code-review-design.md#52-最近一次详情) |
+| `review_status` | `DISABLED` / `PENDING` / `DOUBTFUL` / `PASS` / `FAILED`，默认 `DISABLED` |
+| `review_id` | 可空 VARCHAR(36)，每次接纳新审查生成的 UUID，用于条件完成和重跑并发控制 |
+| `review_details_json` | 可空 LONGTEXT JSON 对象，序列化后最多 32768 UTF-8 字节，包含最近一次意见或诊断、全部元数据及错误；错误 message 为后端固定英文说明，最多 512 UTF-8 字节，完整合同见[第 08 篇第 5.2 节](08-llm-code-review-design.md#52-最近一次详情) |
 
 `(problem_id, version_no, language_id)` 的外键同时保证版本存在和语言属于该版本，不需要再增加一份仅检查版本存在的重复外键。主键、用户、版本、语言、源码、创建幂等键和创建时间在创建后不变。
 
@@ -163,7 +166,13 @@ JSON 使用应用侧固定类型，字节字段编码为 Base64。保存前验�
 
 审查的 DISABLED 要求 ID、详情均为 NULL；其他状态只允许出现在机器 `state=finished` 的记录上，ID 与元数据非空。PENDING 包含排队和调用中；PASS/DOUBTFUL 保存有效意见；FAILED 保存错误且 result 为 NULL，可按第 08 篇保留受限诊断对象。完成使用 `WHERE id=? AND review_id=? AND review_status='PENDING'`，重跑替换旧意见，迟到结果不覆盖新一轮。不增加审查历史表，也不把审查内容混入机器终态 JSON。
 
+### 3.7 schema_version
+
+固定主键 `id=1` 保存一行 `version=4`，两列使用有符号 BIGINT。CHECK 限制主键为 1、版本为正值；全部表、外键及索引创建成功后才插入版本行。后端版本读取由 M02 实现，启动只检查版本及预置用户，不逐项扫描结构。
+
 ## 4. 创建与内存队列
+
+本节记录当前 SQLite 后端已实现的创建及审查事务；MySQL 的 READ COMMITTED、1062 竞争读取和局部行锁替换以[迁移设计第 5 节](09-mysql-migration-design.md#5-运行期提交和审查事务)为依据，M03 实现时同步本节。队列、固定版本、条件终态和 ACK 合同保持不变。
 
 ### 4.1 创建幂等
 
@@ -222,7 +231,7 @@ LLM 增量在启动时另外将遗留 PENDING 保存为 FAILED/ReviewInterrupted
 
 ### 6.1 外键
 
-所有数据库连接显式启用 `PRAGMA foreign_keys = ON`。下列关系使用 `ON DELETE RESTRICT` / `ON UPDATE RESTRICT`，避免删除或更改仍被历史引用的身份：
+MySQL 结构保留下列六条完整外键，使用 `ON DELETE RESTRICT` / `ON UPDATE RESTRICT`，避免删除或更改仍被历史引用的身份：
 
 | 子表字段 | 父表字段 |
 | --- | --- |
@@ -233,13 +242,15 @@ LLM 增量在启动时另外将遗留 PENDING 保存为 FAILED/ReviewInterrupted
 | `submissions(user_id)` | `users(id)` |
 | `submissions(problem_id, version_no, language_id)` | `problem_version_languages(problem_id, version_no, language_id)` |
 
-先插入 `current_version_no=NULL` 的题目，再写版本与子记录，最后更新指针，循环关系不需要关闭外键检查。版本、用例和限额在发布后不可变；历史提交不随发布指针更新。联合外键的支持与要求见 [SQLite 外键文档](https://www.sqlite.org/foreignkeys.html)。
+建表先创建不带发布指针外键的 problems，待 problem_versions 及其他业务表存在后通过 ALTER TABLE 添加该外键。预置及正常发布仍先插入 `current_version_no=NULL` 的题目，再写版本与子记录，最后更新指针，不关闭外键检查。版本、用例和限额在发布后不可变；历史提交不随发布指针更新。外键引用完整主键，见 [MySQL 外键说明](https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html)。
+
+MySQL DDL 会隐式提交，初始脚本不承诺整体回滚。客户端必须在首个错误时停止；部署端针对空库重新初始化，不由应用修复半成品结构。预置用户和题目分别使用 DML 事务。
 
 ### 6.2 约束与索引
 
-主键与唯一键约束 ID、用户名、创建幂等键和版本内语言/用例。表使用 `STRICT` 约束存储类型；SQL 检查固定枚举、正值限额和序号、终态详情的 JSON 对象格式，以及第 3.6 节定义的终态空值关系。应用校验连续用例序号、字节上限、支持的比较规则和具体结果形状；整数转换符合 SQLite 有符号整数范围。
+主键与唯一键约束 ID、用户名、创建幂等键和版本内语言/用例。MySQL 会话采用严格模式；SQL 检查固定枚举、既有正值限额和序号、非空源码、终态详情的 JSON 对象格式，以及第 3.6 节定义的终态空值关系。JSON CHECK 先用 CASE 与 JSON_VALID 保护 JSON_TYPE 调用，要求非空详情为 OBJECT；CASE 结果通过 `= 1` 转为 MySQL CHECK 要求的布尔条件。应用校验连续用例序号、字节上限、支持的比较规则和具体结果形状；整数转换保持有符号 i64 范围。
 
-版本 3 的 SQL 同时约束审查枚举、JSON 对象格式和基本空值关系；详情类型与内容预算由应用在组装及写入边界按第 08 篇第 5.2 节校验。模型内容或返回元数据造成详情超限时保存 FAILED/ReviewInvalidOutput，使用预算内的失败详情，不作为数据库写入故障。历史查询按 review_status 与既有条件取交集，复用现有索引，首版不预建额外审查索引。
+SQL 同时约束审查枚举、JSON 对象格式和基本空值关系；详情类型与内容预算由应用在组装及写入边界按第 08 篇第 5.2 节校验。模型内容或返回元数据造成详情超限时保存 FAILED/ReviewInvalidOutput，使用预算内的失败详情，不作为数据库写入故障。历史查询按 review_status 与既有条件取交集，复用现有索引，首版不预建额外审查索引。
 
 初始查询索引：
 
@@ -249,7 +260,7 @@ LLM 增量在启动时另外将遗留 PENDING 保存为 FAILED/ReviewInterrupted
 | `submissions(user_id, created_at_ms, id)` | 用户提交历史 |
 | `submissions(problem_id, version_no, language_id)` | 版本/语言关联和引用检查 |
 | `submissions(verdict, created_at_ms, id)` | 按判题结论直接检索 |
-| `submissions(created_at_ms, id) WHERE state='queued'` | 启动时按顺序装入排队任务 |
+| `submissions(state, created_at_ms, id)` | 按 queued 状态及顺序装入排队任务 |
 
 联合主键已覆盖版本子表的关联前缀，无需重复建立同前缀索引。Scheduler 不按每次进度或心跳更新数据库。
 
@@ -259,4 +270,4 @@ LLM 增量在启动时另外将遗留 PENDING 保存为 FAILED/ReviewInterrupted
 
 Scheduler 重启验证在途记录立即失败、排队记录装入内存且不向旧 Worker 查询或补发 ACK；运行中验证迟到结果不覆盖已保存失败。确认动作必须晚于业务终态提交；字节字段往返不损坏，未知统计保持缺失。
 
-L01 的实际数据验证见[实施记录](08-llm-code-review-design.md#121-l01数据契约与离线升级)。后续维护仍按[第 08 篇 L01](08-llm-code-review-design.md#101-l01数据契约与离线升级)执行，包括新库与一次版本 2 → 3 升级、旧记录默认值、最近一次详情往返和条件写入；既有判题验收记录不包含这些新增合同。
+原 SQLite 和 L01 的实际数据验证保留在[既有实施记录](08-llm-code-review-design.md#121-l01数据契约与离线升级)，不扩展为 MySQL 已验证。MySQL 按[迁移验收 V01–V05](09-mysql-migration-design.md#111-验收清单)执行；M01 核对结构和预置内容，M02–M04 接入后端及相关测试，M06 才验收真实判题和审查展示。
