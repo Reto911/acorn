@@ -44,6 +44,8 @@ The backend serves the browser over HTTP JSON and dispatches jobs to Workers ove
 
 Have an administrator prepare Isolate, cgroups, user quotas, and execution permissions using the [Worker installation guide](crates/worker/README.md#安装与沙箱准备). The paths to GCC, Python, and Isolate are configured in the Worker TOML file.
 
+`isolate --check-config` validates Isolate configuration; filesystem user quotas must be enabled separately. A dedicated ext4 filesystem can be prepared using the [quota setup example](crates/worker/README.md#用户配额文件系统示例).
+
 ### Build
 
 From the repository root, run:
@@ -87,6 +89,8 @@ mysql --host=127.0.0.1 --port=3306 --user=example_initializer --password --ssl-m
 ```
 
 This creates schema version 4, user 1, and the A + B problem with ID 1, C/Python resource limits, and 104 test cases. Reuse this database on subsequent starts. Initialize an empty database and stop at the first SQL error. The backend validates the schema version and configured user at startup. The initialization scripts use MySQL syntax; the application does not import old databases or upgrade them automatically.
+
+See the [SQL guide](sql/README.md) for script contents, account responsibilities, and handling partial initialization.
 
 ### Start the Services
 

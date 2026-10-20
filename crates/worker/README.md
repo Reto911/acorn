@@ -29,6 +29,34 @@ acorn-worker 是独立的 C/Python 判题进程，通过 gRPC 接收任务，在
 
 Worker 使用控制组模式；`/box`、`/tmp` 和阶段私有 `/dev/shm` 目录共享 box UID 的空间与 inode 配额。网络、环境变量和宿主文件可见范围见[隔离策略](../../docs/01-worker-design.md#72-基于-isolate-默认规则的隔离策略)。
 
+### 用户配额文件系统示例
+
+`restricted_init = 0` 允许普通用户初始化沙箱，`isolate --check-config` 检查配置有效性。磁盘空间和 inode 配额还要求工作目录所在文件系统启用用户配额；缺失时，实际判题会在初始化阶段报告 `Cannot set disk quota: quotas have not been enabled for this filesystem`。相关选项见 [Isolate 手册](https://github.com/ioi/isolate/blob/master/isolate.1.txt)。
+
+以下采用 `/etc/isolate` 中默认的 `box_root = /var/lib/isolate`，由管理员为它创建一个新的 1 GiB ext4 镜像。先停止使用该目录的 Worker；镜像路径必须不存在，工作目录必须为空，脚本在条件不满足时停止。自定义 box_root 时相应调整目录。
+
+```sh
+sudo sh -eu <<'SH'
+acorn_quota_image=/var/lib/acorn-isolate.img
+test ! -e "$acorn_quota_image"
+mkdir -p /var/lib/isolate
+test -z "$(find /var/lib/isolate -mindepth 1 -maxdepth 1 -print -quit)"
+truncate -s 1G "$acorn_quota_image"
+mkfs.ext4 -O quota -E quotatype=usrquota "$acorn_quota_image"
+mount -o loop "$acorn_quota_image" /var/lib/isolate
+SH
+```
+
+ext4 的 quota 特性在创建文件系统时建立用户配额元数据，并在挂载时自动启用，见 [ext4 手册](https://man7.org/linux/man-pages/man5/ext4.5.html)。镜像容量是整个沙箱文件系统的容量，各 box 的空间和 inode 上限仍由 Worker 配置决定。
+
+主机或 WSL 重启后，若挂载未保留，重新挂载已有镜像：
+
+```sh
+sudo mount -o loop /var/lib/acorn-isolate.img /var/lib/isolate
+```
+
+重新挂载使用已有文件系统，不再次创建或格式化镜像。需要验证真实判题时使用[既有验收命令](../backend/README.md#检查命令)，不把配置语法检查当作执行验收。
+
 ## 启动
 
 在仓库根目录执行：

@@ -189,6 +189,8 @@ ACORN_TEST_DATABASE_CONFIG=/path/to/mysql-test.toml \
 
 数据库和 workflow 检查同时需要进程 `MYSQL_PASSWORD`；测试 TOML 采用 [backend-test.example.toml](../../config/backend-test.example.toml) 的字段，其中 name 是 1–32 位 ASCII 字母数字库名前缀，每例追加随机 UUID。测试账户需具备该前缀范围内的建库、DDL／DML 及删库权限，拒写和表锁检查另需 TRIGGER／LOCK TABLES。夹具通过三个正式 SQL 初始化独立库，正常收尾先停止服务、关闭连接池再删除本例库；失败残留由开发端处置。测试不自动加载 `.env`，测试账户权限与正式应用账户分开配置。
 
+启用 binlog 时，服务器还须允许该账户创建测试触发器，否则可能返回 1419。由管理员预先准备开发实例，所需设置及影响范围见[迁移测试环境说明](../../docs/09-mysql-migration-design.md#112-命令与环境)；测试本身不修改服务器全局变量。
+
 使用已配置沙箱的主机检查真实单／双 Worker 链路，选择空闲的专用 box ID：
 
 ```sh

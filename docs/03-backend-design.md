@@ -2,9 +2,7 @@
 
 状态：已确认，作为首版实现依据。
 
-本文同步[LLM 代码审查设计](08-llm-code-review-design.md)的后端增量合同，L01–L04 已实现结构版本 3、固定策略和客户端、独立队列与生命周期、手动接纳及 HTTP 查询。Scheduler 按固定版本门槛原子保存审查初态，先完成 ACK 和节点释放再交接；手动接纳由审查服务独立持有事务与交接，客户端断开后继续收尾。入口中断旧 PENDING，停机取消未完成审查并等待已登记短操作。L05 已接入 GUI，L06 有限联调及一次真实审查链路已通过，范围见[实施记录](08-llm-code-review-design.md#126-l06有限联调与真实调用)。LLM 的具体策略和实施验收以第 08 篇为依据，文档维护边界见[索引](README.md)。
-
-实施进度：P06–P10 已完成配置、日志、SQLite 业务访问、开发用户预置、Scheduler、HTTP API，以及启动排队装入、旧在途中断、正常停机与故障退出。源码样例、真实单／双 Worker 联调和独立程序操作验收已完成，实际范围见[开发计划实施记录](04-development-plan.md#7-实施记录)。
+本文定义 HTTP、Scheduler、共享数据库、健康采集及服务生命周期的职责和合同。自动及手动 LLM 审查的策略、独立队列、最新意见及页面合同见[LLM 代码审查设计](08-llm-code-review-design.md)。
 
 MySQL 的连接、配置、事务和故障合同以[迁移设计](09-mysql-migration-design.md)为依据；迁移实际过程和检查结果见[实施记录](d02-execution/09-mysql-migration-execution.md)。
 
@@ -18,7 +16,7 @@ LLM 增量在同一进程增加与 Scheduler 平行的 llm_review 模块，机�
 
 前后端完全分离，后端仅提供 API，不托管前端静态文件，也不实现 CORS 中间件。HTTP 访问边界和浏览器跨域响应由部署端通过防火墙、反向代理及路由配置安排。
 
-浏览器页面、Monaco 编辑、本地草稿和提交交互见[前端 GUI 设计](05-frontend-design.md)，实施见[前端开发计划](06-frontend-development-plan.md)。核心 GUI 与提交历史使用现有 API；F08 已按[健康观测设计](07-health-observation-design.md)完成 H01–H03 的 Worker 状态 RPC、共享采集、只读 HTTP 快照、入口监督及停机接线，页面及过期警告留在 H04。
+浏览器页面、Monaco 编辑、本地草稿和提交交互见[前端 GUI 设计](05-frontend-design.md)，实施见[前端开发计划](06-frontend-development-plan.md)。健康观测通过 Worker 状态 RPC、后端共享采集及只读 HTTP 快照提供页面数据；入口监督、停机、健康页面和过期警告遵守[健康观测设计](07-health-observation-design.md)。
 
 执行规则以 [Worker 设计](01-worker-design.md)为准，存储结构以[数据库设计](02-database-design.md)和[建表 SQL](../sql/001-initial-schema.sql)为准。Scheduler 只有一个活动实例，与 API 一同启动和退出。
 
@@ -32,7 +30,7 @@ LLM 增量在同一进程增加与 Scheduler 平行的 llm_review 模块，机�
 | Worker 客户端 | [Tonic](https://docs.rs/tonic/latest/tonic/) / Prost，依据 `acorn.worker.v1` 协议生成 |
 | HTTP 中间件 | Tower 的 `ServiceBuilder` 组合中间件，tower-http 的 `TraceLayer` 记录请求日志 |
 | 数据库 | MySQL 8.4／InnoDB，使用 [SQLx 0.9.0](https://docs.rs/sqlx/0.9.0/sqlx/) 的 `runtime-tokio`、`mysql`、`mysql-rsa` 特性，直接维护 SQL |
-| LLM 客户端（L02 已实现） | 复用 reqwest 0.13.5 异步客户端，固定 json_schema、无重试和重定向，Responses API 合同见[第 08 篇第 2 节](08-llm-code-review-design.md#2-api-兼容性核对) |
+| LLM 客户端 | 复用 reqwest 0.13.5 异步客户端，固定 json_schema、无重试和重定向，Responses API 合同见[第 08 篇第 2 节](08-llm-code-review-design.md#2-api-兼容性核对) |
 | 配置 | TOML，启动时读取并验证 |
 | 日志 | tracing / tracing-subscriber，英文单行文本输出到 stderr |
 
@@ -87,7 +85,7 @@ LLM 增量在创建及启动装入 JudgingTask 时携带固定版本的 review_m
 
 业务 HTTP 查询读取数据库中的业务状态和结果。前端轮询不触发 Worker RPC；Worker 的阶段和逐点进度不写库，首版 HTTP 也不提供这些临时信息。
 
-[`Health::start`](../crates/backend/src/health.rs) 接受健康配置、共享数据库和 Scheduler 句柄，从 Scheduler 取得现有客户端的廉价克隆；返回缓存句柄和由入口监督的任务。`Health::snapshot()` 只读缓存，`local_snapshot()` 读取创建服务停止标记及 Scheduler 短锁和信号量。`Health::stop()` 中断当前轮次或间隔，任务取消并等待本轮异步检查结束后返回；H03 已在入口启动唯一采集任务，并向 HTTP 共享创建服务、Scheduler 和 Health 句柄；受控及真实 Worker 测试夹具采用同一组装契约。采集周期、错误码和展示规则统一遵守[健康观测设计第 4 节](07-health-observation-design.md#4-后端观测来源与采集)。
+[`Health::start`](../crates/backend/src/health.rs) 接受健康配置、共享数据库和 Scheduler 句柄，从 Scheduler 取得现有客户端的廉价克隆；返回缓存句柄和由入口监督的任务。`Health::snapshot()` 只读缓存，`local_snapshot()` 读取创建服务停止标记及 Scheduler 短锁和信号量。`Health::stop()` 中断当前轮次或间隔，任务取消并等待本轮异步检查结束后返回；入口启动唯一采集任务，并向 HTTP 共享创建服务、Scheduler 和 Health 句柄；受控及真实 Worker 测试夹具采用同一组装契约。采集周期、错误码和展示规则统一遵守[健康观测设计第 4 节](07-health-observation-design.md#4-后端观测来源与采集)。
 
 ## 4. 数据库访问与预置数据
 
@@ -109,9 +107,9 @@ llm_review 复用该共享池和 Tokio runtime。读取审查输入后先归还�
 
 同一版本的测试数据在一次任务装配中按 `case_index` 读取。正常新提交由 API 将内存中的完整任务直接交给 Scheduler，Scheduler 不再次读源码或题库。启动装入排队任务时才由 Scheduler 读取其固定版本数据。
 
-P06 的 [`Database`](../crates/backend/src/database/mod.rs) 提供题目列表与版本查询、创建幂等查询、提交详情与筛选历史、完整固定版本任务装配，以及三个非终态条件更新、终态保存和旧在途中断写入。`create_submission` 在短事务内查重、固定版本并装配 `JudgingTask`，提交并释放连接后返回；待接纳名额由 [`CreationService`](../crates/backend/src/submissions/creation.rs) 预留，数据库层不等待队列。已有同键同内容记录保留原版本；仅 queued 记录返回可交接任务。`queued_tasks` 按顺序读取，并在超过配置容量时明确报错；P09 入口先调用旧在途中断与排队读取，Scheduler 在启动分派循环前装入全部任务及其名额。
+[`Database`](../crates/backend/src/database/mod.rs) 提供题目列表与版本查询、创建幂等查询、提交详情与筛选历史、完整固定版本任务装配，以及三个非终态条件更新、终态保存和旧在途中断写入。`create_submission` 在短事务内查重、固定版本并装配 `JudgingTask`，提交并释放连接后返回；待接纳名额由 [`CreationService`](../crates/backend/src/submissions/creation.rs) 预留，数据库层不等待队列。已有同键同内容记录保留原版本；仅 queued 记录返回可交接任务。`queued_tasks` 按顺序读取，并在超过配置容量时明确报错；入口先调用旧在途中断与排队读取，Scheduler 在启动分派循环前装入全部任务及其名额。
 
-终态先由 [`TerminalOutcome`](../crates/backend/src/submissions.rs) 按已知用例数和原始字节预算校验结果形状，再执行单条条件 UPDATE，同时原子提交状态、独立 verdict、JSON 详情和终态时间。P07 的 Worker 客户端校验完整响应的 Job ID、运行状态、阶段及进度与终态消息对应关系。数据库错误保留 SQLx 原始原因，业务查重与校验错误使用独立类型；P09 在数据库操作边界区分普通只读、关键写入与严重存储故障，通过共享通知保留首个致命错误并交给入口监督，通知不依赖 HTTP 等待者的生命周期。
+终态先由 [`TerminalOutcome`](../crates/backend/src/submissions.rs) 按已知用例数和原始字节预算校验结果形状，再执行单条条件 UPDATE，同时原子提交状态、独立 verdict、JSON 详情和终态时间。Worker 客户端校验完整响应的 Job ID、运行状态、阶段及进度与终态消息对应关系。数据库错误保留 SQLx 原始原因，业务查重与校验错误使用独立类型；数据库操作边界区分普通只读、关键写入与严重存储故障，通过共享通知保留首个致命错误并交给入口监督，通知不依赖 HTTP 等待者的生命周期。
 
 配置示例见 [backend.example.toml](../config/backend.example.toml)。`scheduler.workers` 使用 Tonic endpoint URI；MySQL endpoint 使用 host:port，IPv6 为 [address]:port，配置和日志不包含数据库密码。HTTP 体积按源码最坏 JSON 转义开销预留，gRPC 门限按原始任务／结果另加协议空间校验，Base64 JSON 长度不复用二进制消息门限。入口完成配置、结构版本、预置用户检查和启动任务处理后，启动 Scheduler、共享健康采集及 HTTP 服务，不要求 Worker 启动时即可连接；新任务的实际接纳和失联仍按第 7 节处理。
 

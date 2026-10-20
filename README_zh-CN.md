@@ -44,6 +44,8 @@ Acorn 是支持 C 和 Python 3 的单文件源码判题系统，提供浏览器�
 
 先由管理员按 [Worker 安装说明](crates/worker/README.md#安装与沙箱准备)准备 Isolate、控制组、用户配额和执行权限。Worker 使用的 GCC、Python 和 Isolate 路径在 TOML 中指定。
 
+`isolate --check-config` 检查 Isolate 配置有效性，文件系统用户配额需要单独启用。可按[配额准备示例](crates/worker/README.md#用户配额文件系统示例)准备专用 ext4 文件系统。
+
 ### 构建
 
 在仓库根目录执行：
@@ -87,6 +89,8 @@ mysql --host=127.0.0.1 --port=3306 --user=example_initializer --password --ssl-m
 ```
 
 这会创建结构版本 4、用户 1 和题号 1 的两数求和题，包含 C/Python 限额与 104 个测试用例。后续启动直接复用该数据库。初始化针对空库，遇到首个 SQL 错误即停止；后端启动检查结构版本和配置用户。初始化脚本使用 MySQL 方言，应用不导入旧库或自动升级。
+
+脚本内容、账户职责和初始化中途失败的处理见[SQL 说明](sql/README.md)。
 
 ### 启动服务
 

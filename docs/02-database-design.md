@@ -2,13 +2,11 @@
 
 本文定义 MySQL 8.4／InnoDB、结构版本 4 的数据合同；迁移任务见[迁移设计](09-mysql-migration-design.md)，实际过程和验证结果见[实施记录](d02-execution/09-mysql-migration-execution.md)。
 
-本文同步[LLM 代码审查设计](08-llm-code-review-design.md#5-数据库增量)的数据合同，审查字段、类型、固定版本策略读取、最新审查条件读写和数据库历史筛选已由 L01 实现；客户端由 L02 实现，自动接纳与启动中断由 L03 接通，L04 已接入手动短事务、HTTP 审查查询及状态筛选。现行设计与既有实施记录的维护边界见[文档索引](README.md)。
-
-P06 已实现后端[数据库模块](../crates/backend/src/database/mod.rs)、[题目类型](../crates/backend/src/problems.rs)与[提交和终态类型](../crates/backend/src/submissions.rs)。P07/P08 的 Scheduler 和 HTTP 已使用创建、固定版本任务装配、条件状态和终态写入方法；P09 已将启动读取／中断方法接入入口，并按[后端故障契约](03-backend-design.md#83-数据库及后台故障)报告关键写入与严重存储错误。P10 已从空数据库启动独立程序，验证样例结果、保存后 ACK 和后端重启后查询。开发用户脚本见 [seed-user.sql](../examples/seed-user.sql)。
+数据访问由后端[数据库模块](../crates/backend/src/database/mod.rs)提供，使用[题目类型](../crates/backend/src/problems.rs)与[提交和终态类型](../crates/backend/src/submissions.rs)。审查字段、固定版本策略和最近一次意见遵守[LLM 数据合同](08-llm-code-review-design.md#5-数据库增量)，数据库错误按[后端故障契约](03-backend-design.md#83-数据库及后台故障)报告。开发用户脚本见 [seed-user.sql](../examples/seed-user.sql)。
 
 本次按[MySQL 迁移设计](09-mysql-migration-design.md)全新部署，不保留旧数据。结构版本 4 标记新库结构，不表示执行过 SQLite 升级；此前版本 2 → 3 的 SQL 和实际检查保留在[原实施记录](08-llm-code-review-design.md#121-l01数据契约与离线升级)，不用于 MySQL 初始化。内存限额继续使用 KiB，实际结果中的内存统计仍为字节。
 
-初始建表语句见 [001-initial-schema.sql](../sql/001-initial-schema.sql)，当前初始化步骤见[迁移设计第 7 节](09-mysql-migration-design.md#7-sql-改写与全新初始化)；SQL 目录说明由 M07 补齐。
+初始建表语句见 [001-initial-schema.sql](../sql/001-initial-schema.sql)，账户准备和执行顺序见[SQL 初始化说明](../sql/README.md#初始化)，初始化职责见[迁移设计第 7 节](09-mysql-migration-design.md#7-sql-改写与全新初始化)。
 
 [002-example-problem.sql](../sql/002-example-problem.sql) 提供随正式发布保留的两数求和题及 C/Python 限额、用例，在新库建表后装入；它不改变结构版本或创建用户。
 
@@ -271,4 +269,4 @@ SQL 同时约束审查枚举、JSON 对象格式和基本空值关系；详情�
 
 Scheduler 重启验证在途记录立即失败、排队记录装入内存且不向旧 Worker 查询或补发 ACK；运行中验证迟到结果不覆盖已保存失败。确认动作必须晚于业务终态提交；字节字段往返不损坏，未知统计保持缺失。
 
-原 SQLite 和 L01 的实际数据验证保留在[既有实施记录](08-llm-code-review-design.md#121-l01数据契约与离线升级)，不扩展为 MySQL 已验证。MySQL 按[迁移验收 V01–V05](09-mysql-migration-design.md#111-验收清单)执行；M01 核对结构和预置内容，M02–M04 接入后端及相关测试，M06 才验收真实判题和审查展示。
+原 SQLite 和 L01 的实际数据验证保留在[既有实施记录](08-llm-code-review-design.md#121-l01数据契约与离线升级)，不扩展为 MySQL 已验证。MySQL 验收要求见[迁移验收 V01–V05](09-mysql-migration-design.md#111-验收清单)，实际执行及覆盖范围见[迁移实施记录](d02-execution/09-mysql-migration-execution.md)。
