@@ -4,7 +4,7 @@
 
 ## 1. 当前状态
 
-M01／M02／M03 已完成：MySQL 结构、连接、SQLx 0.9.0 检查式解码、幂等竞争读取、审查行锁和相应故障边界已实现，本步相关测试通过，范围见第 8 节。当前共 11 个工作项已完成，M04、M06、M07 的九个工作项待完成。正式部署配置未修改，应用库未初始化。具体任务定义和完成条件以设计第 10 节为准；原 M05、M08 已按审核结论取消。
+M01–M04 已完成：MySQL 结构、连接、SQLx 0.9.0 检查式解码、幂等竞争读取、审查行锁、故障注入及相关 Rust 检查已完成，M03／M04 的实际范围见第 8／9 节。当前共 15 个工作项已完成，M06、M07 的五个工作项待完成。正式部署配置未修改，应用库未初始化。具体任务定义和完成条件以设计第 10 节为准；原 M05、M08 已按审核结论取消。
 
 ### 1.1 任务完成状态
 
@@ -15,7 +15,7 @@ M01／M02／M03 已完成：MySQL 结构、连接、SQLx 0.9.0 检查式解码�
 | M01 | 3／3 | 完成 |
 | M02 | 4／4 | 完成 |
 | M03 | 4／4 | 完成 |
-| M04 | 0／4 | 未开始 |
+| M04 | 4／4 | 完成 |
 | M06 | 0／2 | 未开始 |
 | M07 | 0／3 | 未开始 |
 
@@ -244,3 +244,61 @@ cargo test -p acorn-backend --locked --test workflow \
 M03 四个工作项完成。V02 的并发创建／手动接纳，以及 V03／V04 中相应的条件保存、迟到结果、ACK 和既有重启／停机路径已作本节范围内检查；不据此宣称 V02–V04 整体验收完成。
 
 M04 继续转换尚存的 SQLite 锁注入和拒写触发器，并执行相应普通读取失败恢复、关键拒写和断开 HTTP 等用例。本轮未做回滚故障、COMMIT 响应丢失或服务端存储损坏注入，也未执行完整 workspace、真实 Isolate／Worker、GUI 或真实模型调用；不新增这些故障的组合矩阵要求。M06／M07 依赖与范围不变。
+
+## 9. M04：测试适配与 Rust 检查
+
+### 9.1 已实现内容
+
+- 适配八个既有 workflow 用例中的 SQLite 锁语句和拒写触发器，没有新增测试框架或用例。健康读取使用独立控制连接的 `LOCK TABLES users WRITE`，题目查询和创建前幂等查询使用对应表锁；控制连接先关闭自动提交，结束时显式 COMMIT 和 UNLOCK TABLES。普通 SELECT 不依赖行写锁阻塞。
+- 健康用例将数据库锁等待设为一秒，读取失败分支的探测预算设为三秒，超时分支保留十毫秒；实际检查分别取得 DatabaseReadFailed 和 ProbeTimeout、失败缓存及 HTTP 展示，并在解锁后恢复，不触发后端故障或判题 RPC。
+- 创建写入通过锁定用户行阻塞 INSERT 的外键检查，手动接纳通过锁定目标提交行阻塞 SELECT FOR UPDATE。断开 HTTP 的创建／审查用例和停机等待审查用例复用既有查询观测入口，确认应用已到达相关 SQL 后再取消 HTTP 等待；解锁后仍完成已登记短操作及相应交接或中断收尾。创建写入超时明确核对 1205、故障退出、记录未新建及未 ACK。
+- 终态和审查拒写触发器改为 MySQL FOR EACH ROW、条件 IF 和 SIGNAL SQLSTATE '45000'，保留受控错误说明、机器结果／PENDING 保存状态、ACK 数量及故障退出断言。模型 API 失败仍只结束该次审查。
+- 复用既有服务停止、连接及池关闭、独立库删除流程，并修正测试组装的数据库说明。迁移设计补充启用 binlog 时创建触发器的环境要求；应用和测试不修改 MySQL 全局变量。
+
+### 9.2 实际失败与环境准备
+
+首次网络检查在工具沙箱中返回 Operation not permitted；切换到获准的宿主网络后，确认 MySQL 为 8.4.11，独立测试库创建和删除通过。
+
+首次八项定向 workflow 检查中，六项通过，两个拒写用例在创建触发器时返回 1419：实例已启用 binlog，且 log_bin_trust_function_creators 为 0。该失败发生在故障注入准备阶段，没有进入预期的拒写断言。先完成其余检查，按创建时间和受控记录确认并明确删除这两个失败用例留下的独立库，没有增加清库扫描或自动修复流程。
+
+用户随后由管理员将开发实例的 log_bin_trust_function_creators 设为 1。只重跑受影响的两个触发器用例，均通过；没有将首次失败改写为通过。最终只读确认独立测试库残留为零，正式应用库未初始化。
+
+### 9.3 实际检查
+
+| 命令／范围 | 结果 |
+| --- | --- |
+| cargo fmt --all -- --check | 通过 |
+| cargo check --workspace --all-targets --locked | 通过 |
+| cargo clippy --workspace --all-targets --locked -- -D warnings | 通过 |
+| cargo test -p acorn-backend --locked --lib --test config_results | 10 项单元测试、7 项配置／结果测试通过 |
+| database | 全部 12 项通过 |
+| workflow | 全部 39 项常规测试通过：先通过不依赖触发器的 37 项，环境准备后通过其余两项；两个真实 Worker 验收按原规则忽略 |
+
+共运行并通过 68 个不同常规测试用例，定向检查和重跑不重复计数。数据库及流程检查由已授权开发入口供给测试 TOML 和进程 MYSQL_PASSWORD，正式测试不自动加载 .env；每例使用独立 MySQL 库及三个正式初始化 SQL。实际测试命令如下：
+
+```sh
+cargo test -p acorn-backend --locked --lib --test config_results
+cargo test -p acorn-backend --locked --test workflow -- --test-threads=1 \
+  health_database_read_failure_and_timeout_recover \
+  disconnected_create_finishes_transaction_and_handoff \
+  process_read_failures_keep_serving \
+  process_creation_failure_exits_without_draining_workers \
+  process_fault_during_shutdown_does_not_wait_other_worker \
+  disconnected_manual_http_finishes_admission \
+  process_shutdown_drains_registered_manual_admission \
+  review_api_failure_and_critical_completion_failure
+cargo test -p acorn-backend --locked --test database --test workflow -- --test-threads=1 \
+  --skip process_fault_during_shutdown_does_not_wait_other_worker \
+  --skip review_api_failure_and_critical_completion_failure
+cargo test -p acorn-backend --locked --test workflow -- --test-threads=1 \
+  process_fault_during_shutdown_does_not_wait_other_worker \
+  review_api_failure_and_critical_completion_failure
+```
+
+两份变更文档的格式、23 处本地链接／锚点、表格、代码块、四段 shell 和一段 TOML 示例检查通过；原章节编号及 20 个设计工作项保持，中英文根说明的既有配置字段和命令一致。`git diff --check` 通过。
+
+### 9.4 完成状态与剩余边界
+
+M04 四个工作项完成。V01–V04 中约定的结构／类型、幂等和固定版本、条件终态和审查、ACK、断开 HTTP、重启／停机、普通读取失败恢复及关键拒写路径已按本节和前序记录的有限范围验证，不扩展为全部故障与状态组合。
+
+未执行完整 workspace 测试、真实 Worker／Isolate、GUI 或真实模型调用，也未注入回滚失败、COMMIT 响应丢失、真实网络断连或服务端存储损坏。M06 继续完成真实判题和受控审查展示的 V05 验收；M07 补齐 SQL README 并核对受影响文档、配置、命令及链接。

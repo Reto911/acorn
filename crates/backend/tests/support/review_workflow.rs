@@ -733,8 +733,10 @@ async fn disconnected_manual_http_finishes_admission() {
     let id = harness.submit("python", "ac").await;
     harness.terminal(&id).await;
     let mut connection = harness.fixture.connection().await;
-    sqlx::query("BEGIN IMMEDIATE")
-        .execute(&mut connection)
+    let mut gate = connection.begin().await.unwrap();
+    sqlx::query("SELECT id FROM submissions WHERE id = ? FOR UPDATE")
+        .bind(&id)
+        .execute(&mut *gate)
         .await
         .unwrap();
     {
@@ -744,11 +746,11 @@ async fn disconnected_manual_http_finishes_admission() {
             Poll::Ready(_) => panic!("A locked manual admission unexpectedly completed"),
         })
         .await;
+        harness.fixture.wait_for_queries(&mut gate,
+            "SELECT state, review_status, review_id, review_details_json FROM submissions WHERE id = ",
+            1).await;
     }
-    sqlx::query("COMMIT")
-        .execute(&mut connection)
-        .await
-        .unwrap();
+    gate.commit().await.unwrap();
     review_state(&harness.fixture.database, &id, ReviewStatus::Pass).await;
     assert_eq!(endpoint.count(), 1);
     connection.close().await.unwrap();
@@ -782,8 +784,10 @@ async fn process_shutdown_drains_registered_manual_admission() {
     let mut backend = BackendProcess::spawn(&fixture);
     let address = backend.listening().await;
     let mut connection = fixture.connection().await;
-    sqlx::query("BEGIN IMMEDIATE")
-        .execute(&mut connection)
+    let mut gate = connection.begin().await.unwrap();
+    sqlx::query("SELECT id FROM submissions WHERE id = ? FOR UPDATE")
+        .bind(&id)
+        .execute(&mut *gate)
         .await
         .unwrap();
     let target = id.clone();
@@ -800,6 +804,9 @@ async fn process_shutdown_drains_registered_manual_admission() {
     backend
         .until_log("Manual review admission registered")
         .await;
+    fixture.wait_for_queries(&mut gate,
+        "SELECT state, review_status, review_id, review_details_json FROM submissions WHERE id = ",
+        1).await;
     waiting.abort();
     assert!(waiting.await.unwrap_err().is_cancelled());
     backend.terminate();
@@ -822,10 +829,7 @@ async fn process_shutdown_drains_registered_manual_admission() {
     .await;
     assert_eq!(status, 503);
     assert_eq!(body["error"]["code"], "BackendStopping");
-    sqlx::query("COMMIT")
-        .execute(&mut connection)
-        .await
-        .unwrap();
+    gate.commit().await.unwrap();
     let (status, logs) = backend.finish().await;
     assert!(status.success(), "{logs}");
     let interrupted = review_state(&fixture.database, &id, ReviewStatus::Failed).await;
@@ -1217,7 +1221,7 @@ async fn review_api_failure_and_critical_completion_failure() {
     let id = body["submission_id"].as_str().unwrap();
     wait_for(|| endpoint.count() == 3).await;
     let mut connection = fixture.connection().await;
-    sqlx::raw_sql("CREATE TRIGGER fail_review_completion BEFORE UPDATE OF review_status ON submissions WHEN OLD.review_status = 'PENDING' BEGIN SELECT RAISE(ABORT, 'Controlled review completion failure'); END;")
+    sqlx::raw_sql("CREATE TRIGGER fail_review_completion BEFORE UPDATE ON submissions FOR EACH ROW BEGIN IF OLD.review_status = 'PENDING' THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Controlled review completion failure'; END IF; END")
         .execute(&mut connection).await.unwrap();
     endpoint.state.release.send_replace(true);
     let (status, logs) = backend.finish().await;

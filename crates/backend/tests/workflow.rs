@@ -530,7 +530,7 @@ async fn health_database_read_failure_and_timeout_recover() {
     )
     .unwrap();
     for (timeout_ms, expected) in [
-        (1_000, ProbeErrorCode::DatabaseReadFailed),
+        (3_000, ProbeErrorCode::DatabaseReadFailed),
         (10, ProbeErrorCode::ProbeTimeout),
     ] {
         let config = HealthConfig {
@@ -549,7 +549,7 @@ async fn health_database_read_failure_and_timeout_recover() {
             review.clone(),
         );
         wait_for(|| health.snapshot().database.state == ProbeState::Ok).await;
-        sqlx::query("BEGIN EXCLUSIVE")
+        sqlx::raw_sql("SET autocommit = 0; LOCK TABLES users WRITE")
             .execute(&mut connection)
             .await
             .unwrap();
@@ -572,7 +572,7 @@ async fn health_database_read_failure_and_timeout_recover() {
             error = fixture.database.failure() => panic!("Ordinary health read triggered a fatal error: {error}"),
             _ = std::future::ready(()) => {},
         }
-        sqlx::query("ROLLBACK")
+        sqlx::raw_sql("COMMIT; UNLOCK TABLES")
             .execute(&mut connection)
             .await
             .unwrap();
@@ -775,8 +775,9 @@ async fn concurrent_creation_merges_and_rollback_releases_permits() {
 async fn disconnected_create_finishes_transaction_and_handoff() {
     let harness = Harness::start(&[Mode::Finish], 1).await;
     let mut lock = harness.fixture.connection().await;
-    sqlx::query("BEGIN IMMEDIATE")
-        .execute(&mut lock)
+    let mut gate = lock.begin().await.unwrap();
+    sqlx::query("SELECT id FROM users WHERE id = 1 FOR UPDATE")
+        .execute(&mut *gate)
         .await
         .unwrap();
     let key = Uuid::new_v4();
@@ -791,10 +792,17 @@ async fn disconnected_create_finishes_transaction_and_handoff() {
         )
         .await
     });
-    wait_for(|| matches!(harness.scheduler.reserve(), Err(AdmissionError::QueueFull))).await;
+    harness
+        .fixture
+        .wait_for_queries(&mut gate, "INSERT INTO submissions ", 1)
+        .await;
+    assert!(matches!(
+        harness.scheduler.reserve(),
+        Err(AdmissionError::QueueFull)
+    ));
     waiting.abort();
     assert!(waiting.await.unwrap_err().is_cancelled());
-    sqlx::query("COMMIT").execute(&mut lock).await.unwrap();
+    gate.commit().await.unwrap();
     harness.creation.wait_idle().await;
     let saved = harness
         .fixture
@@ -1176,7 +1184,7 @@ async fn process_read_failures_keep_serving() {
     let mut backend = BackendProcess::spawn(&fixture);
     let address = backend.listening().await;
     let mut connection = fixture.connection().await;
-    sqlx::query("BEGIN EXCLUSIVE")
+    sqlx::raw_sql("SET autocommit = 0; LOCK TABLES problems WRITE, submissions WRITE")
         .execute(&mut connection)
         .await
         .unwrap();
@@ -1193,7 +1201,7 @@ async fn process_read_failures_keep_serving() {
     .await;
     assert_eq!(status, 500);
     assert_eq!(body["error"]["code"], "InternalError");
-    sqlx::query("ROLLBACK")
+    sqlx::raw_sql("COMMIT; UNLOCK TABLES")
         .execute(&mut connection)
         .await
         .unwrap();
@@ -1225,8 +1233,9 @@ async fn process_creation_failure_exits_without_draining_workers() {
     let address = backend.listening().await;
     wait_for(|| server.mock.gets.load(Ordering::SeqCst) > 0).await;
     let mut connection = fixture.connection().await;
-    sqlx::query("BEGIN IMMEDIATE")
-        .execute(&mut connection)
+    let mut gate = connection.begin().await.unwrap();
+    sqlx::query("SELECT id FROM users WHERE id = 1 FOR UPDATE")
+        .execute(&mut *gate)
         .await
         .unwrap();
     let key = Uuid::new_v4();
@@ -1240,12 +1249,10 @@ async fn process_creation_failure_exits_without_draining_workers() {
     let (status, logs) = backend.finish().await;
     assert_eq!(status.code(), Some(1), "{logs}");
     assert!(logs.contains("Create submission transaction"), "{logs}");
+    assert!(logs.contains("1205"), "{logs}");
     assert!(logs.contains("Backend fault"), "{logs}");
     assert_eq!(server.mock.acks.load(Ordering::SeqCst), 0);
-    sqlx::query("ROLLBACK")
-        .execute(&mut connection)
-        .await
-        .unwrap();
+    gate.rollback().await.unwrap();
     assert!(
         fixture
             .database
@@ -1385,7 +1392,7 @@ async fn process_fault_during_shutdown_does_not_wait_other_worker() {
     })
     .await;
     let mut connection = fixture.connection().await;
-    sqlx::query("CREATE TRIGGER reject_terminal BEFORE UPDATE ON submissions WHEN NEW.state = 'finished' BEGIN SELECT RAISE(ABORT, 'Controlled terminal write failure'); END")
+    sqlx::raw_sql("CREATE TRIGGER reject_terminal BEFORE UPDATE ON submissions FOR EACH ROW BEGIN IF NEW.state = 'finished' THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Controlled terminal write failure'; END IF; END")
         .execute(&mut connection).await.unwrap();
     backend.terminate();
     backend

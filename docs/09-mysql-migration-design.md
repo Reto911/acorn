@@ -343,6 +343,8 @@ ACORN_TEST_DATABASE_CONFIG=/path/to/mysql-test.toml ACORN_ISOLATE_BOX_ID=204 \
 
 测试 TOML 示例见 [backend-test.example.toml](../config/backend-test.example.toml)，提供端点、账户及连接预算；name 为 1–32 位 ASCII 字母数字前缀，每例追加 UUID 生成独立库名。开发账户须有此前缀下的建库、结构初始化、读写和删库权限；M04 另需 TRIGGER 和 LOCK TABLES。夹具每例执行三个正式 SQL，子进程配置仅包含非秘密字段；收尾先停止服务、关闭连接及池，再删除本例库，不直接使用 appdb 做测试。测试文件串行调度控制库及连接数量，V02 在单例内部并发并实际使用多个连接。正式后端不需要测试账户的建库权限。
 
+启用 binlog 且 `log_bin_trust_function_creators=0` 的实例，对创建触发器另有权限限制，仅授予 TRIGGER 仍可能返回 1419。开发端须预先准备允许测试账户创建触发器的环境，例如由管理员在开发实例设置 `log_bin_trust_function_creators=1`；应用和测试不修改服务端全局变量。此设置的影响范围及触发器限制见 [MySQL 存储程序与二进制日志说明](https://dev.mysql.com/doc/refman/8.4/en/stored-programs-logging.html)。
+
 前端源码不变时，仅为 V05 执行已有 pnpm build 并检查相关页面。真实验收另需现有 Isolate、配额和专用 box 环境；环境缺失时记录未执行。各批 Rust 变更按仓库要求完成必需检查；检查已通过且没有新变化或问题时不重复执行。
 
 ## 12. 审核与实施记录入口

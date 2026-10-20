@@ -441,7 +441,7 @@ impl RpcServer {
     }
 }
 
-/// P07/P08 assembly with real transport and SQLite and replaceable Worker behavior.
+/// P07/P08 assembly with real transport, MySQL and replaceable Worker behavior.
 pub struct Harness {
     /// Database files and configuration.
     pub fixture: Fixture,
