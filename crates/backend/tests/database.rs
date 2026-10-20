@@ -240,36 +240,60 @@ async fn published_queries_and_fixed_version_creation() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_idempotency_and_conflict() {
     let fixture = Fixture::new().await;
+    assert!(fixture.config.database.max_connections >= 2);
+    let mut connection = fixture.connection().await;
+    let mut gate = connection.begin().await.unwrap();
+    sqlx::query("SELECT id FROM users WHERE id = 1 FOR UPDATE")
+        .execute(&mut *gate)
+        .await
+        .unwrap();
     let submitted = request("python");
     let mut tasks = vec![];
-    for _ in 0..8 {
+    for index in 0..8 {
         let database = fixture.database.clone();
-        let request = submitted.clone();
+        let mut request = submitted.clone();
+        if index % 2 == 1 {
+            request.source.push(b'x');
+        }
         tasks.push(tokio::spawn(async move {
-            database.create_submission(request).await.unwrap()
+            database.create_submission(request).await
         }));
     }
+    fixture
+        .wait_for_queries(
+            &mut gate,
+            "INSERT INTO submissions",
+            fixture.config.database.max_connections.min(8) as usize,
+        )
+        .await;
+    gate.commit().await.unwrap();
+    connection.close().await.unwrap();
     let mut inserted = 0;
+    let mut conflicts = 0;
     let mut ids = vec![];
     for task in tasks {
-        let result = task.await.unwrap();
-        inserted += usize::from(result.created);
-        ids.push(result.info.id);
+        match task.await.unwrap() {
+            Ok(result) => {
+                inserted += usize::from(result.created);
+                ids.push(result.info.id);
+            }
+            Err(Error::IdempotencyConflict) => conflicts += 1,
+            Err(error) => panic!("Unexpected concurrent creation error: {error}"),
+        }
     }
     assert_eq!(inserted, 1);
+    assert_eq!(ids.len(), 4);
+    assert_eq!(conflicts, 4);
     assert!(ids.iter().all(|id| id == &ids[0]));
-    assert_eq!(
-        fixture
-            .database
-            .submission_by_key(submitted.request_key)
-            .await
-            .unwrap()
-            .unwrap()
-            .info
-            .id,
-        ids[0]
-    );
+    let stored = fixture
+        .database
+        .submission_by_key(submitted.request_key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.info.id, ids[0]);
     let mut conflict = submitted;
+    conflict.source = stored.source;
     conflict.source.push(b'x');
     assert!(matches!(
         fixture.database.create_submission(conflict).await,
@@ -284,6 +308,58 @@ async fn concurrent_idempotency_and_conflict() {
             .len(),
         1
     );
+    tokio::select! {
+        biased;
+        error = fixture.database.failure() => panic!("Idempotency must not notify fatal failure: {error}"),
+        () = std::future::ready(()) => {}
+    }
+    fixture.close().await;
+}
+
+/// A duplicate on an unrelated unique key preserves error 1062 and notifies supervision.
+#[tokio::test]
+async fn unrelated_unique_conflict_remains_fatal() {
+    let fixture = Fixture::new().await;
+    let original = fixture
+        .database
+        .create_submission(request("c"))
+        .await
+        .unwrap();
+    let mut connection = fixture.connection().await;
+    sqlx::query("CREATE UNIQUE INDEX test_source_unique ON submissions (source(64))")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    let Error::Sql(error) = fixture
+        .database
+        .create_submission(request("c"))
+        .await
+        .unwrap_err()
+    else {
+        panic!("An unrelated duplicate must remain a storage error");
+    };
+    assert_eq!(
+        error
+            .as_database_error()
+            .unwrap()
+            .downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
+            .number(),
+        1062
+    );
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        fixture.database.failure(),
+    )
+    .await
+    .unwrap();
+    let stored = fixture
+        .database
+        .list_submissions(&SubmissionFilter::default(), 100, 0)
+        .await
+        .unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].id, original.info.id);
+    connection.close().await.unwrap();
     fixture.close().await;
 }
 
@@ -621,7 +697,20 @@ async fn startup_checks_and_finite_lock_wait() {
     )
     .await
     .unwrap();
-    assert!(matches!(result, Err(Error::Sql(_))));
+    let Err(Error::Sql(error)) = result else {
+        panic!("An expired write lock must report a storage error");
+    };
+    assert_eq!(
+        error
+            .as_database_error()
+            .unwrap()
+            .downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
+            .number(),
+        1205
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(1), database.failure())
+        .await
+        .unwrap();
     sqlx::raw_sql("ROLLBACK")
         .execute(&mut connection)
         .await

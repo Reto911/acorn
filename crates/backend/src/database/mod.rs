@@ -213,12 +213,20 @@ pub async fn initialize_session(
     Ok(())
 }
 
-/// Recognize explicit server storage faults without treating network I/O as disk damage.
-fn severe_storage_error(error: &sqlx::Error) -> bool {
+/// Extract the MySQL server number without interpreting SQLSTATE or transport errors.
+fn mysql_error_number(error: &sqlx::Error) -> Option<u16> {
     error
         .as_database_error()
         .and_then(|error| error.try_downcast_ref::<MySqlDatabaseError>())
-        .is_some_and(|error| matches!(error.number(), 1114 | 1712 | 1810 | 1811 | 1812 | 1817))
+        .map(MySqlDatabaseError::number)
+}
+
+/// Recognize explicit server storage faults without treating network I/O as disk damage.
+fn severe_storage_error(error: &sqlx::Error) -> bool {
+    matches!(
+        mysql_error_number(error),
+        Some(1114 | 1712 | 1810 | 1811 | 1812 | 1817)
+    )
 }
 
 /// Current UTC Unix milliseconds, with no fabricated fallback timestamp.

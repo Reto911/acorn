@@ -4,7 +4,7 @@
 
 ## 1. 当前状态
 
-M01／M02 已完成：驱动、配置、访问层和文档已切为 MySQL，连接池、基础 SQLx 读写、独立建库夹具和子进程基础检查通过。SQLx 已修正为 0.9.0，字符串读取恢复 try_get，修正后 29 项相关检查通过，范围见第 7 节。当前共七个工作项已完成，M03／M04、M06、M07 的 13 个工作项待完成。正式部署配置未修改，应用库未初始化。具体待办和完成条件以设计第 10 节为准；原 M05、M08 已按审核结论取消。
+M01／M02／M03 已完成：MySQL 结构、连接、SQLx 0.9.0 检查式解码、幂等竞争读取、审查行锁和相应故障边界已实现，本步相关测试通过，范围见第 8 节。当前共 11 个工作项已完成，M04、M06、M07 的九个工作项待完成。正式部署配置未修改，应用库未初始化。具体任务定义和完成条件以设计第 10 节为准；原 M05、M08 已按审核结论取消。
 
 ### 1.1 任务完成状态
 
@@ -14,7 +14,7 @@ M01／M02 已完成：驱动、配置、访问层和文档已切为 MySQL，连�
 | --- | --- | --- |
 | M01 | 3／3 | 完成 |
 | M02 | 4／4 | 完成 |
-| M03 | 0／4 | 未开始 |
+| M03 | 4／4 | 完成 |
 | M04 | 0／4 | 未开始 |
 | M06 | 0／2 | 未开始 |
 | M07 | 0／3 | 未开始 |
@@ -171,10 +171,76 @@ M03 继续实现并验证 1062 竞争读取、审查行锁、条件完成及故�
 | cargo test -p acorn-backend --locked --test workflow process_startup_loads_queue_and_interrupts_in_flight -- --test-threads=1 | 一项通过，覆盖子进程配置、既有队列及正常 SIGTERM 收尾 |
 | cargo tree --locked -p acorn-backend --edges normal | SQLx／core／mysql 均为 0.9.0，保留 RSA 认证依赖，不含 SQLite 运行依赖 |
 
-共 29 项相关检查通过。实际 MySQL 仍为 8.4.11；每例独立建库并执行正式 SQL，连接、池及进程收尾后删除本例库，最终只读确认本批测试库无残留。Rust 源码及测试中没有 try_get_unchecked，未保留旧握手排序规则回退。
+共 29 个测试用例通过。实际 MySQL 仍为 8.4.11；每例独立建库并执行正式 SQL，连接、池及进程收尾后删除本例库，最终只读确认本批测试库无残留。Rust 源码及测试中没有 try_get_unchecked，未保留旧握手排序规则回退。
 
 文档整理及修正涉及的 12 份 Markdown、225 处有效本地链接／锚点、表格、代码块、shell／TOML 示例及中英文配置／命令同步检查通过。20 个设计工作项保持，完成状态仅在实施记录维护；三个既有 SQL README 缺失引用继续留在 M07。`git diff --check` 通过。
 
 ### 7.3 验证边界
 
 本次验证覆盖文本类型识别修正及既有基础 MySQL 链路，没有执行全量 workspace 测试、并发同键及审查行锁验收、SQLite 专用故障注入的 MySQL 替换、真实 Isolate／Worker、GUI 或模型调用。M03／M04、M06、M07 的职责和剩余工作不变。
+
+## 8. M03：事务和故障边界
+
+### 8.1 已实现内容
+
+- 创建提交只对本次 INSERT 返回的 MySQL 数值错误 1062 执行竞争读取：先显式回滚，再开启新短事务按同一用户和幂等键读取一次。初次查到与竞争后查到的记录共用内容比较／固定版本任务装配流程，同内容返回原 ID，不同内容返回 IdempotencyConflict；仅 queued 返回可交接任务。内容冲突先结束只读事务，回滚失败保留为存储错误。
+- 同一键不存在时，结束读取事务并保留原 1062；其他 SQL 错误以及回滚、读取或提交错误继续交给关键写入故障观察。该分支不再次 INSERT，不把其他唯一键冲突转为幂等成功。
+- 手动审查在原 READ COMMITTED 短事务中按提交主键 SELECT FOR UPDATE，保持不存在、非 finished、复用 PENDING、预期 ID、容量、新接纳的原判断顺序。事务结束并归还连接后才返回和交接，模型等待不持有连接或行锁；审查完成继续读取不可变源码并按 id、review_id、PENDING 条件写入，迟到结果 0 行是正常结果。
+- 提取实际复用的 MySQL 数值错误号读取，供 1062 分支和既有严重存储分类共同使用。普通网络 I/O 不视为服务端存储损坏，关键写入 SQL 错误仍保留首个故障通知。沿用机器终态／自动审查初态的一次原子保存、保存成功后 ACK、创建与审查独立短操作，以及提交结果不明时不自动重做写入的边界。
+- 同步第 02／03／07／08 篇当前事务、读取错误和审查存储合同；设计保持任务和理由，实际过程与完成状态仅在本记录维护。创建与审查服务的数据库句柄说明改为共享有界池。
+
+### 8.2 实际并发和新增覆盖
+
+复用并加强 concurrent_idempotency_and_conflict：控制连接锁定用户行，使用 SHOW FULL PROCESSLIST 确认本例库有四条应用连接进入 INSERT 后释放锁。八个同键请求包含两份源码，结果为一次新建、三次复用、四次内容冲突；只保存一条提交，未通知致命故障。该安排保证并发已经进入 INSERT，而不是只依赖异步请求碰巧重叠。会话观测只筛选本例库并不打印查询内容；账户可查看自身会话的依据见 [MySQL SHOW PROCESSLIST](https://dev.mysql.com/doc/refman/8.4/en/show-processlist.html)。
+
+复用并加强 concurrent_first_manual_requests_share_one_attempt：控制连接先锁定提交行，确认四条应用连接进入接纳查询，再释放锁。八个并发 HTTP 请求只接纳一个 PENDING、返回同一审查 ID，受控 Responses 端只收到一次 POST。其他既有用例覆盖 PENDING 复用优先于容量／旧 ID、重跑、迟到完成、ACK 失败及停机。
+
+本轮仅新增一个测试用例 unrelated_unique_conflict_remains_fatal：在本例测试库增加源码唯一索引，以不同幂等键触发真实 1062，确认找不到对应幂等记录时保留原错误、通知监督且不新增提交。既有 startup_checks_and_finite_lock_wait 增强为核对实际 1205 和关键写入故障通知；其余用例复用既有测试。
+
+首次数据库及流程功能用例均通过，但收尾的测试库余量检查失败，发现一个库残留。定位为 database_failure_ends_tracking_without_ack 使用的 close_failed 夹具遗漏删除流程；补上共用 Fixture::close，明确清理该单例遗留库后，只重跑受影响用例通过。最终只读核对本批测试库残留为零。
+
+### 8.3 实际检查
+
+| 命令／范围 | 结果 |
+| --- | --- |
+| cargo fmt --all -- --check | 通过 |
+| cargo check --workspace --all-targets --locked | 通过 |
+| cargo clippy --workspace --all-targets --locked -- -D warnings | 通过；夹具收尾修正后再次执行通过 |
+| 后端单元测试与 config_results | 10 项单元测试、7 项配置／结果测试通过 |
+| database | 全部 12 项通过，包含同键竞争及新增的无关唯一键冲突用例 |
+| workflow 的本步相关用例 | 17 项通过，其余 24 项未执行；故障退出用例修正收尾后单独重跑通过，不重复计数 |
+
+本步共运行并通过 46 个不同测试用例。数据库和流程检查使用 MySQL 8.4.11、每例独立库及正式初始化 SQL，测试配置与进程密码由已授权开发入口供给，正式测试不加载 .env。实际测试命令如下：
+
+```sh
+cargo test -p acorn-backend --locked --lib --test config_results
+cargo test -p acorn-backend --locked --test database -- --test-threads=1
+cargo test -p acorn-backend --locked --test workflow -- --test-threads=1 \
+  concurrent_creation_merges_and_rollback_releases_permits \
+  queue_full_and_idempotency_preserve_identity_and_version \
+  queued_rehandoff_keeps_original_version \
+  terminal_replay_bypasses_capacity_and_late_result_is_acked \
+  database_failure_ends_tracking_without_ack \
+  concurrent_first_manual_requests_share_one_attempt \
+  manual_http_admission_pending_merge_and_queue_full \
+  manual_http_rejections_preserve_records \
+  manual_rerun_expected_identity_and_preservation \
+  manual_rerun_survives_previous_attempt_cleanup \
+  automatic_fifo_capacity_and_worker_release \
+  stop_between_terminal_commit_and_ack_completion \
+  stale_machine_terminal_releases_review_capacity \
+  unavailable_review_and_ack_failure_keep_machine_results \
+  process_review_startup_interrupts_without_reposting \
+  process_review_shutdown_cancels_and_marks_new_terminals \
+  process_shutdown_drains_running_and_restart_loads_queued
+cargo test -p acorn-backend --locked --test workflow \
+  database_failure_ends_tracking_without_ack -- --test-threads=1
+```
+
+六份变更文档的格式、144 处有效本地链接／锚点、表格、代码块、三段 shell 和两段 TOML 示例检查通过；唯一涉及的既有 SQL README 缺失引用仍留在 M07。20 个设计工作项及原章节编号保持，当前 11 项完成、九项待完成的状态仅在实施记录维护。`git diff --check` 通过。
+
+### 8.4 完成状态与剩余边界
+
+M03 四个工作项完成。V02 的并发创建／手动接纳，以及 V03／V04 中相应的条件保存、迟到结果、ACK 和既有重启／停机路径已作本节范围内检查；不据此宣称 V02–V04 整体验收完成。
+
+M04 继续转换尚存的 SQLite 锁注入和拒写触发器，并执行相应普通读取失败恢复、关键拒写和断开 HTTP 等用例。本轮未做回滚故障、COMMIT 响应丢失或服务端存储损坏注入，也未执行完整 workspace、真实 Isolate／Worker、GUI 或真实模型调用；不新增这些故障的组合矩阵要求。M06／M07 依赖与范围不变。

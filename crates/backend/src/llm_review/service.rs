@@ -117,7 +117,7 @@ struct Shared {
 /// Cloneable review service, sharing the existing database and one HTTP client.
 #[derive(Clone)]
 pub struct ReviewService {
-    /// Existing single-connection pool, released before model calls.
+    /// Shared bounded database pool, released before model calls.
     database: Database,
     /// Immutable startup settings, never logged as a whole.
     config: Arc<LlmReviewConfig>,

@@ -613,6 +613,7 @@ impl Harness {
         for server in self.servers {
             server.close().await;
         }
+        self.fixture.close().await;
     }
 
     /// Stop and observe the collector before closing its shared database or endpoints.

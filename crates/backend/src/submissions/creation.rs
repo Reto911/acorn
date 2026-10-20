@@ -69,7 +69,7 @@ impl Drop for Active {
 /// Cloneable creation service; the request handler waits but does not own execution.
 #[derive(Clone)]
 pub struct CreationService {
-    /// Existing single-connection database handle.
+    /// Existing shared bounded database pool handle.
     database: Database,
     /// In-memory handoff and capacity owner.
     scheduler: Scheduler,

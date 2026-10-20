@@ -90,7 +90,7 @@ impl Database {
             }
             let json = review.encode(0)?;
             let mut transaction = self.pool.begin().await?;
-            let row = sqlx::query("SELECT state, review_status, review_id, review_details_json FROM submissions WHERE id = ?")
+            let row = sqlx::query("SELECT state, review_status, review_id, review_details_json FROM submissions WHERE id = ? FOR UPDATE")
                 .bind(id).fetch_optional(&mut *transaction).await?;
             let admission = match row {
                 None => ReviewAdmission::NotFound,

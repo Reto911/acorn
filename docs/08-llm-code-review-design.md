@@ -289,7 +289,7 @@ LLM 网络等待不进入 Worker、判题跟踪或数据库事务，不占用 Sc
 
 每次接纳只发一次模型 POST。超时、断连、限流、5xx 或无效输出均保存 `FAILED`，由用户手动重跑；关闭 HTTP 客户端隐式重试，不增加自动回退、循环修复或定时扫描。连接中断时不能确认远端未执行，因此不承诺计费上的恰好一次。
 
-`PENDING → PASS / DOUBTFUL / FAILED` 均按审查 ID 条件更新；过期完成事件不改变当前记录。保存失败按现有关键数据库写入错误处理，不能把仅在内存中取得的意见报告为已保存。
+`PENDING → PASS / DOUBTFUL / FAILED` 在新的短事务中读取不可变源码并校验行号，再按提交 ID、review_id 和 PENDING 条件更新；0 行是正常的条件未生效，过期完成事件不改变当前记录。读取源码不另加写锁，连接不跨越模型调用。保存失败按现有关键数据库写入错误处理，不能把仅在内存中取得的意见报告为已保存。
 
 ### 7.3 启动、停机与异常
 
@@ -347,7 +347,7 @@ reasoning_effort、response_id、usage、prompt_version 和 raw_output_json 均�
 
 预期 ID 的用途是避免旧操作覆盖后来结果。例如页面看到审查 A，请求重跑后创建 B；B 很快结束，延迟到达的同一页面请求仍携带 A，服务器发现当前已是 B 就返回 ReviewChanged，而不会再次付费创建 C。仅检查 PENDING 可以阻止同时审查，不能阻止这一类先后重跑；使用已有 review_id 即可处理，不增加长期请求幂等表。
 
-新接纳在短事务中同时检查机器状态、当前审查状态和预期 ID，写入新的 PENDING 后才交接。停止接纳后到达的新 POST 返回 BackendStopping；已登记短操作按第 7.3 节结束。POST 响应不明时先 GET 当前状态，不自动再次 POST。
+新接纳在 READ COMMITTED 短事务中按提交主键执行 SELECT FOR UPDATE，再检查机器状态、当前审查状态和预期 ID。并发接纳请求取得行锁后读取最新 PENDING 并复用，多余许可由审查服务释放；写入新的 PENDING 后提交并归还连接，再交接队列。停止接纳后到达的新 POST 返回 BackendStopping；已登记短操作按第 7.3 节结束。POST 响应不明时先 GET 当前状态，不自动再次 POST。
 
 expected_review_id 是必填可空键，省略、非 UUID 字符串、错误类型或未知字段均返回 InvalidRequest；UUID 按现有路径规则规范化。通过 HTTP 格式校验后先检查服务停止及可用边界，再在同一事务中按不存在、非 finished、已有 PENDING、预期 ID 不符、名额不足、新接纳的顺序决定结果。已有 PENDING 的复用优先于 ID 比较和容量检查。200 与 202 均携带指向提交详情的 Location；返回值是该短操作取得的持久化快照，随后可能由后台完成更新。
 

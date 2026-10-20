@@ -5,7 +5,7 @@ use acorn_backend::{
     database::{Database, initialize_session},
 };
 use serde::Deserialize;
-use sqlx::{AssertSqlSafe, Connection, MySqlConnection};
+use sqlx::{AssertSqlSafe, Connection, MySqlConnection, Row};
 use uuid::Uuid;
 
 /// Non-secret test connection settings, supplied separately from deployment TOML.
@@ -97,6 +97,43 @@ impl Fixture {
             .await
             .unwrap();
         connection
+    }
+
+    /// Wait for this fixture's concurrent statements while a control transaction holds a row lock.
+    ///
+    /// SHOW lists the development account's own sessions without PROCESS privileges.
+    /// Inspect only this unique database and keep statement contents out of diagnostics.
+    pub async fn wait_for_queries(
+        &self,
+        control: &mut MySqlConnection,
+        prefix: &str,
+        count: usize,
+    ) {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let rows = sqlx::raw_sql("SHOW FULL PROCESSLIST")
+                    .fetch_all(&mut *control)
+                    .await
+                    .unwrap();
+                let matching = rows
+                    .iter()
+                    .filter(|row| {
+                        row.try_get::<Option<String>, _>("db").unwrap().as_deref()
+                            == Some(self.config.database.name.as_str())
+                            && row
+                                .try_get::<Option<String>, _>("Info")
+                                .unwrap()
+                                .is_some_and(|sql| sql.starts_with(prefix))
+                    })
+                    .count();
+                if matching >= count {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("Concurrent MySQL test statements must reach the controlled row lock");
     }
 
     /// Build a child-process TOML value without serializing the password.

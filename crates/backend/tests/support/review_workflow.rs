@@ -1,4 +1,4 @@
-//! Automatic and manual review contracts over SQLite, HTTP, gRPC and backend lifecycle.
+//! Automatic and manual review contracts over MySQL, HTTP, gRPC and backend lifecycle.
 
 use std::{
     sync::{
@@ -325,12 +325,25 @@ async fn concurrent_first_manual_requests_share_one_attempt() {
     let harness = Harness::start_fixture(fixture, &[Mode::Finish]).await;
     let id = harness.submit("python", "ac").await;
     harness.terminal(&id).await;
+    assert!(harness.fixture.config.database.max_connections >= 2);
+    let mut connection = harness.fixture.connection().await;
+    let mut gate = connection.begin().await.unwrap();
+    sqlx::query("SELECT id FROM submissions WHERE id = ? FOR UPDATE")
+        .bind(&id)
+        .execute(&mut *gate)
+        .await
+        .unwrap();
     let mut requests = tokio::task::JoinSet::new();
     for _ in 0..8 {
         let app = harness.app.clone();
         let id = id.clone();
         requests.spawn(async move { manual(&app, &id, None).await });
     }
+    harness.fixture.wait_for_queries(&mut gate,
+        "SELECT state, review_status, review_id, review_details_json FROM submissions WHERE id = ",
+        harness.fixture.config.database.max_connections.min(8) as usize).await;
+    gate.commit().await.unwrap();
+    connection.close().await.unwrap();
     let mut created = 0;
     let mut identities = std::collections::HashSet::new();
     while let Some(result) = requests.join_next().await {

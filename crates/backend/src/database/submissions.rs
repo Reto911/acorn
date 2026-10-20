@@ -1,7 +1,7 @@
 //! Atomic creation, fixed-version task assembly and conditional business-state writes.
 
 use acorn_protocol::worker::v1::{JobFailure, SubmitJobRequest, TestCase};
-use sqlx::{AssertSqlSafe, MySqlConnection, Row, mysql::MySqlRow};
+use sqlx::{AssertSqlSafe, MySql, MySqlConnection, Row, Transaction, mysql::MySqlRow};
 use uuid::Uuid;
 
 use crate::{
@@ -13,7 +13,10 @@ use crate::{
     },
 };
 
-use super::{Database, Error, Result, now_ms, problems::run_limits, reviews::stored_review};
+use super::{
+    Database, Error, Result, mysql_error_number, now_ms, problems::run_limits,
+    reviews::stored_review,
+};
 
 /// Common list columns; queries using this projection never read source or diagnostics.
 /// Formatted SQL includes only this static projection; all request values remain bound.
@@ -77,31 +80,8 @@ impl Database {
             if let Some(existing) =
                 by_key(&mut transaction, self.config.test_user.user_id, &key).await?
             {
-                if existing.info.problem_id != request.problem_id
-                    || existing.info.language_id != request.language_id
-                    || existing.source != request.source
-                {
-                    return Err(Error::IdempotencyConflict);
-                }
-                let task = if existing.info.state == SubmissionState::Queued {
-                    Some(
-                        load_task(
-                            &mut transaction,
-                            &existing.info,
-                            request.source,
-                            &self.config,
-                        )
-                        .await?,
-                    )
-                } else {
-                    None
-                };
-                transaction.commit().await?;
-                return Ok(CreatedSubmission {
-                    info: existing.info,
-                    created: false,
-                    task,
-                });
+                return reuse_submission(transaction, existing, request.problem_id,
+                    &request.language_id, &request.source, &self.config).await;
             }
             if !matches!(request.language_id.as_str(), "c" | "python") {
                 return Err(Error::UnsupportedLanguage);
@@ -121,10 +101,23 @@ impl Database {
                 terminal_at_ms: None,
             };
             let task = load_task(&mut transaction, &info, request.source, &self.config).await?;
-            sqlx::query("INSERT INTO submissions (id, user_id, problem_id, version_no, language_id, source, create_request_key, state, created_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?)")
+            let inserted = sqlx::query("INSERT INTO submissions (id, user_id, problem_id, version_no, language_id, source, create_request_key, state, created_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?)")
                 .bind(&info.id).bind(self.config.test_user.user_id).bind(info.problem_id).bind(info.version_no)
-                .bind(&info.language_id).bind(&task.request.source).bind(key).bind(info.created_at_ms)
-                .execute(&mut *transaction).await?;
+                .bind(&info.language_id).bind(&task.request.source).bind(&key).bind(info.created_at_ms)
+                .execute(&mut *transaction).await;
+            if let Err(error) = inserted {
+                if mysql_error_number(&error) != Some(1062) {
+                    return Err(error.into());
+                }
+                transaction.rollback().await?;
+                let mut transaction = self.pool.begin().await?;
+                if let Some(existing) = by_key(&mut transaction, self.config.test_user.user_id, &key).await? {
+                    return reuse_submission(transaction, existing, info.problem_id,
+                        &info.language_id, &task.request.source, &self.config).await;
+                }
+                transaction.rollback().await?;
+                return Err(error.into());
+            }
             transaction.commit().await?;
             tracing::info!(submission = %info.id, problem = info.problem_id, version = info.version_no, language = %info.language_id, "Submission saved");
             Ok(CreatedSubmission {
@@ -280,6 +273,38 @@ impl Database {
         })
         .await
     }
+}
+
+/// Compare and assemble an existing submission, ending its read transaction before return.
+///
+/// Initial lookup and the single read after a duplicate INSERT share this path.
+/// A content conflict rolls back explicitly so rollback failures remain storage errors.
+async fn reuse_submission(
+    mut transaction: Transaction<'_, MySql>,
+    existing: Submission,
+    problem_id: i64,
+    language_id: &str,
+    source: &[u8],
+    config: &Config,
+) -> Result<CreatedSubmission> {
+    if existing.info.problem_id != problem_id
+        || existing.info.language_id != language_id
+        || existing.source.as_slice() != source
+    {
+        transaction.rollback().await?;
+        return Err(Error::IdempotencyConflict);
+    }
+    let task = if existing.info.state == SubmissionState::Queued {
+        Some(load_task(&mut transaction, &existing.info, existing.source, config).await?)
+    } else {
+        None
+    };
+    transaction.commit().await?;
+    Ok(CreatedSubmission {
+        info: existing.info,
+        created: false,
+        task,
+    })
 }
 
 /// Read an owner-scoped creation key on the caller's existing connection or transaction.
