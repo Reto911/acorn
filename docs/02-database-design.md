@@ -4,7 +4,7 @@
 
 数据访问由后端[数据库模块](../crates/backend/src/database/mod.rs)提供，使用[题目类型](../crates/backend/src/problems.rs)与[提交和终态类型](../crates/backend/src/submissions.rs)。审查字段、固定版本策略和最近一次意见遵守[LLM 数据合同](08-llm-code-review-design.md#5-数据库增量)，数据库错误按[后端故障契约](03-backend-design.md#83-数据库及后台故障)报告。开发用户脚本见 [seed-user.sql](../examples/seed-user.sql)。
 
-本次按[MySQL 迁移设计](09-mysql-migration-design.md)全新部署，不保留旧数据。结构版本 4 标记新库结构，不表示执行过 SQLite 升级；此前版本 2 → 3 的 SQL 和实际检查保留在[原实施记录](08-llm-code-review-design.md#121-l01数据契约与离线升级)，不用于 MySQL 初始化。内存限额继续使用 KiB，实际结果中的内存统计仍为字节。
+按[MySQL 迁移设计](09-mysql-migration-design.md)从空库初始化，不保留旧数据；结构版本 4 标记新库结构。内存限额使用 KiB，实际结果中的内存统计使用字节。
 
 初始建表语句见 [001-initial-schema.sql](../sql/001-initial-schema.sql)，账户准备和执行顺序见[SQL 初始化说明](../sql/README.md#初始化)，初始化职责见[迁移设计第 7 节](09-mysql-migration-design.md#7-sql-改写与全新初始化)。
 
@@ -269,4 +269,4 @@ SQL 同时约束审查枚举、JSON 对象格式和基本空值关系；详情�
 
 Scheduler 重启验证在途记录立即失败、排队记录装入内存且不向旧 Worker 查询或补发 ACK；运行中验证迟到结果不覆盖已保存失败。确认动作必须晚于业务终态提交；字节字段往返不损坏，未知统计保持缺失。
 
-原 SQLite 和 L01 的实际数据验证保留在[既有实施记录](08-llm-code-review-design.md#121-l01数据契约与离线升级)，不扩展为 MySQL 已验证。MySQL 验收要求见[迁移验收 V01–V05](09-mysql-migration-design.md#111-验收清单)，实际执行及覆盖范围见[迁移实施记录](d02-execution/09-mysql-migration-execution.md)。
+数据与事务验收要求见[迁移验收 V01–V05](09-mysql-migration-design.md#111-验收清单)，实际执行及覆盖范围见[迁移实施记录](d02-execution/09-mysql-migration-execution.md)。历史 LLM 数据检查见[审查实施记录](d02-execution/08-llm-code-review-execution.md#121-l01数据契约与离线升级)。

@@ -352,4 +352,4 @@ ACORN_TEST_DATABASE_CONFIG=/path/to/mysql-test.toml ACORN_ISOLATE_BOX_ID=204 \
 - [09 审核记录](d01-review/09-mysql-migration-review.md)：已确认决策、问题解释、差异和审核结论。
 - [09 实施记录](d02-execution/09-mysql-migration-execution.md)：实际完成的工作、检查结果和剩余事项。
 
-设计正文维护当前合同和待办步骤，审核讨论与实际执行结果分别存放，不将未执行的验证写成通过。
+设计正文维护当前合同和待办步骤，审核讨论与实际执行结果分别存放。

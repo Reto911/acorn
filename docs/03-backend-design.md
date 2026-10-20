@@ -1,7 +1,5 @@
 # 后端与 Scheduler 设计
 
-状态：已确认，作为首版实现依据。
-
 本文定义 HTTP、Scheduler、共享数据库、健康采集及服务生命周期的职责和合同。自动及手动 LLM 审查的策略、独立队列、最新意见及页面合同见[LLM 代码审查设计](08-llm-code-review-design.md)。
 
 MySQL 的连接、配置、事务和故障合同以[迁移设计](09-mysql-migration-design.md)为依据；迁移实际过程和检查结果见[实施记录](d02-execution/09-mysql-migration-execution.md)。
@@ -103,7 +101,7 @@ llm_review 复用该共享池和 Tokio runtime。读取审查输入后先归还�
 
 后端仍验证语言、用例数量、数据大小和限额：源码按 UTF-8 编码后的长度计量；输入、期望输出及总载荷按原始字节计量。HTTP 请求体、gRPC 消息和原始任务载荷各有独立上限。
 
-内存限额从 MySQL `memory_kib`、配置 `request.max_run_memory_kib` 到 RPC `RunLimits.memory_kib` 统一使用 KiB，不进行字节除法。当前初始化结构为版本 4，采用空库全新部署；此前 SQLite 版本 2 → 3 的记录仅保留原交付范围。后端与 Worker 使用同一版 KiB 协议，LLM 和本次数据库迁移不修改该协议；实际资源统计和结果字节字段的单位保持原契约。
+内存限额从 MySQL `memory_kib`、配置 `request.max_run_memory_kib` 到 RPC `RunLimits.memory_kib` 统一使用 KiB，不进行字节除法。初始化结构为版本 4，采用空库全新部署。后端与 Worker 使用同一版 KiB 协议；实际资源统计和结果字节字段的单位保持原契约。
 
 同一版本的测试数据在一次任务装配中按 `case_index` 读取。正常新提交由 API 将内存中的完整任务直接交给 Scheduler，Scheduler 不再次读源码或题库。启动装入排队任务时才由 Scheduler 读取其固定版本数据。
 
@@ -362,7 +360,7 @@ Scheduler 后台任务意外退出交给程序入口记录错误并触发故障�
 | Scheduler | 待接纳上限、Worker 地址列表、轮询间隔、拒绝后再次尝试间隔 |
 | gRPC | 提交、查询和 ACK deadline，发送与接收消息上限 |
 | 健康观测 | `[health]` 的 `interval_ms` 和 `timeout_ms`，缺省分别为 5_000 和 1_000；均为正值，派生过期阈值 `2 * (interval_ms + timeout_ms)` 必须不溢出 |
-| LLM 审查配置（L02 已实现） | 可缺省的 `[llm_review]`，缺省不启用；endpoint、密钥、模型、思考强度、独立并发与队列名额、HTTP/token/字节预算见[第 08 篇第 9 节](08-llm-code-review-design.md#9-后端配置预算与错误) |
+| LLM 审查配置 | 可缺省的 `[llm_review]`，缺省不启用；endpoint、密钥、模型、思考强度、独立并发与队列名额、HTTP/token/字节预算见[第 08 篇第 9 节](08-llm-code-review-design.md#9-后端配置预算与错误) |
 | 任务校验 | 源码、用例数、单个输入和答案、合计字节、运行时间及内存的允许上限 |
 | 结果与日志 | 有界诊断及输出约定、日志级别 |
 
@@ -386,4 +384,4 @@ LLM 的完整落库详情固定上限为 32 KiB，按序列化后的 UTF-8 字�
 - 后端重启继续装入 `queued`，将旧在途记录保存失败，不联系旧 Worker；启动排队超限和关键数据库故障按约定退出。
 - 正常停机完成在途处理，排队记录留至下次启动。
 
-LLM 新增合同按[第 08 篇 L01–L06](08-llm-code-review-design.md#10-实施顺序与有限验收)独立验证；上述已完成的检查仅覆盖判题功能。
+LLM 合同按[第 08 篇 L01–L06](08-llm-code-review-design.md#10-实施顺序与有限验收)独立验证。实际结果见[基础判题实施记录](d02-execution/04-development-execution.md#7-实施记录)、[健康观测实施记录](d02-execution/06-frontend-development-execution.md#58-f08h01worker-状态-rpc)和[审查实施记录](d02-execution/08-llm-code-review-execution.md#12-实施记录)。

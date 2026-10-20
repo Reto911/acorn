@@ -1,8 +1,8 @@
 # Worker 设计
 
-状态：Worker 首版独立交付点已完成；P01–P05 已实现配置、日志、语言计划、Isolate 阶段执行、串行判题及三个 RPC，P07/P08 已通过后端 Scheduler 和 HTTP 完成集成，P09 已接入后端启动装入、正常停机及故障退出。P10 已通过真实单／双 Worker 联调和独立程序操作验收，样例与命令见[项目说明](../README_zh-CN.md)。
+本文定义独立 Worker 的 gRPC、串行判题、语言计划、沙箱隔离、结果保留和资源边界。只读状态 RPC 与后端采集、HTTP 及健康页面的分工见[健康观测设计](07-health-observation-design.md)。
 
-F08 的 H01 已实现只读 Worker 状态 RPC，H02–H03 已实现后端共享采集、程序入口及 HTTP 快照；H04 健康页面待接入。Worker RPC 的实际检查与范围见[H01 实施记录](06-frontend-development-plan.md#58-f08h01worker-状态-rpc)。
+基础判题的实际过程与检查见[Worker 与后端实施记录](d02-execution/04-development-execution.md#7-实施记录)，状态 RPC 和健康页面的交付见[前端与健康观测实施记录](d02-execution/06-frontend-development-execution.md#58-f08h01worker-状态-rpc)。
 
 ## 1. 目标与范围
 
@@ -407,7 +407,7 @@ Isolate 使用宿主 Linux 内核，上述策略约束可见资源和允许操�
 
 Worker 启动时一次性读取 TOML 配置，所有门限集中配置；修改后通过重启生效，不动态重载。题目执行限额由请求明确给出，配置文件保存其允许上限和 Worker 自身预算。Scheduler 的轮询与调用超时保存在 Scheduler 配置中。
 
-以下数值是首版配置示例，需按部署资源调整，不代表性能测量结果：
+以下数值是首版配置示例，需按部署资源调整：
 
 ```toml
 [server]
