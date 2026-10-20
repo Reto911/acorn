@@ -107,6 +107,9 @@ in the relevant design documents and must not be maintained here in duplicate.
   execution steps and acceptance criteria. Keep review discussions in review
   records, and actual execution, completion status and check results in the
   corresponding execution records.
+- Keep `docs/README.md` focused on document purposes, content summaries and
+  navigation. Keep implementation progress, completion status and validation
+  results in the corresponding project records.
 - Keep the root README and the READMEs under `crates/`, `sql/` and `web/`
   focused on current functionality, installation, Quick Start, configuration,
   interfaces and usage as relevant to each module. Put development progress,
