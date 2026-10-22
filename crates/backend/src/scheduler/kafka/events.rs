@@ -212,7 +212,9 @@ impl EventConsumer {
         )?;
         let consumer = self.consumer.clone();
         let timeout = self.processor.commit_timeout;
-        tokio::task::spawn_blocking(move || super::commit::confirm(&consumer, &offsets, timeout))
-            .await?
+        tokio::task::spawn_blocking(move || {
+            acorn_kafka::commit::OffsetCommit::start(consumer.as_ref(), &offsets)?.wait(timeout)
+        })
+        .await?
     }
 }

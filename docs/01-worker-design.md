@@ -233,7 +233,9 @@ Scheduler 取得终态并成功保存后调用 `AcknowledgeResult`。确认将�
 
 Job 结束时，若本阶段执行进程尚未启动或进程树已确认停止，释放源码、全部测试数据及编译产物的内存引用，尝试删除私有工作文件，只保留状态和有界结果。文件删除失败记录日志，不阻止后续任务。停止未确认时按第 6 节保留可能仍在使用的资源和执行位置。Worker 不持久化任务或结果，退出或崩溃后的记录保留由本协议明确排除。
 
-P05 的 [`WorkerService`](../crates/worker/src/rpc.rs) 将接纳、进度、终态和 ACK 的状态转换放在一个短同步锁内；[`jobs`](../crates/worker/src/jobs.rs) 保存查询记录及已确认 FIFO。执行器在锁外后台运行，接纳时建立绝对期限和内部停止通道，不持有提交 RPC 的生命周期。终态在 Job 收尾后原子发布，随后仅在安全停止时释放执行位置；停止未确认时执行占用独立于结果记录保留，即使 ACK 后记录被淘汰也不释放。
+[`WorkerService`](../crates/worker/src/runtime.rs) 将接纳、进度和终态的状态转换放在一个短同步锁内；[`jobs`](../crates/worker/src/jobs.rs) 保存执行占用、最新快照通道及旧查询／ACK 记录，[RPC 适配器](../crates/worker/src/rpc.rs)复用同一入口。执行器在锁外后台运行，接纳时建立绝对期限和内部停止通道，不持有提交 RPC 的生命周期。终态在 Job 收尾后原子发布，随后仅在安全停止时释放执行位置；停止未确认时执行占用独立于结果记录保留，即使 ACK 后记录被淘汰也不释放。
+
+[Kafka 服务](../crates/worker/src/kafka/service.rs)通过最新快照通道取得进度及终态，复用同一接纳、执行和停止入口；消费位点、原分区归属、结果 FIFO 及消费者关闭遵循[Kafka 设计第 6 节](10-kafka-judging-design.md#6-worker-消费与执行)。该调用路径不使用 RPC 的结果 ACK 淘汰流程，完整交接后按通道身份释放对应运行记录，避免旧交接删除新的同 ID 执行。当前可执行文件仍选择 RPC 路径；正式切换与旧协议移除由 Kafka 生命周期任务统一处理。
 
 H01 在执行位置保存 `stop_unconfirmed`：接纳时为 false，状态查询返回 `RUNNING`；执行器返回且 `is_available()` 为 false 时，在发布终态的同一次持锁更新中设为 true，返回 `BLOCKED`。安全收尾时删除执行位置，返回 `IDLE`。停机标记直接读取 `Jobs.stopping`，未确认结果数量复用 `Jobs::unacknowledged_count()`，容量来自配置；状态回复不包含 Job ID、源码、测试数据、路径或诊断正文。
 

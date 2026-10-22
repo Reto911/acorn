@@ -1,7 +1,9 @@
-//! Shared Kafka configuration, defaults, validation and client policy.
+//! Shared Kafka configuration, client policy, transport errors and explicit commit results.
 
 use anyhow::{Result, ensure};
+use rdkafka::{error::KafkaError, types::RDKafkaErrorCode};
 
+pub mod commit;
 mod config;
 pub mod defaults;
 
@@ -14,4 +16,27 @@ pub fn validate_group_id(group_id: &str, field: &str) -> Result<()> {
         "{field} must not be empty or contain NUL"
     );
     Ok(())
+}
+
+/// Retry transport outages and exhausted delivery budgets, leaving other failures explicit.
+pub fn temporary(error: &KafkaError) -> bool {
+    matches!(
+        error.rdkafka_error_code(),
+        Some(
+            RDKafkaErrorCode::BrokerTransportFailure
+                | RDKafkaErrorCode::Resolve
+                | RDKafkaErrorCode::AllBrokersDown
+                | RDKafkaErrorCode::MessageTimedOut
+                | RDKafkaErrorCode::OperationTimedOut
+                | RDKafkaErrorCode::QueueFull
+                | RDKafkaErrorCode::RequestTimedOut
+                | RDKafkaErrorCode::LeaderNotAvailable
+                | RDKafkaErrorCode::NotLeaderForPartition
+                | RDKafkaErrorCode::BrokerNotAvailable
+                | RDKafkaErrorCode::ReplicaNotAvailable
+                | RDKafkaErrorCode::NetworkException
+                | RDKafkaErrorCode::NotEnoughReplicas
+                | RDKafkaErrorCode::NotEnoughReplicasAfterAppend
+        )
+    )
 }

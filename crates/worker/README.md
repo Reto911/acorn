@@ -105,6 +105,10 @@ target/debug/acorn-worker --config "$HOME/.config/acorn/worker.toml"
 
 当前服务入口使用 gRPC 判题。Kafka 消息编解码接口见[共享协议](../protocol/README.md#kafka-消息编解码)。
 
+库接口 `kafka::KafkaWorker::new(worker, producer)` 从 `rpc::WorkerService` 取得同一配置及执行入口，`run(stop)` 接收 `watch::Receiver<bool>` 并返回可监督的服务结果。调用方先按同一配置通过 `kafka::producer_config(&config.kafka).create()` 构造事件生产者，并保留 `WorkerService` 供状态 RPC 使用，且仅选择一种任务接入路径。正式消费组位点由部署初始化；服务不自动重置。
+
+Kafka 服务保持本机单槽，执行期间持续驱动消费组，忙或结果名额不足时暂停分区。执行前预留结果容量，同一 Job 的待发进度只保留最新快照；终态按 FIFO 发布，确认后只重试原任务位点。失去原分区归属的执行仍可回传终态，但不提交旧位点。BLOCKED 后立即开始关闭任务消费者并退出组，状态 RPC 和结果生产者继续运行；正常停机通过既有停止通道收尾执行，再以 `kafka.shutdown_timeout_ms` 限制全部结果及位点的共同消息收尾。
+
 ## gRPC 接口
 
 服务名为 `acorn.worker.v1.JudgeWorker`，定义见 [worker.proto](../../proto/acorn/worker/v1/worker.proto)。Rust 类型和调用入口由 [acorn-protocol](../protocol/README.md)提供。
@@ -134,6 +138,24 @@ Ctrl-C 或 SIGTERM 先停止接纳，再停止当前执行并完成共同清理�
 
 ```sh
 cargo test -p acorn-worker --locked
+```
+
+真实 Kafka 的定向检查只使用临时 topic 和消费组，需要可创建／删除测试资源的 Kafka 入口：
+
+```sh
+ACORN_TEST_KAFKA_SERVERS=localhost:9092 \
+  cargo test -p acorn-worker --locked --test kafka real_kafka_worker_capacity_and_shutdown -- --ignored
+ACORN_TEST_KAFKA_SERVERS=localhost:9092 \
+  cargo test -p acorn-worker --locked --test kafka real_kafka_blocked_worker_leaves_group_for_replacement -- --ignored
+ACORN_TEST_KAFKA_SERVERS=localhost:9092 \
+  cargo test -p acorn-worker --locked --test kafka real_kafka_result_backpressure_and_total_shutdown_budget -- --ignored
+```
+
+这些用例复用受控 Isolate 管理器，检查消费、分区撤销、结果交接和停机，不作为隔离证据。一条真实 Isolate 判题另需空闲的专用 box ID：
+
+```sh
+ACORN_TEST_KAFKA_SERVERS=localhost:9092 ACORN_ISOLATE_BOX_ID=210 \
+  cargo test -p acorn-worker --locked --test kafka real_kafka_isolate_execution -- --ignored
 ```
 
 ### Isolate 阶段检查

@@ -1,4 +1,11 @@
-//! Worker Kafka client options for event production and task consumption.
+//! Worker task consumption, result handoff and role-specific Kafka client options.
+
+mod close;
+mod handoff;
+mod ownership;
+mod service;
+
+pub use service::KafkaWorker;
 
 use acorn_kafka::KafkaConfig;
 use rdkafka::config::ClientConfig;

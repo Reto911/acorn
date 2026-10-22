@@ -179,7 +179,7 @@ delete 策略按日志段清理过期数据，消费完成不会立即删除日�
 
 ## 6. Worker 消费与执行
 
-输入约束复用[现有接纳校验](../crates/worker/src/rpc.rs)，执行、停止和资源合同沿用[Worker 设计](01-worker-design.md#6-统一沙箱接口)。
+输入约束复用[公共运行入口](../crates/worker/src/runtime.rs)的接纳校验，执行、停止和资源合同沿用[Worker 设计](01-worker-design.md#6-统一沙箱接口)。[Worker Kafka 服务](../crates/worker/src/kafka/service.rs)组合消费驱动、单槽执行通知及 FIFO 交接；旧 RPC 通过同一运行入口接纳。
 
 ### 6.1 接纳与结果交接
 
@@ -300,7 +300,7 @@ commit_timeout_ms 是应用等待位点提交结果的上限，不是直接传�
 
 按第 3.1 节的确认条件直接提交指定分区的 offset+1，不提交尚未处理的预取记录。接口语义见 [Consumer::commit](https://docs.rs/rdkafka/0.39.0/rdkafka/consumer/trait.Consumer.html#tymethod.commit)。
 
-共享 `acorn-kafka` 使用普通 KafkaConfig 结构体，统一声明 TOML 字段、Serde 默认值和配置校验，消费组字段为 group_id；共享库提供与角色无关的客户端策略和传输／缓冲设置。两端配置直接使用该类型；后端 scheduler::kafka 选择任务生产、事件消费，Worker kafka 选择事件生产、任务消费，各自通过 producer_config(&KafkaConfig)／consumer_config(&KafkaConfig) 向共享策略传入对应消息上限。独立成员观测也复用组名校验。发布及事件消费仍归 Scheduler，Worker 消费归 Worker；共享库不建立连接或持有业务状态。`acorn_protocol::records` 继续负责消息编解码和由负载派生 key。
+共享 `acorn-kafka` 使用普通 KafkaConfig 结构体，统一声明 TOML 字段、Serde 默认值和配置校验，消费组字段为 group_id；共享库提供与角色无关的客户端策略、传输／缓冲设置、临时错误分类和[显式位点确认](../crates/kafka/src/commit.rs)。位点工具借用客户端并通过 RAII 管理本次结果队列及事件；Worker 在原归属的短锁内入队提交，再在阻塞线程分段等待实际结果，以响应撤销和总消息期限。两端配置直接使用该类型；后端 scheduler::kafka 选择任务生产、事件消费，Worker kafka 选择事件生产、任务消费，各自通过 producer_config(&KafkaConfig)／consumer_config(&KafkaConfig) 向共享策略传入对应消息上限。独立成员观测也复用组名校验。发布及事件消费仍归 Scheduler，Worker 消费归 Worker；共享库不建立连接或持有业务状态。`acorn_protocol::records` 继续负责消息编解码和由负载派生 key。
 
 生产者 message.max.bytes 及消费者 message.max.bytes、fetch.message.max.bytes、fetch.max.bytes 在对应编码上限外预留 1024 字节，receive.message.max.bytes 再增加 512 字节。生产者 queue.buffering.max.messages=128，queue.buffering.max.kbytes 为两个最大传输记录向上取整的 KiB 数；消费者 queued.min.messages=1，queued.max.messages.kbytes 为一个最大传输记录向上取整的 KiB 数。上述预取缓冲为软限制，允许被一次 fetch 超过。参数依据见[librdkafka 2.12.1 配置](https://github.com/confluentinc/librdkafka/blob/v2.12.1/CONFIGURATION.md)，发送等待语义见 [FutureProducer](https://docs.rs/rdkafka/0.39.0/rdkafka/producer/struct.FutureProducer.html#method.send)。
 

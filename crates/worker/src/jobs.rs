@@ -11,7 +11,7 @@ use crate::sandbox::StopReason;
 /// Running progress or immutable terminal content with its ACK membership.
 pub(crate) struct JobRecord {
     /// Bounded query response; never contains source or test data.
-    pub reply: GetJobReply,
+    pub updates: watch::Sender<GetJobReply>,
     /// Whether this terminal record has entered the acknowledged FIFO.
     pub acknowledged: bool,
 }
@@ -46,7 +46,9 @@ impl Jobs {
     pub fn unacknowledged_count(&self) -> usize {
         self.records
             .values()
-            .filter(|record| record.reply.state != JobState::Running as i32 && !record.acknowledged)
+            .filter(|record| {
+                record.updates.borrow().state != JobState::Running as i32 && !record.acknowledged
+            })
             .count()
     }
 
@@ -56,7 +58,7 @@ impl Jobs {
             .records
             .get_mut(job_id)
             .ok_or_else(|| Status::not_found("JobNotFound"))?;
-        if record.reply.state == JobState::Running as i32 {
+        if record.updates.borrow().state == JobState::Running as i32 {
             return Err(Status::failed_precondition("ResultNotReady"));
         }
         if record.acknowledged {
