@@ -97,7 +97,7 @@ target/debug/acorn-worker --config "$HOME/.config/acorn/worker.toml"
 
 构建默认动态链接系统 librdkafka（至少 2.12.1），需要开发包及 pkg-config；静态构建方法见[根说明](../../README_zh-CN.md#构建)。仅构建 Worker 时可执行 `cargo build -p acorn-worker --locked --no-default-features --features kafka-static`。
 
-`[kafka]` 必填，必须显式提供 `bootstrap_servers`、`tasks_topic`、`events_topic` 和 `group_id`。端点使用 `host:port` 或 `[IPv6]:port`，不带 URL 协议；两个 topic 必须不同。消息上限及 `delivery_timeout_ms`、`queue_timeout_ms`、`commit_timeout_ms`、`shutdown_timeout_ms` 的默认值与范围见[后端配置](../backend/README.md#kafka-客户端配置)，两端按部署对齐。使用已有配置时，将 `[kafka]` 节合并到实际 `--config` 指定的文件，保留工具路径、沙箱和执行配置。
+`[kafka]` 必填，必须显式提供 `bootstrap_servers`、`tasks_topic`、`events_topic` 和 `group_id`。端点使用 `host:port` 或 `[IPv6]:port`，不带 URL 协议；两个 topic 必须不同。消息上限及 `delivery_timeout_ms`、`queue_timeout_ms`、`shutdown_timeout_ms` 的默认值与范围见[后端配置](../backend/README.md#kafka-客户端配置)，两端按部署对齐。使用已有配置时，将 `[kafka]` 节合并到实际 `--config` 指定的文件，保留工具路径、沙箱和执行配置。既有 `[kafka]` 配置须删除 `commit_timeout_ms`，该字段已不再接受。
 
 配置直接使用 [acorn-kafka](../kafka/README.md) 的普通 `KafkaConfig`。`kafka::producer_config(&config.kafka)`／`consumer_config(&config.kafka)` 分别选择事件生产／任务消费，并调用共享客户端策略，采用 PLAINTEXT、幂等生产及 `acks=all`、手动位点、`auto.offset.reset=error`、classic 消费组，两者均禁止自动创建 topic。传输开销和队列软限制沿用[后端配置说明](../backend/README.md#kafka-客户端配置)，但发送预算对应事件、接收预算对应任务。
 
@@ -107,9 +107,9 @@ target/debug/acorn-worker --config "$HOME/.config/acorn/worker.toml"
 
 库接口 `kafka::KafkaWorker::new(worker, producer)` 从 `rpc::WorkerService` 取得同一配置及执行入口，`run(stop)` 接收 `watch::Receiver<bool>` 并返回可监督的服务结果。调用方先按同一配置通过 `kafka::producer_config(&config.kafka).create()` 构造事件生产者，并保留 `WorkerService` 供状态 RPC 使用，且仅选择一种任务接入路径。正式消费组位点由部署初始化；服务不自动重置。
 
-Kafka 服务保持本机单槽，执行期间持续驱动消费组，忙或结果名额不足时暂停分区。执行前预留结果容量，同一 Job 的待发进度只保留最新快照；终态按 FIFO 发布，确认后只重试原任务位点。失去原分区归属的执行仍可回传终态，但不提交旧位点。BLOCKED 后立即开始关闭任务消费者并退出组，状态 RPC 和结果生产者继续运行；正常停机通过既有停止通道收尾执行，再以 `kafka.shutdown_timeout_ms` 限制全部结果及位点的共同消息收尾。
+Kafka 服务保持本机单槽，执行期间持续驱动消费组，忙或结果名额不足时暂停分区。执行前预留结果容量，同一 Job 的待发进度只保留最新快照；终态按 FIFO 发布，取得 broker 确认后，在原归属短锁下以 safe 异步接口提交任务位点请求；入队成功即释放结果条目和名额，不读回、不逐条等待位点回执。临时入队失败只重试本阶段，不重发已确认终态。失去原分区归属的执行仍可回传终态，但不提交旧位点。BLOCKED 后立即开始关闭任务消费者并退出组，状态 RPC 和结果生产者继续运行；正常停机通过既有停止通道收尾执行，再以 `kafka.shutdown_timeout_ms` 限制全部结果及位点的共同消息收尾。
 
-任务消费沿用 StreamConsumer，退出组由 SDK RAII 完成。释放前失效原归属，等待在途提交释放消费者引用，再在阻塞线程销毁最后一个句柄；SDK 关闭错误由 SDK 日志报告。共同消息预算同时约束等待消费者释放，超时会报告未完成收尾，但不会取消已经开始的析构，进程退出仍可能等待它。
+任务消费沿用 StreamConsumer，退出组由 SDK RAII 完成。释放前失效原归属，在阻塞线程销毁最后一个句柄；SDK 关闭错误由 SDK 日志报告。共同消息预算同时约束等待消费者释放，超时会报告未完成收尾，但不会取消已经开始的析构，进程退出仍可能等待它。
 
 ## gRPC 接口
 

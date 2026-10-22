@@ -115,7 +115,6 @@ fn kafka_configuration_contract() {
             ![
                 "delivery_timeout_ms =",
                 "queue_timeout_ms =",
-                "commit_timeout_ms =",
                 "shutdown_timeout_ms = 5_000",
                 "max_task_record_bytes =",
                 "max_event_record_bytes =",
@@ -128,7 +127,6 @@ fn kafka_configuration_contract() {
     let defaults = Config::parse(&defaults).unwrap();
     assert_eq!(defaults.kafka.delivery_timeout_ms, 30_000);
     assert_eq!(defaults.kafka.queue_timeout_ms, 1_000);
-    assert_eq!(defaults.kafka.commit_timeout_ms, 5_000);
     assert_eq!(defaults.kafka.shutdown_timeout_ms, 5_000);
     assert_eq!(defaults.kafka.max_task_record_bytes, 16_777_216);
     assert_eq!(defaults.kafka.max_event_record_bytes, 1_048_576);
@@ -153,7 +151,10 @@ fn kafka_configuration_contract() {
             "delivery_timeout_ms = 2147483648",
         ),
         ("queue_timeout_ms = 1_000", "queue_timeout_ms = 0"),
-        ("commit_timeout_ms = 5_000", "commit_timeout_ms = 0"),
+        (
+            "queue_timeout_ms = 1_000",
+            "queue_timeout_ms = 1_000\ncommit_timeout_ms = 5_000",
+        ),
         ("shutdown_timeout_ms = 5_000", "shutdown_timeout_ms = 0"),
         (
             "max_task_record_bytes = 16_777_216",

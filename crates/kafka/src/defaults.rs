@@ -12,11 +12,6 @@ pub fn queue_timeout_ms() -> u64 {
     1_000
 }
 
-/// Default value for Kafka commit_timeout_ms.
-pub fn commit_timeout_ms() -> u64 {
-    5_000
-}
-
 /// Default value for Kafka shutdown_timeout_ms.
 pub fn shutdown_timeout_ms() -> u64 {
     5_000

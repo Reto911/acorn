@@ -68,18 +68,17 @@ HTTP 和 gRPC 的访问范围由部署端配置。后端使用配置中的预置
 
 `[kafka]` 必填，`bootstrap_servers`、`tasks_topic`、`events_topic` 和 `group_id` 必须显式配置。端点采用 `host:port` 或 `[IPv6]:port`，不带 URL 协议；两个 topic 必须不同。宿主访问 Compose 中的 EXTERNAL listener 可使用示例的 `localhost:9092`。使用已有私有配置时，将该节合并到实际 `--config` 指定的文件，其余数据库和审查配置保留原值；数值预算可省略并使用下表默认值。
 
-| 字段                     | 默认值     | 含义                            |
-| ------------------------ | ---------- | ------------------------------- |
-| `delivery_timeout_ms`    | `30000`    | 单次投递及客户端内部重试预算    |
-| `queue_timeout_ms`       | `1000`     | 等待进入生产者队列的预算        |
-| `commit_timeout_ms`      | `5000`     | Worker 位点确认预算；后端不使用 |
-| `shutdown_timeout_ms`    | `5000`     | 正常停机的总消息收尾预算        |
-| `max_task_record_bytes`  | `16777216` | 编码任务上限，最多 16 MiB       |
-| `max_event_record_bytes` | `1048576`  | 编码事件上限，最多 1 MiB        |
+| 字段                     | 默认值     | 含义                         |
+| ------------------------ | ---------- | ---------------------------- |
+| `delivery_timeout_ms`    | `30000`    | 单次投递及客户端内部重试预算 |
+| `queue_timeout_ms`       | `1000`     | 等待进入生产者队列的预算     |
+| `shutdown_timeout_ms`    | `5000`     | 正常停机的总消息收尾预算     |
+| `max_task_record_bytes`  | `16777216` | 编码任务上限，最多 16 MiB    |
+| `max_event_record_bytes` | `1048576`  | 编码事件上限，最多 1 MiB     |
 
 时间预算必须为正且不超过 `2147483647` ms。编码上限须容纳配置允许的原始任务和有界结果及 Protobuf 开销。
 
-后端在必要数据库写入完成后，使用 SDK safe 异步接口发起事件位点提交；不读回、不逐条等待 broker 回执。请求入队失败仍先完成已保存审查的本地交接，再报告错误并结束消费服务。入队成功仅表示 SDK 已受理，位点可能落后并产生事件重放；已有终态和审查按幂等规则处理。`commit_timeout_ms` 仍由共享配置接受和校验，但后端不使用它等待提交结果。
+后端在必要数据库写入完成后，使用 SDK safe 异步接口发起事件位点提交；不读回、不逐条等待 broker 回执。请求入队失败仍先完成已保存审查的本地交接，再报告错误并结束消费服务。入队成功仅表示 SDK 已受理，位点可能落后并产生事件重放；已有终态和审查按幂等规则处理。既有 `[kafka]` 配置须删除 `commit_timeout_ms`；该字段已移除，保留它会按未知字段拒绝启动。
 
 独立的 `[worker_membership]` 可省略，`tasks_group_id` 默认 `acorn-judge-workers-v1`，须与 Worker 的 `[kafka].group_id` 一致；`interval_ms` 默认 `5000`，`timeout_ms` 默认 `1000`；样本新鲜期限为 `2 × (interval_ms + timeout_ms)`，默认 12 秒。间隔必须为正，查询预算使用正的客户端毫秒范围，派生期限不可溢出。此配置与 `[health]` 独立。
 

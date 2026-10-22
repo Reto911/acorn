@@ -1,9 +1,8 @@
-//! Shared Kafka configuration, client policy, transport errors and explicit commit results.
+//! Shared Kafka configuration, client policy and transport errors.
 
 use anyhow::{Result, ensure};
 use rdkafka::{error::KafkaError, types::RDKafkaErrorCode};
 
-pub mod commit;
 mod config;
 pub mod defaults;
 

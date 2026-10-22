@@ -198,7 +198,7 @@ delete 策略按日志段清理过期数据，消费完成不会立即删除日�
 
 队列只驻留内存，交接完成后移除条目。Worker 退出时未完成交接的结果可能丢失，对应任务依赖未提交位点重投。
 
-任务消费者沿用 StreamConsumer，事件生产者采用 FutureProducer。执行、结果发送和消费驱动分开；沿用 recv 持续服务消费组事件，执行忙或结果名额满时 pause 分区并限制预取及应用缓冲。重平衡回调只通知驱动，不等待执行。关闭时释放最后一个消费者句柄，由 SDK RAII 退出消费组；等待在途提交释放引用及 SDK 析构均放在阻塞线程，不阻塞 Tokio 执行线程。接口见 [StreamConsumer](https://docs.rs/rdkafka/0.39.0/rdkafka/consumer/stream_consumer/struct.StreamConsumer.html)。
+任务消费者沿用 StreamConsumer，事件生产者采用 FutureProducer。执行、结果发送和消费驱动分开；沿用 recv 持续服务消费组事件，执行忙或结果名额满时 pause 分区并限制预取及应用缓冲。重平衡回调只通知驱动，不等待执行。关闭时释放最后一个消费者句柄，由 SDK RAII 退出消费组；位点入队只在同步调用期间借用消费者，不跨 await 持有引用；SDK 析构放在阻塞线程，不阻塞 Tokio 执行线程。接口见 [StreamConsumer](https://docs.rs/rdkafka/0.39.0/rdkafka/consumer/stream_consumer/struct.StreamConsumer.html)。
 
 ### 6.2 分区撤销、断连与重复
 
@@ -216,7 +216,7 @@ delete 策略按日志段清理过期数据，消费完成不会立即删除日�
 
 发生 StopUnconfirmed 并进入 BLOCKED 后：
 
-1. 立即停止任务接纳并失效原归属，开始通过 RAII 释放消费者、退出消费组；不等待已有终态发布完成。在途位点提交按失效归属结束，最后一个消费者句柄在阻塞线程析构。
+1. 立即停止任务接纳并失效原归属，开始通过 RAII 释放消费者、退出消费组；不等待已有终态发布完成。失效归属后不再发起旧位点请求，已入队请求不承诺取消；最后一个消费者句柄在阻塞线程析构。
 2. 保留健康 RPC，继续返回 BLOCKED；结果生产者按第 6.1 节继续重试已有终态。此路径下任务消费者的结束是预期生命周期事件，Worker 进程继续提供上述服务。
 3. 消费者关闭后不再提交任务位点，队列项按第 6.2 节释放；未提交任务可由其他 Worker 接管并重新执行，终态选择遵循第 3.2 节。
 4. 本机执行位置及依赖停止确认的资源继续保留，等待部署端处理，不自动恢复执行。
@@ -305,7 +305,7 @@ Kafka 端点采用 `host:port` 或 `[IPv6]:port`，不带 URL 协议；topic 使
 | auto.offset.reset=error        | 消费者         | 无初始位点或位点越界时报告错误                                              |
 | group.protocol=classic         | 消费者         | 使用原有消费者组协议                                                        |
 
-两端不逐条等待位点回执，也不读回位点；日志中请求入队成功只表示 SDK 已受理，不能记为 broker 已保存位点。commit_timeout_ms 不再属于目标配置，在 S05 随实现清理，现有部署 TOML 届时须删除该字段。delivery_timeout_ms 对应生产者 delivery.timeout.ms，限制单次消息投递及其内部重试；FutureProducer::send 的 queue_timeout 仅限制进入客户端队列的等待，由 queue_timeout_ms 指定。shutdown_timeout_ms 规定正常停机的总消息收尾预算，与 Worker 沙箱停止预算分开，仍覆盖待发布结果、位点请求入队及消费者关闭。两阶段消息发送等待均需有界。
+两端不逐条等待位点回执，也不读回位点；日志中请求入队成功只表示 SDK 已受理，不能记为 broker 已保存位点。commit_timeout_ms 已移除，既有部署 TOML 必须删除该字段，否则按未知字段拒绝启动。delivery_timeout_ms 对应生产者 delivery.timeout.ms，限制单次消息投递及其内部重试；FutureProducer::send 的 queue_timeout 仅限制进入客户端队列的等待，由 queue_timeout_ms 指定。shutdown_timeout_ms 规定正常停机的总消息收尾预算，与 Worker 沙箱停止预算分开，仍覆盖待发布结果、位点请求入队及等待消费者 RAII 释放。两阶段消息发送等待均需有界。
 
 按第 3.1 节的业务条件，使用 CommitMode::Async 提交指定分区的 offset+1，不提交尚未处理的预取记录。接口语义见 [Consumer::commit](https://docs.rs/rdkafka/0.39.0/rdkafka/consumer/trait.Consumer.html#tymethod.commit)。
 
@@ -534,7 +534,7 @@ cargo test -p acorn-worker --locked
 
 沿用 StreamConsumer 和现有 recv 驱动，不改用 BaseConsumer，不新增轮询驱动。S03 仅移除原生关闭调用，以 SDK RAII 释放消费者并退出组；任务位点仍保留原确认等待，异步提交及名额释放时机由 S04 修改。
 
-1. 关闭前失效原分区归属，等待在途提交释放消费者引用，再在阻塞线程销毁最后一个 SDK 句柄；由析构完成消费组退出，不再直接检查原生 closed。
+1. 关闭前失效原分区归属，在阻塞线程销毁最后一个 SDK 句柄；由析构完成消费组退出，不再直接检查原生 closed。
 2. BLOCKED 不等待终态发布即开始释放消费者，状态 RPC 和结果生产者继续可用。正常停机沿用共同消息期限，超时报告等待未完成；SDK 析构继续，不承诺底层退出可以强制取消。
 3. 复用 Worker 库测试及三项真实 Kafka 检查：容量与正常停机、BLOCKED 后另一 Worker 接管、结果积压与总消息预算。执行 fmt、workspace check 和必需 Clippy；静态模式复验按 S06 汇总。消费驱动未改型，不再安排原计划中的接收延迟和空闲 CPU 对比。
 
@@ -543,3 +543,17 @@ cargo test -p acorn-worker --locked
 1. handoff::commit 在原归属短锁下，使用 SDK safe CommitMode::Async 入队原记录的 offset+1。移除该路径的阻塞任务、逐条确认等待和单次提交预算参数；入队边界继续检查共同消息期限，不跨 await 保留消费者引用，并简化随之无用的释放等待代码。
 2. FIFO 仍先取得终态发布确认，再发起位点请求；入队成功即释放结果条目和名额。仅对同步可见的临时入队失败重试本阶段，不重发已确认终态；撤销后按既有阶段释放，不提交旧归属，也不跨过同分区未完成记录。
 3. 调整现有交接测试为入队失败语义，复验容量／撤销、BLOCKED 接管及积压／总预算三项真实 Kafka 检查，并执行 fmt、workspace check 和必需 Clippy。同步实际行为说明和跟踪记录；共享 OffsetCommit、无用配置字段及相关包装在 S05 清理。
+
+### 12.6 S06 收尾验证
+
+1. 核对 S01–S05 的实际检查和剩余限制；沿用本批通过的动态模式、配置及静态检查结果，仅在后续代码改动或发现问题时复跑受影响用例。
+2. 按既有 workspace 命令构建默认动态与显式静态两种模式，并执行静态 Worker 容量／撤销／正常停机用例，验证最终 SDK 调用和链接方式。真实检查继续使用独立 topic、消费组及既有受控管理器。
+3. 复核两端旧配置字段已移除、未知字段会拒绝、手写 Rust 无 unsafe 或原生 Kafka 绑定调用，以及文档链接和步骤状态；记录实际命令及结果后收口 S06。消费驱动沿用 StreamConsumer，不再安排原改型的延迟／空闲 CPU 对比；正式入口、协议移除和整体端到端验收仍由 K05–K07 完成。
+
+S06 待执行的构建和静态用例如下：
+
+```sh
+cargo build --workspace --locked
+cargo build --workspace --locked --no-default-features --features acorn-backend/kafka-static,acorn-worker/kafka-static
+ACORN_TEST_KAFKA_SERVERS=localhost:9092 cargo test -p acorn-worker --locked --no-default-features --features kafka-static --test kafka real_kafka_worker_capacity_and_shutdown -- --ignored
+```

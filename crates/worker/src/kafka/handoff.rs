@@ -1,12 +1,11 @@
-//! FIFO terminal publication followed by confirmation of the original task position.
+//! FIFO terminal publication followed by asynchronous submission of the original task position.
 
 use super::ownership::{Context as ConsumerContext, Ownership};
-use acorn_kafka::commit::OffsetCommit;
 use acorn_protocol::{records, worker::v1::GetJobReply};
 use anyhow::{Context, Result};
 use rdkafka::{
     Offset, TopicPartitionList,
-    consumer::StreamConsumer,
+    consumer::{CommitMode, Consumer, StreamConsumer},
     error::KafkaError,
     producer::{FutureProducer, FutureRecord},
 };
@@ -71,78 +70,46 @@ pub(super) async fn publish(
     Ok(())
 }
 
-/// Enqueue a commit only while holding its original assignment guard, then wait off runtime.
-pub(super) async fn commit(
-    consumer: Weak<StreamConsumer<ConsumerContext>>,
-    ownership: Ownership,
+/// Enqueue the original task offset under its assignment guard and shared shutdown deadline.
+pub(super) fn commit(
+    consumer: &Weak<StreamConsumer<ConsumerContext>>,
+    ownership: &Ownership,
     origin: &Origin,
-    timeout: Duration,
-    shutdown: watch::Receiver<Option<Instant>>,
+    deadline: Option<Instant>,
 ) -> Result<()> {
-    let Some(consumer) = consumer.upgrade() else {
-        return Ok(());
-    };
     let mut offsets = TopicPartitionList::new();
     offsets.add_partition_offset(
         &origin.topic,
         origin.partition,
         Offset::Offset(origin.offset + 1),
     )?;
-    let lease = origin.lease.clone();
-    let deadline = Instant::now() + timeout;
-    tokio::task::spawn_blocking(move || {
-        let guard = ownership
-            .current
-            .lock()
-            .expect("Kafka assignment lock poisoned");
-        if !lease.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        let effective_deadline = shutdown
-            .borrow()
-            .map_or(deadline, |shutdown| shutdown.min(deadline));
-        if Instant::now() >= effective_deadline {
-            return Err(KafkaError::ConsumerCommit(
-                rdkafka::types::RDKafkaErrorCode::OperationTimedOut,
-            ))
-            .context("KafkaWorkerTaskCommitTimedOut");
-        }
-        let commit = OffsetCommit::start(consumer.as_ref(), &offsets)?;
-        drop(guard);
-        loop {
-            if !lease.load(Ordering::Acquire) {
-                return Ok(());
-            }
-            let deadline = shutdown
-                .borrow()
-                .map_or(deadline, |shutdown| shutdown.min(deadline));
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(KafkaError::ConsumerCommit(
-                    rdkafka::types::RDKafkaErrorCode::OperationTimedOut,
-                ))
-                .context("KafkaWorkerTaskCommitTimedOut");
-            }
-            // A short native poll keeps an already-started confirmation within a later
-            // shutdown deadline; dropping an async timeout cannot cancel a blocking call.
-            if commit.poll(remaining.min(Duration::from_millis(100)))? {
-                return Ok(());
-            }
-        }
-    })
-    .await?
+    let _guard = ownership
+        .current
+        .lock()
+        .expect("Kafka assignment lock poisoned");
+    if !origin.owned() {
+        return Ok(());
+    }
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        anyhow::bail!("KafkaWorkerShutdownTimedOut: task commit enqueue budget exhausted");
+    }
+    let Some(consumer) = consumer.upgrade() else {
+        return Ok(());
+    };
+    consumer
+        .commit(&offsets, CommitMode::Async)
+        .context("KafkaWorkerTaskCommitEnqueueFailed")
 }
 
 /// Preserve the handoff phase across transient failures; confirmed terminals are never resent.
-pub(super) async fn terminal<P, C>(
+pub(super) async fn terminal<P>(
     entry: Entry,
     mut publish: impl FnMut(GetJobReply) -> P,
-    mut commit: impl FnMut(Origin) -> C,
+    mut enqueue_commit: impl FnMut(Origin) -> Result<()>,
     mut assignment: watch::Receiver<()>,
 ) -> Result<Entry>
 where
     P: std::future::Future<Output = Result<()>>,
-    C: std::future::Future<Output = Result<()>>,
 {
     let mut published = false;
     loop {
@@ -150,7 +117,7 @@ where
             return Ok(entry);
         }
         let result = if published {
-            commit(entry.origin.clone()).await
+            enqueue_commit(entry.origin.clone())
         } else {
             publish(entry.reply.clone()).await
         };
@@ -205,14 +172,14 @@ mod tests {
         }
     }
 
-    /// Commit failure retries only the position; losing ownership releases a published terminal.
+    /// Enqueue failure retries only the position; losing ownership releases a published terminal.
     #[tokio::test]
-    async fn confirmed_terminal_retries_only_commit_and_releases_revoked_origin() {
+    async fn confirmed_terminal_retries_only_enqueue_and_releases_revoked_origin() {
         let published = Arc::new(AtomicUsize::new(0));
-        let committed = Arc::new(AtomicUsize::new(0));
+        let enqueued = Arc::new(AtomicUsize::new(0));
         let (changed, changes) = watch::channel(());
         let sends = published.clone();
-        let commits = committed.clone();
+        let commits = enqueued.clone();
         terminal(
             entry(Arc::new(AtomicBool::new(true))),
             move |_| {
@@ -223,12 +190,10 @@ mod tests {
                 assert_eq!(origin.offset + 1, 8);
                 let first = commits.fetch_add(1, Ordering::Relaxed) == 0;
                 changed.send_replace(());
-                async move {
-                    if first {
-                        Err(KafkaError::ConsumerCommit(RDKafkaErrorCode::OperationTimedOut).into())
-                    } else {
-                        Ok(())
-                    }
+                if first {
+                    Err(KafkaError::ConsumerCommit(RDKafkaErrorCode::QueueFull).into())
+                } else {
+                    Ok(())
                 }
             },
             changes,
@@ -236,7 +201,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(published.load(Ordering::Relaxed), 1);
-        assert_eq!(committed.load(Ordering::Relaxed), 2);
+        assert_eq!(enqueued.load(Ordering::Relaxed), 2);
 
         let lease = Arc::new(AtomicBool::new(true));
         let revoked = lease.clone();
@@ -246,7 +211,7 @@ mod tests {
                 revoked.store(false, Ordering::Release);
                 async { Ok(()) }
             },
-            |_| async { panic!("revoked execution must not enqueue a task commit") },
+            |_| panic!("revoked execution must not enqueue a task commit"),
             watch::channel(()).1,
         )
         .await

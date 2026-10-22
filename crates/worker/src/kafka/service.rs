@@ -135,7 +135,7 @@ impl KafkaWorker {
                         let changes = ownership.changed.subscribe();
                         let shutdown = message_deadline.subscribe();
                         sending_terminal = true;
-                        let publish_config = kafka.clone();
+                        let publish_config = kafka;
                         sending = Some(Box::pin(async move {
                             handoff::terminal(entry,
                                 move |reply| {
@@ -144,10 +144,7 @@ impl KafkaWorker {
                                     async move { handoff::publish(&producer, &kafka.events_topic, &reply, kafka.max_event_record_bytes, Duration::from_millis(kafka.queue_timeout_ms)).await }
                                 },
                                 move |origin| {
-                                    let weak = weak.clone();
-                                    let ownership = ownership.clone();
-                                    let shutdown = shutdown.clone();
-                                    async move { handoff::commit(weak, ownership, &origin, Duration::from_millis(kafka.commit_timeout_ms), shutdown).await }
+                                    handoff::commit(&weak, &ownership, &origin, *shutdown.borrow())
                                 },
                                 changes,
                             ).await.map(Some)
@@ -326,7 +323,7 @@ async fn progress(active: &mut Option<Active>) -> Result<()> {
     }
 }
 
-/// Poll the independent finite producer or commit operation.
+/// Poll the independent bounded event publication and terminal handoff.
 async fn send(sending: &mut Option<Sending>) -> Result<Option<Entry>> {
     match sending {
         Some(sending) => sending.await,

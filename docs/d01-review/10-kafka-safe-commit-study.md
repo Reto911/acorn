@@ -25,7 +25,7 @@ HTTP、Protobuf、MySQL 表结构、topic、消费组名和现有 TOML 字段均
 
 ### 2.2 需要替换的内部行为
 
-K04 已将原确认实现提取为共享的 [OffsetCommit](../../crates/kafka/src/commit.rs)，两端调用它；后端的修改入口仍为 [EventConsumer::confirm](../../crates/backend/src/scheduler/kafka/events.rs)。以下是原后端读回路线的实现分析，后续确定的异步入队方向及 K04 后范围见第 6 节。
+K04 已将原确认实现提取为共享的 `OffsetCommit`（后由 S05 移除），两端调用它；后端的修改入口仍为 [EventConsumer::confirm](../../crates/backend/src/scheduler/kafka/events.rs)。以下是原后端读回路线的实现分析，后续确定的异步入队方向及 K04 后范围见第 6 节。
 
 1. 继续构造本条记录所属 topic/partition 的 offset+1；在数据库处理完成后，调用一次 commit(offsets, Async)。入队错误直接报告，入队成功仍不代表确认完成。
 2. 在阻塞工作线程调用 committed_offsets，查询完全相同的 group/topic/partition。检查调用错误、分区错误和有效数字位点，读回值达到或超过目标才算确认；position、已拉取位置和分区日志末尾均不能替代它。
@@ -137,7 +137,7 @@ safe 读回会增加客户端与 broker 的请求编码、分配和响应处理�
 
 | 位置                                                        | unsafe 块数 | 当前作用                                                   | 对原计划的影响                             |
 | ----------------------------------------------------------- | ----------- | ---------------------------------------------------------- | ------------------------------------------ |
-| [共享 commit 模块](../../crates/kafka/src/commit.rs)        | 9           | 创建、提交、等待及释放原生位点结果队列，检查结果和分区错误 | K04 已让两端共用它；只改后端不能删除该模块 |
+| 原共享 `acorn-kafka::commit`（S05 已移除）                  | 9           | 创建、提交、等待及释放原生位点结果队列，检查结果和分区错误 | K04 已让两端共用它；只改后端不能删除该模块 |
 | [Worker close 模块](../../crates/worker/src/kafka/close.rs) | 6           | 发起消费关闭、处理原生错误并检查实际 closed                | 与位点确认不同，异步提交不能替代关闭能力   |
 
 后端在 EventConsumer::confirm 调用 OffsetCommit::start/wait。Worker 在 [handoff::commit](../../crates/worker/src/kafka/handoff.rs) 持有原归属短锁时提交，然后在锁外分段等待实际结果；[消费服务](../../crates/worker/src/kafka/service.rs) 还独立驱动 BLOCKED 和正常停机的关闭。当时的手写 Rust 源码未检出其他 unsafe 块。
@@ -148,7 +148,7 @@ safe 读回会增加客户端与 broker 的请求编码、分配和响应处理�
 
 1. 后端事件提交：按第 6.1 节改用 CommitMode::Async，移除实际结果等待及相关阻塞任务，保留数据库与审查收尾顺序。
 2. Worker 任务提交：终态仍须取得事件发布的 broker 确认；之后在原归属短锁下异步提交任务 offset+1。入队成功即可释放条目及结果名额，只有同步可见的入队失败参与当前阶段重试，不再等待本次位点结果。保留 FIFO、不跨越未完成记录、撤销后不提交旧归属以及终态不重复发布。
-3. Worker 消费关闭：按用户后续决定保留 StreamConsumer 和 recv 驱动，移除原生关闭调用，以 SDK RAII 释放消费者并退出组。先失效原归属并等待在途提交释放引用，在阻塞线程销毁最后一个 SDK 句柄；BLOCKED 不等待终态发布，状态 RPC 和结果生产者继续运行。
+3. Worker 消费关闭：按用户后续决定保留 StreamConsumer 和 recv 驱动，移除原生关闭调用，以 SDK RAII 释放消费者并退出组。先失效原归属，在阻塞线程销毁最后一个 SDK 句柄；BLOCKED 不等待终态发布，状态 RPC 和结果生产者继续运行。
 
 原 v19 方案因 StreamConsumer 没有公开显式 safe close_queue/closed 接口，曾计划改用 BaseConsumer；用户随后明确选择保留 StreamConsumer，以 RAII 退出组，按审核决定 R39 纳入 v20。SDK 析构在阻塞线程执行，应用等待受共同消息预算限制；等待超时不会取消析构，也不能据此宣称已经退出组。SDK 析构中的关闭错误由其日志报告，不再由业务接口逐项返回。
 
@@ -158,7 +158,7 @@ safe 读回会增加客户端与 broker 的请求编码、分配和响应处理�
 
 ### 6.4 配套修改与验证
 
-若两端都改为不等待位点结果，才可整体移除共享 OffsetCommit 及不再使用的 commit_timeout_ms 字段、默认值、校验和示例；部署配置也需同步删除该字段。只改后端时，该字段继续供 Worker 使用。结果发布仍保留 delivery_timeout_ms 和 queue_timeout_ms，消息总收尾仍使用 shutdown_timeout_ms。
+两端切换为异步提交后，原共享 OffsetCommit 和 commit_timeout_ms 的字段、默认值、校验及示例不再属于使用接口，部署配置也必须删除该字段；只改后端时则仍不能移除 Worker 的依赖。结果发布仍保留 delivery_timeout_ms 和 queue_timeout_ms，消息总收尾仍使用 shutdown_timeout_ms。
 
 需要同步 Kafka 设计第 6–8 节、Worker／后端／自动审查的受影响合同及三个 crate README。更新现有位点失败测试为入队失败语义，复用已有后端链路、Worker 容量／撤销／正常停机、BLOCKED 替代接管和结果积压／总预算检查；消费驱动保持不变，撤回原计划中的驱动延迟及空闲 CPU 对比。无需新增恢复框架、数据库表、消息协议或完整故障矩阵，正式入口切换仍属于 K05。
 

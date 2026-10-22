@@ -28,9 +28,6 @@ pub struct KafkaConfig {
     /// Maximum wait to enter the producer queue in milliseconds.
     #[serde(default = "crate::defaults::queue_timeout_ms")]
     pub queue_timeout_ms: u64,
-    /// Application wait for an actual offset-commit result in milliseconds.
-    #[serde(default = "crate::defaults::commit_timeout_ms")]
-    pub commit_timeout_ms: u64,
     /// Total message handoff budget during normal shutdown in milliseconds.
     #[serde(default = "crate::defaults::shutdown_timeout_ms")]
     pub shutdown_timeout_ms: u64,
@@ -89,7 +86,6 @@ impl KafkaConfig {
         for (name, budget) in [
             ("delivery_timeout_ms", self.delivery_timeout_ms),
             ("queue_timeout_ms", self.queue_timeout_ms),
-            ("commit_timeout_ms", self.commit_timeout_ms),
             ("shutdown_timeout_ms", self.shutdown_timeout_ms),
         ] {
             ensure!(

@@ -6,7 +6,7 @@
 
 当前设计为 v20；K01–K04 的 13 项任务按 v18 完成，其余 9 项尚未实施。后端已提供任务发布、事件消费、异步位点提交及自动审查交接入口；Worker 已提供 Kafka 单槽消费、结果 FIFO、原分区归属及有限消息收尾服务，完成受控管理器和一条真实 Isolate 的 Kafka 检查，实际范围见[第 9 节](#9-k04-worker-消费与结果队列)。当前正式服务入口仍通过 gRPC 判题；下一步 K05 统一接入正式生命周期并移除旧业务 RPC，随后按 K06–K07 推进观测和整体交付。进度见[任务清单](#4-任务清单)，审核决定见[审核记录](../d01-review/10-kafka-judging-review.md#2-已确认决定与草案修正)。
 
-Safe 接口修复方案已确认，S01 完成规约同步，S02 已将后端改为 safe 异步位点提交；S03 按用户调整保留 StreamConsumer，以 SDK RAII 释放消费者。Worker 暂保留原位点确认，S04–S06 尚未实施。按[修复步骤](../10-kafka-judging-design.md#12-safe-接口修复计划)在[第 10 节](#10-safe-接口修复跟踪)单独跟踪，不改变原 K01–K07 任务编号或历史完成记录。
+Safe 接口修复的 S01–S06 已完成，两端均异步提交位点；Worker 保留 StreamConsumer，通过 SDK RAII 释放消费者。共享原生确认模块及 commit_timeout_ms 已移除，S06 已补齐动态／静态构建和静态 Worker 定向验证，safe 修复全部收口。按[修复步骤](../10-kafka-judging-design.md#12-safe-接口修复计划)在[第 10 节](#10-safe-接口修复跟踪)单独跟踪，不改变原 K01–K07 任务编号或历史完成记录。
 
 ## 2. 文档工作
 
@@ -283,7 +283,7 @@ K04 沿用 v18“取得本次提交结果”的合同，复用后端已有的有
 - 结果容量包含执行前的预留及尚未完成交接的终态条目。执行中预留不计入终态数量；消息已发布但任务位点尚未确认的条目仍占名额。进程内 Job ID 去重不能代替每条消费记录的位点及归属检查。
 - 运行快照只保留同一活动 Job 的最新待发值，发送中的快照也受既有消息预算约束；终态形成后清除该 Job 尚未发送的中间快照。终态各自独立保留，不按 Job 进度合并不同任务。
 - 终态已确认且保有原归属时，等待对应任务位点确认后释放条目；终态已确认但原归属已失去时，直接释放；终态未确认且原归属已失去时，继续发布，确认后释放且不提交旧任务位点。短暂断连本身不作为撤销依据。
-- 位点确认复用[现有实现](../../crates/kafka/src/commit.rs)的实际结果与分区错误检查；两端共用部分只作必要提取，客户端所有权、归属和重试仍由各自服务负责。手动异步提交入队不能当作确认，提交失败不能令已确认的终态退回发布阶段。
+- 位点确认复用原共享 OffsetCommit（S05 已移除）的实际结果与分区错误检查；两端共用部分只作必要提取，客户端所有权、归属和重试仍由各自服务负责。手动异步提交入队不能当作确认，提交失败不能令已确认的终态退回发布阶段。
 - BLOCKED 的消费者关闭与结果发布分别推进。正常停机的 kafka.shutdown_timeout_ms 是全部条目共用的消息预算，独立于 sandbox.shutdown_timeout_ms；耗尽后报告未完成交接并保留未提交位点。核对 SDK 关闭及阻塞调用的实际收尾，不能仅凭外层 timeout 宣称消费者已经关闭；正式进程总停机编排在 K05 复验。
 
 ### 8.4 定向验收安排
@@ -323,7 +323,7 @@ K04.2：以活动任务、FIFO 条目和正在交接的终态数量直接核算�
 
 K04.3：[归属回调](../../crates/worker/src/kafka/ownership.rs)在撤销前永久失效原分区的本地标识，重新分配生成新标识。回调只更新短锁状态并通知驱动，不等待执行或网络。活动任务继续完成；已发布终态失去归属后释放，未发布终态继续发布后释放，旧执行不提交位点。提交入队与撤销使用同一短锁，实际结果等待在锁外。重新分配的记录不借用旧归属的执行结果确认，旧交接也不能删除新的同 ID 运行记录。
 
-两端的原生位点结果队列提取到 [acorn-kafka::commit](../../crates/kafka/src/commit.rs)，仍以本次提交的实际结果及分区错误为依据。后端沿用一次有限原生等待；Worker 分段轮询同一个提交结果队列，观察原归属与共同消息期限，避免外层异步超时后留下长时间的原生等待。临时 Kafka 错误分类一并共用。没有新增依赖、消息封装、数据库结构或结果恢复机制。
+两端的原生位点结果队列提取到 原 acorn-kafka::commit（S05 已移除），仍以本次提交的实际结果及分区错误为依据。后端沿用一次有限原生等待；Worker 分段轮询同一个提交结果队列，观察原归属与共同消息期限，避免外层异步超时后留下长时间的原生等待。临时 Kafka 错误分类一并共用。没有新增依赖、消息封装、数据库结构或结果恢复机制。
 
 K04.4：[消费者关闭](../../crates/worker/src/kafka/close.rs)显式发起原生异步关闭并持续驱动，观察实际 closed 后释放 SDK 句柄。BLOCKED 立即失效原归属并开始退出任务组，保留原状态 RPC 和事件生产者，服务继续等待部署端停止。正常停机先停止接纳，按既有沙箱预算处理活动执行，再为全部结果、位点和消费关闭建立一个共同消息期限；未完成时明确返回错误，不提前确认记录。正式二进制入口和旧 RPC 的统一切换仍属于 K05。
 
@@ -370,14 +370,14 @@ K04.1–K04.4 完成，KV04 的单槽、原分区撤销与重获、交接阶段�
 
 ## 10. Safe 接口修复跟踪
 
-步骤定义、顺序及完成条件见[设计第 12 节](../10-kafka-judging-design.md#12-safe-接口修复计划)。用户已接受两端异步位点提交及 Worker 重复执行成本。S01–S03 已完成，后端异步提交，Worker 沿用 StreamConsumer 并通过 SDK RAII 释放；Worker 任务位点仍等待实际确认，S04–S06 未实施。
+步骤定义、顺序及完成条件见[设计第 12 节](../10-kafka-judging-design.md#12-safe-接口修复计划)。用户已接受两端异步位点提交及 Worker 重复执行成本。S01–S06 全部完成，两端使用 safe 异步位点接口，Worker 沿用 StreamConsumer 并通过 SDK RAII 释放；共享原生确认及无用配置已删除，动态／静态构建和约定的定向验证已完成。
 
 - [x] S01 确认 Worker 取舍并同步受影响规约。
 - [x] S02 后端改为 safe 异步提交，保留持久化及审查收尾。
 - [x] S03 Worker 沿用 StreamConsumer，以 SDK RAII 释放并退出消费组。
-- [ ] S04 Worker 改为原归属下的异步位点提交。
-- [ ] S05 清理原生确认实现及无用配置，更新使用说明。
-- [ ] S06 完成定向测试及动态／静态验证。
+- [x] S04 Worker 改为原归属下的异步位点提交。
+- [x] S05 清理原生确认实现及无用配置，更新使用说明。
+- [x] S06 完成定向测试及动态／静态验证。
 
 各步完成后勾选，并在此记录改动、实际验证命令及结果、剩余限制。
 
@@ -430,3 +430,64 @@ ACORN_TEST_KAFKA_SERVERS=localhost:9092 cargo test -p acorn-worker --locked --te
 本轮仅验证默认动态链接及上述路径，未重跑真实 Isolate、静态模式、完整 Worker 或 workspace 测试；未验证 broker 故障下 SDK 析构的最长耗时。手写 Rust 仅共享 OffsetCommit 仍含 9 处 unsafe，任务位点异步提交由 S04 修改，模块及配置清理留到 S05。S04 的步骤见[异步任务位点计划](../10-kafka-judging-design.md#125-s04-worker-异步任务位点提交)。
 
 五份变更使用说明与 Kafka 记录的完整 Prettier 检查通过，第 01 篇仅检查本次修改段落；全部变更文档的本地链接／锚点、稳定编号及 `git diff --check` 通过。原 K 清单和 R01–R38 决定保留，新增 R39；S03 已勾选，S04–S06 未完成。
+
+### 10.4 S04 Worker 异步任务位点提交
+
+S04 是删除共享确认模块的前置，本批先完成该切换，再清理 S05。[handoff::commit](../../crates/worker/src/kafka/handoff.rs) 改为同步调用 SDK safe CommitMode::Async，在同一原归属短锁内检查归属和共同消息期限，并仅入队当前原记录的 offset+1；移除单次确认预算、阻塞任务及结果等待，不读回位点。消费驱动继续使用 StreamConsumer。
+
+终态仍须先取得发布确认，再发起位点请求；成功入队即完成当前 FIFO 交接并释放条目、结果名额及对应运行记录。同步可见的临时入队失败只重试本阶段，不重发终态；失去原归属时保留既有按阶段释放规则，不提交旧位点，也不跨过同分区未完成记录。
+
+现有交接测试调整为 confirmed_terminal_retries_only_enqueue_and_releases_revoked_origin，注入一次同步入队错误，核对只发布一次、重试入队后完成及撤销旧归属。提交不再跨 await 持有消费者引用，RAII 释放中的 Arc::try_unwrap 等待循环一并移除；最后一个消费者仍由阻塞线程析构，共同预算和不可取消的 SDK 析构边界保持不变。
+
+### 10.5 S05 共享确认及配置清理
+
+删除原 acorn-kafka::commit 模块及导出，移除剩余 9 处 unsafe；共享库仅保留配置、角色无关的客户端策略、组名校验和临时错误分类。commit_timeout_ms 的字段、默认函数、范围校验和两端 TOML 示例均已移除，三个 crate README 和受影响规约同步；历史记录保留原验证结果，并注明原模块已删除，移除失效源码链接。
+
+两端配置测试继续覆盖剩余三个时间预算的默认值和约定范围，并将旧预算校验改为明确拒绝 commit_timeout_ms 字段，没有新增测试函数。既有部署 TOML 必须删除该字段，否则按未知字段拒绝启动；本批未改动实际部署配置。
+
+以下默认动态模式检查均通过：
+
+- `cargo fmt --all -- --check`、`cargo check --workspace --all-targets --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings`。
+- `cargo test -p acorn-worker --locked --lib --test config_language`：3 项库测试和 5 项配置／语言测试通过。
+- `cargo test -p acorn-backend --locked --lib --test config_results`：11 项库测试和 9 项配置测试通过。
+- 下列三项 Worker 和一项后端真实 Kafka 检查分别通过，覆盖异步入队后的容量／撤销／停机、BLOCKED 替代接管、结果积压／共同预算及后端任务发布、事件持久化和组位点推进。Worker 使用既有受控管理器，后端沿用独立 MySQL 夹具；独立 topic、消费组及本例数据库均已清理。
+
+```sh
+ACORN_TEST_KAFKA_SERVERS=localhost:9092 cargo test -p acorn-worker --locked --test kafka real_kafka_worker_capacity_and_shutdown -- --ignored
+ACORN_TEST_KAFKA_SERVERS=localhost:9092 cargo test -p acorn-worker --locked --test kafka real_kafka_blocked_worker_leaves_group_for_replacement -- --ignored
+ACORN_TEST_KAFKA_SERVERS=localhost:9092 cargo test -p acorn-worker --locked --test kafka real_kafka_result_backpressure_and_total_shutdown_budget -- --ignored
+ACORN_TEST_KAFKA_SERVERS=localhost:9092 cargo test -p acorn-backend --locked --test workflow real_kafka_backend_publication_and_events -- --ignored
+```
+
+检索手写 Rust 已无 unsafe、原生 Kafka 绑定调用或 OffsetCommit；commit_timeout_ms 仅在两端拒绝旧字段的测试字符串中保留。未运行静态模式、真实 Isolate 或完整 workspace 测试；未验证 broker 故障下 SDK 析构的最长耗时。S06 的剩余构建、静态用例及收口检查见[收尾验证计划](../10-kafka-judging-design.md#126-s06-收尾验证)，当前正式入口仍待 K05 切换。
+
+六份变更使用说明及 Kafka 记录的完整 Prettier 检查通过，第 03 篇仅检查本次修改段落；全部变更文档的本地链接／锚点、稳定编号、TOML 示例及 `git diff --check` 通过。原 K 任务清单保持不变，S04、S05 已勾选，S06 尚未完成。
+
+### 10.6 S06 收尾验证
+
+本步未修改 Rust、协议或配置，也未新增测试。复核第 10.2、10.5 节已通过的关键路径、库／配置测试及格式、workspace check、Clippy 结果，沿用这些结果；补齐最终构建、静态 Worker 用例及代码、配置和文档检查。
+
+以下命令分别通过：
+
+```sh
+cargo build --workspace --locked
+cargo build --workspace --locked --no-default-features --features acorn-backend/kafka-static,acorn-worker/kafka-static
+ACORN_TEST_KAFKA_SERVERS=localhost:9092 cargo test -p acorn-worker --locked --no-default-features --features kafka-static --test kafka real_kafka_worker_capacity_and_shutdown -- --ignored
+```
+
+两种 workspace 构建均覆盖后端和 Worker。静态 Worker 的真实 Kafka 用例 1 项通过，复用既有受控管理器和独立 topic／消费组，覆盖容量、执行期间撤销原分区、重新分配后重投、非法语言不执行，以及正常停机的终态与任务位点交接；测试资源已清理。静态真实 Kafka 检查仅限该用例，其余动态路径沿用第 10.5 节结果。
+
+链接方式通过 Cargo 特性树及实际调用 SDK 的测试产物核对。默认模式启用 dynamic-linking，后端配置测试及 Worker Kafka 测试产物依赖 librdkafka.so.1；显式静态模式启用 cmake-build，不含 dynamic-linking，静态 Worker Kafka 测试产物无该共享库依赖，并定义 rd_kafka_new。特性树使用以下命令：
+
+```sh
+cargo tree --workspace --locked -e features -i rdkafka-sys
+cargo tree --workspace --locked --no-default-features --features acorn-backend/kafka-static,acorn-worker/kafka-static -e features -i rdkafka-sys
+```
+
+首次直接要求正式二进制含 librdkafka 动态依赖的断言失败：当前两端正式入口仍使用 gRPC，未使用的 Kafka 代码可被链接器裁剪，因此正式二进制的依赖表不适合作为该判据。该失败未作为链接模式结论；上述特性树及实际调用 SDK 的测试产物验证符合预期。
+
+最终检索确认手写生产 Rust 无 unsafe、原生 Kafka 绑定调用、位点读回或同步位点提交；原共享确认模块不存在。两个 TOML 示例仅保留投递、生产者入队和总消息收尾三个时间预算；旧字段拒绝沿用第 10.5 节两端配置测试，三个 crate README 均明确要求删除 commit_timeout_ms。
+
+S01–S06 已全部勾选，原 K01–K07 清单及历史检查记录保留。未扩大到完整 workspace 测试、真实 Isolate、静态后端 Kafka 全链路或 broker 故障下 SDK 析构最长耗时；消费驱动保持 StreamConsumer，原改型性能对比已按 R39 撤回。正式入口切换、旧业务 RPC 移除及整体端到端验收仍由 K05–K07 实施，RAII 析构不可取消的边界保持不变。
+
+相关 10 份文档的本地链接／锚点、代码块、TOML 示例和任务编号检查通过；本次执行记录的 Prettier、既有标题与 K 清单保留检查及 `git diff --check` 通过。本步仅更新执行记录。
