@@ -3,6 +3,7 @@
 use acorn_backend::{
     config::Config,
     database::{Database, Error},
+    scheduler::{AdmissionError, Scheduler},
     submissions::{
         CreateSubmission, SubmissionFilter, SubmissionState, TerminalDetails, TerminalOutcome,
         Verdict,
@@ -411,18 +412,19 @@ async fn terminal_storage_and_immutability() {
     )
     .unwrap();
     let mut stored_results = vec![];
-    for terminal in [accepted(config), ce, wa, failure.clone()] {
+    for (index, terminal) in [accepted(config), ce, wa, failure.clone()]
+        .into_iter()
+        .enumerate()
+    {
         let submitted = request("c");
         let created = database.create_submission(submitted.clone()).await.unwrap();
-        assert!(
-            !database
-                .save_terminal(&created.info.id, &terminal, None)
-                .await
-                .unwrap()
-        );
-        assert!(database.mark_dispatching(&created.info.id).await.unwrap());
-        assert!(database.mark_running(&created.info.id).await.unwrap());
-        assert!(!database.mark_running(&created.info.id).await.unwrap());
+        if matches!(index, 1 | 2) {
+            assert!(database.mark_dispatching(&created.info.id).await.unwrap());
+        }
+        if index == 2 {
+            assert!(database.mark_running(&created.info.id).await.unwrap());
+            assert!(!database.mark_running(&created.info.id).await.unwrap());
+        }
         assert!(
             database
                 .save_terminal(&created.info.id, &terminal, None)
@@ -443,6 +445,7 @@ async fn terminal_storage_and_immutability() {
         );
         assert!(!database.requeue(&created.info.id).await.unwrap());
         assert!(!database.mark_dispatching(&created.info.id).await.unwrap());
+        assert!(!database.mark_running(&created.info.id).await.unwrap());
         assert_eq!(
             database
                 .submission(&created.info.id)
@@ -537,8 +540,9 @@ async fn startup_reads_and_conditional_transitions() {
     assert!(database.mark_dispatching(&dispatching.id).await.unwrap());
     assert!(database.requeue(&dispatching.id).await.unwrap());
     assert!(database.mark_dispatching(&dispatching.id).await.unwrap());
-    assert!(database.mark_dispatching(&running.id).await.unwrap());
     assert!(database.mark_running(&running.id).await.unwrap());
+    assert!(!database.mark_running(&running.id).await.unwrap());
+    assert!(!database.mark_dispatching(&running.id).await.unwrap());
     assert!(database.mark_dispatching(&finished.id).await.unwrap());
     assert!(
         database
@@ -584,6 +588,130 @@ async fn startup_reads_and_conditional_transitions() {
     let limited = Database::open(&small).await.unwrap();
     assert!(matches!(limited.queued_tasks().await, Err(Error::Data(_))));
     limited.close().await;
+    fixture.close().await;
+}
+
+/// Recovery counts queued and delivered work together and releases only committed ownership.
+#[tokio::test]
+async fn judging_recovery_and_once_only_permit_release() {
+    let fixture = Fixture::new().await;
+    let queued = fixture
+        .database
+        .create_submission(request("c"))
+        .await
+        .unwrap();
+    let dispatching = fixture
+        .database
+        .create_submission(request("python"))
+        .await
+        .unwrap();
+    let running = fixture
+        .database
+        .create_submission(request("c"))
+        .await
+        .unwrap();
+    assert!(
+        fixture
+            .database
+            .mark_dispatching(&dispatching.info.id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        fixture
+            .database
+            .mark_running(&running.info.id)
+            .await
+            .unwrap()
+    );
+
+    let mut config = fixture.config.clone();
+    config.scheduler.pending_max_count = 1;
+    let limited = Database::open(&config).await.unwrap();
+    assert_eq!(limited.queued_tasks().await.unwrap().len(), 1);
+    assert!(matches!(
+        limited.judging_recovery().await,
+        Err(Error::Data(_))
+    ));
+    let recovery = fixture.database.judging_recovery().await.unwrap();
+    assert!(Scheduler::restore(&config, recovery).is_err());
+    limited.close().await;
+
+    config.scheduler.pending_max_count = 2;
+    let database = Database::open(&config).await.unwrap();
+    let recovery = database.judging_recovery().await.unwrap();
+    assert_eq!(recovery.queued, [queued.task.clone().unwrap()]);
+    assert_eq!(
+        recovery.dispatching,
+        std::slice::from_ref(&dispatching.info.id)
+    );
+    assert_eq!(recovery.running, std::slice::from_ref(&running.info.id));
+    let scheduler = Scheduler::restore(&config, recovery).unwrap();
+    assert_eq!(scheduler.snapshot().pending_used, 2);
+    for id in [&queued.info.id, &dispatching.info.id, &running.info.id] {
+        assert!(scheduler.contains(id));
+    }
+    assert!(matches!(
+        scheduler.reserve(),
+        Err(AdmissionError::QueueFull)
+    ));
+
+    assert!(
+        scheduler
+            .mark_running(&database, &queued.info.id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !scheduler
+            .mark_running(&database, &queued.info.id)
+            .await
+            .unwrap()
+    );
+    assert!(!database.mark_dispatching(&queued.info.id).await.unwrap());
+    assert_eq!(scheduler.snapshot().pending_used, 1);
+    let permit = scheduler.reserve().unwrap();
+    assert!(!scheduler.enqueue(queued.task.unwrap(), permit).unwrap());
+    assert_eq!(scheduler.snapshot().pending_used, 1);
+    assert!(scheduler.contains(&queued.info.id));
+
+    // A failed critical write must leave the delivered job's permit owned.
+    database.close().await;
+    assert!(
+        scheduler
+            .mark_running(&database, &dispatching.info.id)
+            .await
+            .is_err()
+    );
+    assert_eq!(scheduler.snapshot().pending_used, 1);
+    let terminal = accepted(&config);
+    assert!(
+        scheduler
+            .save_terminal(&fixture.database, &dispatching.info.id, &terminal, None)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !scheduler
+            .save_terminal(&fixture.database, &dispatching.info.id, &terminal, None)
+            .await
+            .unwrap()
+    );
+    assert_eq!(scheduler.snapshot().pending_used, 0);
+    scheduler.complete(&dispatching.info.id);
+    scheduler.complete(&dispatching.info.id);
+    assert!(!scheduler.contains(&dispatching.info.id));
+    for id in [&queued.info.id, &running.info.id] {
+        assert!(
+            scheduler
+                .save_terminal(&fixture.database, id, &terminal, None)
+                .await
+                .unwrap()
+        );
+        scheduler.complete(id);
+        assert!(!scheduler.contains(id));
+    }
+    assert_eq!(scheduler.snapshot().pending_used, 0);
     fixture.close().await;
 }
 
@@ -855,19 +983,22 @@ async fn latest_review_persistence_and_rerun() {
     assert!(database.review_input(id).await.unwrap().is_none());
     let first = pending_review(ReviewTrigger::Auto);
     assert!(
-        !database
-            .save_terminal(id, &accepted(&fixture.config), Some(&first))
-            .await
-            .unwrap()
-    );
-    assert!(database.mark_dispatching(id).await.unwrap());
-    assert!(
         database
             .save_terminal(id, &accepted(&fixture.config), Some(&first))
             .await
             .unwrap()
     );
     let machine = database.submission(id).await.unwrap().unwrap();
+    assert!(
+        !database
+            .save_terminal(
+                id,
+                &accepted(&fixture.config),
+                Some(&pending_review(ReviewTrigger::Auto))
+            )
+            .await
+            .unwrap()
+    );
     assert_eq!(machine.review.as_ref(), Some(&first));
     assert_eq!(machine.info.verdict, Some(Verdict::AC));
     assert!(machine.terminal_details.is_none());

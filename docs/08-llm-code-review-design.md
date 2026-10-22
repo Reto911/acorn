@@ -267,7 +267,7 @@ LLM 网络等待不进入 Worker、判题跟踪或数据库事务，不占用 Sc
 
 1. 收到 Worker 终态并通过现有结果校验，用固定 review_mode 和机器 verdict／首个失败序号在本地判断门槛。
 2. 不触发则计划 DISABLED。应触发且审查已停止接纳则计划 FAILED/ReviewInterrupted；其他情况下尝试立即预留一个独立审查队列名额。成功则计划 PENDING，队列满或服务未启用则计划对应 FAILED。
-3. 用一个短事务保存机器 `state`、`verdict`、终态详情和时间，同时保存审查初态。条件继续使用现有 `WHERE state IN ('dispatching','running')`，避免覆盖已存在机器终态；写入 PENDING 或 FAILED 时同时生成新的审查 ID 和元数据。
+3. 用一个短事务保存机器 `state`、`verdict`、终态详情和时间，同时保存审查初态。条件使用 `WHERE state IN ('queued','dispatching','running')`，允许合法终态先于投递确认或运行事件到达，避免覆盖已存在机器终态；写入 PENDING 或 FAILED 时同时生成新的审查 ID 和元数据。
 4. 若条件更新未生效，释放本次预留名额，不交接审查。若数据库发生错误，释放名额并按已有关键写入错误处理，不 ACK 未保存的机器结果。
 5. 首次保存成功并归还数据库连接后，立即执行已有 Worker ACK 及节点释放流程，不等待审查交接、交接失败的状态写入或模型调用。ACK 失败仅按既有合同记录日志，不回滚机器结果，也不跳过后续审查交接；重复机器终态的 ACK 行为仍按原契约。
 6. ACK 调用结束并释放 Scheduler 的本地在途记录、路由及节点占用后，把提交 ID、审查 ID 及预留名额交给 llm_review 的内存队列。这一步只做本地交接，不等待 LLM。

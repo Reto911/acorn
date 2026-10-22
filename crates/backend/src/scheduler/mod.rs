@@ -5,7 +5,7 @@ mod tracking;
 pub mod worker_client;
 
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},
 };
 
@@ -16,7 +16,10 @@ use tokio::{
 };
 
 use crate::{
-    config::Config, database::Database, llm_review::ReviewService, submissions::JudgingTask,
+    config::Config,
+    database::{self, Database},
+    llm_review::{ReviewAttempt, ReviewService},
+    submissions::{JudgingRecovery, JudgingTask, TerminalOutcome},
 };
 use worker_client::WorkerClient;
 
@@ -31,12 +34,10 @@ pub enum AdmissionError {
     Stopping,
 }
 
-/// A task owns its capacity until explicitly admitted or locally finished.
+/// Complete payload retained until delivery or explicit Worker admission.
 struct Pending {
     /// Complete fixed-version task, retained while a Worker can refuse admission.
     task: JudgingTask,
-    /// Sole capacity accounting for this queued or awaiting-admission task.
-    permit: OwnedSemaphorePermit,
 }
 
 /// Short synchronous queue state; no lock is held across database or RPC waits.
@@ -44,8 +45,8 @@ struct Pending {
 struct State {
     /// Waiting-admission tasks in FIFO order.
     queue: VecDeque<Pending>,
-    /// IDs present in the queue or an in-flight tracking task.
-    known: HashSet<String>,
+    /// One owner per waiting job; admitted jobs retain an ID with no permit.
+    known: HashMap<String, Option<OwnedSemaphorePermit>>,
     /// Prevent new reservations and dispatch while allowing existing handoffs.
     stopping: bool,
     /// Finish once all in-flight tracking tasks have ended.
@@ -56,9 +57,9 @@ struct State {
 
 /// Shared handle state and wakeup, with one semaphore as the capacity counter.
 struct Shared {
-    /// Queue and lifecycle flags.
+    /// Payload queue, ID ownership and lifecycle flags.
     state: Mutex<State>,
-    /// Creating, queued and awaiting-admission tasks each own one permit.
+    /// Creating, queued and dispatching tasks each own one permit.
     capacity: Arc<Semaphore>,
     /// Fixed configured ceiling; live usage remains solely in the semaphore.
     pending_max_count: u32,
@@ -124,6 +125,52 @@ impl Drop for CloseOnDrop {
 }
 
 impl Scheduler {
+    /// Restore local ownership before starting any dispatch or event processing.
+    ///
+    /// Only queued jobs receive payloads; confirmed deliveries and running jobs
+    /// wait by ID. This constructor does not start a background service.
+    pub fn restore(config: &Config, startup: JudgingRecovery) -> anyhow::Result<Self> {
+        let workers = config
+            .scheduler
+            .workers
+            .iter()
+            .map(|address| WorkerClient::new(address, &config.grpc, &config.results))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let scheduler = Self {
+            shared: Arc::new(Shared {
+                state: Mutex::new(State::default()),
+                capacity: Arc::new(Semaphore::new(config.scheduler.pending_max_count as usize)),
+                pending_max_count: config.scheduler.pending_max_count,
+                workers,
+                changed: Notify::new(),
+            }),
+        };
+        for task in startup.queued {
+            let permit = scheduler.reserve()?;
+            scheduler.enqueue(task, permit)?;
+        }
+        {
+            let mut state = scheduler
+                .shared
+                .state
+                .lock()
+                .expect("Scheduler state lock poisoned");
+            for id in startup.dispatching {
+                let permit = scheduler
+                    .shared
+                    .capacity
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(|_| AdmissionError::QueueFull)?;
+                state.known.insert(id, Some(permit));
+            }
+            for id in startup.running {
+                state.known.insert(id, None);
+            }
+        }
+        Ok(scheduler)
+    }
+
     /// Load ordered startup tasks and their permits before starting the dispatcher.
     pub fn start(
         config: &Config,
@@ -131,32 +178,25 @@ impl Scheduler {
         startup: Vec<JudgingTask>,
         review: ReviewService,
     ) -> anyhow::Result<(Self, JoinHandle<anyhow::Result<()>>)> {
+        let scheduler = Self::restore(
+            config,
+            JudgingRecovery {
+                queued: startup,
+                ..Default::default()
+            },
+        )?;
         let nodes = config
             .scheduler
             .workers
             .iter()
-            .map(|address| {
-                Ok(Node {
-                    address: address.clone(),
-                    client: WorkerClient::new(address, &config.grpc, &config.results)?,
-                    job: None,
-                    ready_at: Instant::now(),
-                })
+            .zip(scheduler.worker_clients())
+            .map(|(address, client)| Node {
+                address: address.clone(),
+                client,
+                job: None,
+                ready_at: Instant::now(),
             })
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        let scheduler = Self {
-            shared: Arc::new(Shared {
-                state: Mutex::new(State::default()),
-                capacity: Arc::new(Semaphore::new(config.scheduler.pending_max_count as usize)),
-                pending_max_count: config.scheduler.pending_max_count,
-                workers: nodes.iter().map(|node| node.client.clone()).collect(),
-                changed: Notify::new(),
-            }),
-        };
-        for task in startup {
-            let permit = scheduler.reserve()?;
-            scheduler.enqueue(task, permit)?;
-        }
+            .collect();
         let task = tokio::spawn(run(
             scheduler.clone(),
             nodes,
@@ -227,7 +267,7 @@ impl Scheduler {
             .lock()
             .expect("Scheduler state lock poisoned")
             .known
-            .contains(id)
+            .contains_key(id)
     }
 
     /// Transfer a committed task and its permit, merging duplicate handoffs by ID.
@@ -244,13 +284,70 @@ impl Scheduler {
         if state.closed {
             return Err(AdmissionError::Stopping);
         }
-        if !state.known.insert(task.request.job_id.clone()) {
+        if state.known.contains_key(&task.request.job_id) {
             return Ok(false);
         }
-        state.queue.push_back(Pending { task, permit });
+        state
+            .known
+            .insert(task.request.job_id.clone(), Some(permit));
+        state.queue.push_back(Pending { task });
         drop(state);
         self.shared.changed.notify_one();
         Ok(true)
+    }
+
+    /// Persist first admission, then release its permit while retaining the waiting ID.
+    pub async fn mark_running(&self, database: &Database, id: &str) -> database::Result<bool> {
+        let changed = database.mark_running(id).await?;
+        if changed {
+            self.release_pending(id);
+        }
+        Ok(changed)
+    }
+
+    /// Atomically save machine terminal and review intent before releasing admission capacity.
+    ///
+    /// The caller hands off a prepared review only when this returns true, and
+    /// completes ID ownership when terminal tracking ends.
+    pub async fn save_terminal(
+        &self,
+        database: &Database,
+        id: &str,
+        terminal: &TerminalOutcome,
+        review: Option<&ReviewAttempt>,
+    ) -> database::Result<bool> {
+        let changed = database.save_terminal(id, terminal, review).await?;
+        if changed {
+            self.release_pending(id);
+        }
+        Ok(changed)
+    }
+
+    /// Remove unsent payloads and take a permit at most once after a committed state change.
+    fn release_pending(&self, id: &str) {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .expect("Scheduler state lock poisoned");
+        if let Some(permit) = state.known.get_mut(id) {
+            permit.take();
+        }
+        state
+            .queue
+            .retain(|pending| pending.task.request.job_id != id);
+        drop(state);
+        self.shared.changed.notify_one();
+    }
+
+    /// End ID ownership after terminal handling or a stale legacy dispatch has finished.
+    pub fn complete(&self, id: &str) {
+        self.shared
+            .state
+            .lock()
+            .expect("Scheduler state lock poisoned")
+            .known
+            .remove(id);
     }
 
     /// Stop reservations and new dispatch; already reserved handoffs may still finish.
@@ -315,9 +412,12 @@ async fn run(
             let database = database.clone();
             let config = config.clone();
             let review = review.clone();
+            let scheduler = scheduler.clone();
             active.spawn(async move {
-                let result =
-                    tracking::track(pending, &client, &address, &database, &config, &review).await;
+                let result = tracking::track(
+                    pending, &client, &address, &database, &config, &review, &scheduler,
+                )
+                .await;
                 (index, id, result)
             });
         }
@@ -355,13 +455,11 @@ async fn run(
                 nodes[index].ready_at = Instant::now() + if result.cooldown {
                     std::time::Duration::from_millis(config.scheduler.retry_interval_ms)
                 } else { std::time::Duration::ZERO };
-                {
+                if let Some(pending) = result.deferred {
                     let mut state = scheduler.shared.state.lock().expect("Scheduler state lock poisoned");
-                    if let Some(pending) = result.deferred {
-                        state.queue.push_front(pending);
-                    } else {
-                        state.known.remove(&id);
-                    }
+                    state.queue.push_front(pending);
+                } else {
+                    scheduler.complete(&id);
                 }
                 if let Some(prepared) = result.review {
                     review.handoff(id, prepared).await?;

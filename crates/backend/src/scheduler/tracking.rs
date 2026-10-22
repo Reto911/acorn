@@ -5,7 +5,7 @@ use std::time::Duration;
 use acorn_protocol::worker::v1::JobFailure;
 
 use super::{
-    Pending,
+    Pending, Scheduler,
     worker_client::{Error, ErrorKind, Observation, WorkerClient},
 };
 use crate::{
@@ -17,7 +17,7 @@ use crate::{
 
 /// Completion event for the dispatcher, retaining capacity only on explicit refusal.
 pub(super) struct Completion {
-    /// Task to return to the queue head with its original permit.
+    /// Task to return to the queue head while its ID retains the original permit.
     pub deferred: Option<Pending>,
     /// Temporarily defer the endpoint after refusal or a failed query/submit.
     pub cooldown: bool,
@@ -33,6 +33,7 @@ pub(super) async fn track(
     database: &Database,
     config: &Config,
     review: &ReviewService,
+    scheduler: &Scheduler,
 ) -> anyhow::Result<Completion> {
     let id = pending.task.request.job_id.clone();
     if !database.mark_dispatching(&id).await? {
@@ -67,7 +68,7 @@ pub(super) async fn track(
             )
         }
         Err(error) => {
-            save_failure(database, &id, address, &error, config).await?;
+            save_failure(scheduler, database, &id, address, &error, config).await?;
             return Ok(Completion {
                 deferred: None,
                 cooldown: error.kind != ErrorKind::Rejected,
@@ -78,11 +79,10 @@ pub(super) async fn track(
     let language = pending.task.request.language_id;
     let total = pending.task.request.cases.len() as u32;
     let review_mode = pending.task.review_mode;
-    drop(pending.permit);
     drop(pending.task.request.source);
     drop(pending.task.request.cases);
     if !matches!(first, Some(Err(_))) {
-        database.mark_running(&id).await?;
+        scheduler.mark_running(database, &id).await?;
     }
     let mut observation = first;
     loop {
@@ -96,8 +96,9 @@ pub(super) async fn track(
             }
             Ok(Observation::Terminal(terminal)) => {
                 let prepared = review.prepare_automatic(review_mode, &terminal)?;
-                let saved = database
+                let saved = scheduler
                     .save_terminal(
+                        database,
                         &id,
                         &terminal,
                         prepared.as_ref().map(|review| &review.attempt),
@@ -120,7 +121,7 @@ pub(super) async fn track(
                 });
             }
             Err(error) => {
-                save_failure(database, &id, address, &error, config).await?;
+                save_failure(scheduler, database, &id, address, &error, config).await?;
                 return Ok(Completion {
                     deferred: None,
                     cooldown: true,
@@ -133,6 +134,7 @@ pub(super) async fn track(
 
 /// Persist an execution failure with actual context truncated at a UTF-8 boundary.
 async fn save_failure(
+    scheduler: &Scheduler,
     database: &Database,
     id: &str,
     address: &str,
@@ -155,6 +157,8 @@ async fn save_failure(
         },
         &config.results,
     )?;
-    database.save_terminal(id, &terminal, None).await?;
+    scheduler
+        .save_terminal(database, id, &terminal, None)
+        .await?;
     Ok(())
 }

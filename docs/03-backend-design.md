@@ -105,7 +105,7 @@ llm_review 复用该共享池和 Tokio runtime。读取审查输入后先归还�
 
 同一版本的测试数据在一次任务装配中按 `case_index` 读取。正常新提交由 API 将内存中的完整任务直接交给 Scheduler，Scheduler 不再次读源码或题库。启动装入排队任务时才由 Scheduler 读取其固定版本数据。
 
-[`Database`](../crates/backend/src/database/mod.rs) 提供题目列表与版本查询、创建幂等查询、提交详情与筛选历史、完整固定版本任务装配，以及三个非终态条件更新、终态保存和旧在途中断写入。`create_submission` 在短事务内查重、固定版本并装配 `JudgingTask`，提交并释放连接后返回；待接纳名额由 [`CreationService`](../crates/backend/src/submissions/creation.rs) 预留，数据库层不等待队列。已有同键同内容记录保留原版本；仅 queued 记录返回可交接任务。`queued_tasks` 按顺序读取，并在超过配置容量时明确报错；入口先调用旧在途中断与排队读取，Scheduler 在启动分派循环前装入全部任务及其名额。
+[`Database`](../crates/backend/src/database/mod.rs) 提供题目列表与版本查询、创建幂等查询、提交详情与筛选历史、完整固定版本任务装配，以及投递／运行条件更新、终态保存和旧在途中断写入。`create_submission` 在短事务内查重、固定版本并装配 `JudgingTask`，提交并释放连接后返回；待接纳名额由 [`CreationService`](../crates/backend/src/submissions/creation.rs) 预留，数据库层不等待队列。已有同键同内容记录保留原版本；仅 queued 记录返回可交接任务。`queued_tasks` 按顺序读取，并在超过配置容量时明确报错；保留的 gRPC 入口先调用旧在途中断与排队读取，Scheduler 在启动分派循环前装入全部任务及其名额。Kafka 恢复入口 `judging_recovery` 另外读取 dispatching/running 的 ID，只装配 queued 任务，并校验 queued 与 dispatching 的合计容量；`Scheduler::restore` 在启动后台处理前恢复这些任务的许可及去重记录。
 
 终态先由 [`TerminalOutcome`](../crates/backend/src/submissions.rs) 按已知用例数和原始字节预算校验结果形状，再执行单条条件 UPDATE，同时原子提交状态、独立 verdict、JSON 详情和终态时间。Worker 客户端校验完整响应的 Job ID、运行状态、阶段及进度与终态消息对应关系。数据库错误保留 SQLx 原始原因，业务查重与校验错误使用独立类型；数据库操作边界区分普通只读、关键写入与严重存储故障，通过共享通知保留首个致命错误并交给入口监督，通知不依赖 HTTP 等待者的生命周期。
 
@@ -250,9 +250,9 @@ P07 的实现位于 [`scheduler`](../crates/backend/src/scheduler/mod.rs)，短�
 
 Scheduler 保存 FIFO 待接纳队列、按 Submission ID 去重的记录、当前提交到 Worker 地址的映射，以及各 Worker 的可用状态缓存。Worker 地址来自配置，上述调度状态不落库。
 
-队列上限包含创建中的预留、排队任务和等待 `SubmitJob` 接纳确认的任务。Worker 明确接纳后归还该名额；明确忙而退回队列时继续占用原名额，避免重入队时挤占已经释放的空间。
+队列上限包含创建中的预留、queued 和 dispatching 任务。首次接纳状态或终态成功落库后归还该名额；明确忙而退回队列时继续占用原名额，避免重入队时挤占已经释放的空间。
 
-实现使用 `Arc<tokio::sync::Semaphore>`，初始许可数等于待接纳上限。创建前通过 `try_acquire_owned()` 取得许可，无许可时立即返回 QueueFull；`OwnedSemaphorePermit` 随创建操作、排队任务和等待接纳的任务转移。明确接纳、本地失败、事务回滚或重复投递合并时释放相应许可，忙时重新排队继续持有。信号量作为唯一名额计数，启动装入的每条 queued 记录也持有一个许可，见 [Tokio 信号量](https://docs.rs/tokio/latest/tokio/sync/struct.Semaphore.html)。
+实现使用 `Arc<tokio::sync::Semaphore>`，初始许可数等于待接纳上限。创建前通过 `try_acquire_owned()` 取得许可，无许可时立即返回 QueueFull；`OwnedSemaphorePermit` 从创建操作转交给按 Submission ID 去重的本地记录，任务 payload 不再单独持有许可。`Scheduler::mark_running` 和 `save_terminal` 在数据库条件更新成功后统一收尾；running 保留不带许可的 ID 等待终态；终态落库后立即归还仍持有的许可，传输收尾完成后通过 `complete` 清除 ID。重复事件不会重复释放。事务回滚或重复交接合并时释放多余预留，忙时重新排队继续持有。信号量作为唯一名额计数，Kafka 启动恢复的 queued/dispatching 各占一个许可，running 不占许可，见 [Tokio 信号量](https://docs.rs/tokio/latest/tokio/sync/struct.Semaphore.html)。
 
 每个 Worker 缓存以下本地状态：
 
@@ -276,7 +276,7 @@ Scheduler 保存 FIFO 待接纳队列、按 Submission ID 去重的记录、当�
 | --- | --- |
 | 选择任务和 Worker | 条件更新 `queued → dispatching`，提交事务后记录内存路由，再调用 `SubmitJob` |
 | 条件更新影响 0 行 | 丢弃过期内存任务，归还待接纳名额和本地占用，不发送 RPC |
-| 接纳成功或已存在同 ID | 条件更新 `dispatching → running`，对同地址、同 ID 调用 `GetJob` |
+| 接纳成功或已存在同 ID | 条件更新 `queued/dispatching → running`，对同地址、同 ID 调用 `GetJob` |
 | 明确忙、结果区满或停机且未接纳 | 条件更新回 `queued`，清除本次路由，将任务放回队首，暂缓该节点并立即尝试其他候选 Worker |
 | 明确非法请求 | 保存 `failed`，记录 Worker 拒绝原因，归还待接纳名额并释放本地占用 |
 | 提交超时或断连，接纳情况不明 | 只做一次有界 `GetJob`；有记录则继续跟踪，终态则保存；不存在或无法确认则保存失败 |
@@ -294,7 +294,7 @@ gRPC deadline 覆盖单次提交、查询或 ACK；不启用应用层自动重�
 
 在后端校验 Worker 终态的基本协议形状：状态与消息对应、结论有效、AC/CE 没有失败用例、用例级错误有且仅有首个失败用例且序号在本任务范围内、输出不超限。未知统计保持缺失，不重新运行程序或重新比较输出。
 
-`finished` 与 `failed` 的写入使用 `WHERE state IN ('dispatching','running')`，在同一事务中保存状态、独立 verdict、详情和终态时间。终态时间是后端保存时刻。
+`finished` 与 `failed` 的写入使用 `WHERE state IN ('queued','dispatching','running')`，在同一事务中保存状态、独立 verdict、详情和终态时间。终态时间是后端保存时刻。
 
 LLM 增量按固定版本 review_mode 与已校验机器结果判断门槛，在上述首次终态写入中同时保存审查初态。独立名额预留、未生效时释放、提交后交接及交接失败处理遵守[第 08 篇第 7.1 节](08-llm-code-review-design.md#71-自动交接)。重复终态、ACK 失败、同键重传和后端重启不重复自动触发。审查的外部网络等待不进入判题跟踪或 ACK 流程。
 

@@ -172,6 +172,18 @@ pub struct JudgingTask {
     pub review_mode: ReviewMode,
 }
 
+/// Persisted work to restore before starting Kafka publishing or event consumption.
+/// State groups are disjoint, as returned by Database::judging_recovery.
+#[derive(Default)]
+pub struct JudgingRecovery {
+    /// Complete fixed-version tasks that still need publication, in creation order.
+    pub queued: Vec<JudgingTask>,
+    /// Confirmed deliveries awaiting admission; restore permits without task payloads.
+    pub dispatching: Vec<String>,
+    /// Admitted jobs awaiting terminal events, without waiting-admission permits.
+    pub running: Vec<String>,
+}
+
 /// Creation result returned only after the transaction and connection are released.
 #[derive(Debug)]
 pub struct CreatedSubmission {

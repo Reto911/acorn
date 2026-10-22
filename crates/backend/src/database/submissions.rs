@@ -8,8 +8,8 @@ use crate::{
     config::Config,
     llm_review::{ReviewAttempt, ReviewMode, ReviewStatus, ReviewTrigger},
     submissions::{
-        CreateSubmission, CreatedSubmission, JudgingTask, Submission, SubmissionFilter,
-        SubmissionInfo, SubmissionState, TerminalOutcome, Verdict,
+        CreateSubmission, CreatedSubmission, JudgingRecovery, JudgingTask, Submission,
+        SubmissionFilter, SubmissionInfo, SubmissionState, TerminalOutcome, Verdict,
     },
 };
 
@@ -159,40 +159,48 @@ impl Database {
     pub async fn queued_tasks(&self) -> Result<Vec<JudgingTask>> {
         self.observe("Load startup queue", false, async {
             let mut connection = self.pool.acquire().await?;
-            let rows = sqlx::query(AssertSqlSafe(format!("SELECT {INFO_COLUMNS}, source FROM submissions WHERE state = 'queued' ORDER BY created_at_ms, id LIMIT ?")))
-                .bind(i64::from(self.config.scheduler.pending_max_count) + 1).fetch_all(&mut *connection).await?;
-            if rows.len() > self.config.scheduler.pending_max_count as usize {
-                return Err(Error::Data(anyhow::anyhow!(
-                    "Queued submissions exceed scheduler.pending_max_count; increase the configured limit before restarting"
-                )));
-            }
-            let mut tasks = Vec::with_capacity(rows.len());
-            for row in rows {
-                tasks.push(
-                    load_task(
-                        &mut connection,
-                        &info(&row)?,
-                        row.try_get("source")?,
-                        &self.config,
-                    )
-                    .await?,
-                );
-            }
-            Ok(tasks)
+            startup_queued(
+                &mut connection,
+                &self.config,
+                self.config.scheduler.pending_max_count,
+            )
+            .await
         })
         .await
     }
 
-    /// Claim a queued submission before making any Worker submission RPC.
+    /// Load Kafka startup work without reconstructing already delivered or admitted tasks.
+    ///
+    /// Startup runs before publishing and consuming; queued and dispatching together
+    /// must fit the configured admission capacity. Running jobs do not consume it.
+    pub async fn judging_recovery(&self) -> Result<JudgingRecovery> {
+        self.observe("Load judging recovery", false, async {
+            let mut connection = self.pool.acquire().await?;
+            let dispatching = sqlx::query_scalar::<_, String>("SELECT id FROM submissions WHERE state = 'dispatching' ORDER BY created_at_ms, id LIMIT ?")
+                .bind(i64::from(self.config.scheduler.pending_max_count) + 1)
+                .fetch_all(&mut *connection).await?;
+            let remaining = self.config.scheduler.pending_max_count
+                .checked_sub(dispatching.len() as u32)
+                .ok_or_else(pending_overflow)?;
+            let queued = startup_queued(&mut connection, &self.config, remaining).await?;
+            let running = sqlx::query_scalar::<_, String>("SELECT id FROM submissions WHERE state = 'running' ORDER BY created_at_ms, id")
+                .fetch_all(&mut *connection).await?;
+            Ok(JudgingRecovery { queued, dispatching, running })
+        }).await
+    }
+
+    /// Record delivery only while still queued, without reversing event-driven progress.
     pub async fn mark_dispatching(&self, id: &str) -> Result<bool> {
         self.transition(id, SubmissionState::Queued, SubmissionState::Dispatching)
             .await
     }
 
-    /// Record admission only if the submission is still dispatching.
+    /// Commit first admission even when its event arrives before delivery confirmation.
     pub async fn mark_running(&self, id: &str) -> Result<bool> {
-        self.transition(id, SubmissionState::Dispatching, SubmissionState::Running)
-            .await
+        self.observe("Record submission admission", true, async {
+            Ok(sqlx::query("UPDATE submissions SET state = 'running' WHERE id = ? AND state IN ('queued', 'dispatching')")
+                .bind(id).execute(&self.pool).await?.rows_affected() == 1)
+        }).await
     }
 
     /// Return a clearly unadmitted task to queued without changing terminal records.
@@ -224,7 +232,7 @@ impl Database {
                 .map(serde_json::to_string)
                 .transpose()
                 .map_err(|error| Error::Data(error.into()))?;
-            let changed = sqlx::query("UPDATE submissions SET state = ?, verdict = ?, terminal_details_json = ?, terminal_at_ms = ?, review_status = ?, review_id = ?, review_details_json = ? WHERE id = ? AND state IN ('dispatching', 'running')")
+            let changed = sqlx::query("UPDATE submissions SET state = ?, verdict = ?, terminal_details_json = ?, terminal_at_ms = ?, review_status = ?, review_id = ?, review_details_json = ? WHERE id = ? AND state IN ('queued', 'dispatching', 'running')")
                 .bind(terminal.state.as_str()).bind(terminal.verdict.map(Verdict::as_str)).bind(details)
                 .bind(now_ms()?).bind(review.map_or(ReviewStatus::Disabled, |review| review.status).as_str())
                 .bind(review.map(|review| review.id.as_str())).bind(review_json)
@@ -252,7 +260,7 @@ impl Database {
         .await
     }
 
-    /// Share the three allowed nonterminal transitions using one conditional atomic UPDATE.
+    /// Share single-source delivery and legacy refusal transitions in conditional writes.
     async fn transition(
         &self,
         id: &str,
@@ -273,6 +281,31 @@ impl Database {
         })
         .await
     }
+}
+
+/// Report startup capacity overflow without silently discarding persisted work.
+fn pending_overflow() -> Error {
+    Error::Data(anyhow::anyhow!(
+        "Queued/dispatching submissions exceed scheduler.pending_max_count; increase the configured limit before restarting"
+    ))
+}
+
+/// Assemble only queued tasks within the admission capacity remaining after delivery recovery.
+async fn startup_queued(
+    connection: &mut MySqlConnection,
+    config: &Config,
+    remaining: u32,
+) -> Result<Vec<JudgingTask>> {
+    let rows = sqlx::query(AssertSqlSafe(format!("SELECT {INFO_COLUMNS}, source FROM submissions WHERE state = 'queued' ORDER BY created_at_ms, id LIMIT ?")))
+        .bind(i64::from(remaining) + 1).fetch_all(&mut *connection).await?;
+    if rows.len() > remaining as usize {
+        return Err(pending_overflow());
+    }
+    let mut tasks = Vec::with_capacity(rows.len());
+    for row in rows {
+        tasks.push(load_task(connection, &info(&row)?, row.try_get("source")?, config).await?);
+    }
+    Ok(tasks)
 }
 
 /// Compare and assemble an existing submission, ending its read transaction before return.
