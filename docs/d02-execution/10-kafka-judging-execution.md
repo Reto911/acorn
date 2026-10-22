@@ -4,9 +4,9 @@
 
 ## 1. 当前状态
 
-当前设计为 v19；K01–K04 的 13 项任务按 v18 完成，其余 9 项尚未实施。后端已提供任务发布、事件消费、异步位点提交及自动审查交接入口；Worker 已提供 Kafka 单槽消费、结果 FIFO、原分区归属及有限消息收尾服务，完成受控管理器和一条真实 Isolate 的 Kafka 检查，实际范围见[第 9 节](#9-k04-worker-消费与结果队列)。当前正式服务入口仍通过 gRPC 判题；下一步 K05 统一接入正式生命周期并移除旧业务 RPC，随后按 K06–K07 推进观测和整体交付。进度见[任务清单](#4-任务清单)，审核决定见[审核记录](../d01-review/10-kafka-judging-review.md#2-已确认决定与草案修正)。
+当前设计为 v20；K01–K04 的 13 项任务按 v18 完成，其余 9 项尚未实施。后端已提供任务发布、事件消费、异步位点提交及自动审查交接入口；Worker 已提供 Kafka 单槽消费、结果 FIFO、原分区归属及有限消息收尾服务，完成受控管理器和一条真实 Isolate 的 Kafka 检查，实际范围见[第 9 节](#9-k04-worker-消费与结果队列)。当前正式服务入口仍通过 gRPC 判题；下一步 K05 统一接入正式生命周期并移除旧业务 RPC，随后按 K06–K07 推进观测和整体交付。进度见[任务清单](#4-任务清单)，审核决定见[审核记录](../d01-review/10-kafka-judging-review.md#2-已确认决定与草案修正)。
 
-Safe 接口修复方案已确认，S01 完成规约同步，S02 已将后端改为 safe 异步位点提交；Worker 暂保留原位点确认及原生关闭实现，S03–S06 尚未实施。按[修复步骤](../10-kafka-judging-design.md#12-safe-接口修复计划)在[第 10 节](#10-safe-接口修复跟踪)单独跟踪，不改变原 K01–K07 任务编号或历史完成记录。
+Safe 接口修复方案已确认，S01 完成规约同步，S02 已将后端改为 safe 异步位点提交；S03 按用户调整保留 StreamConsumer，以 SDK RAII 释放消费者。Worker 暂保留原位点确认，S04–S06 尚未实施。按[修复步骤](../10-kafka-judging-design.md#12-safe-接口修复计划)在[第 10 节](#10-safe-接口修复跟踪)单独跟踪，不改变原 K01–K07 任务编号或历史完成记录。
 
 ## 2. 文档工作
 
@@ -370,14 +370,14 @@ K04.1–K04.4 完成，KV04 的单槽、原分区撤销与重获、交接阶段�
 
 ## 10. Safe 接口修复跟踪
 
-步骤定义、顺序及完成条件见[设计第 12 节](../10-kafka-judging-design.md#12-safe-接口修复计划)。用户已接受两端异步位点提交及 Worker 重复执行成本。S01–S02 已完成，后端使用 v19 的异步提交；Worker 位点确认和关闭仍沿用原实现，S03–S06 未实施。
+步骤定义、顺序及完成条件见[设计第 12 节](../10-kafka-judging-design.md#12-safe-接口修复计划)。用户已接受两端异步位点提交及 Worker 重复执行成本。S01–S03 已完成，后端异步提交，Worker 沿用 StreamConsumer 并通过 SDK RAII 释放；Worker 任务位点仍等待实际确认，S04–S06 未实施。
 
 - [x] S01 确认 Worker 取舍并同步受影响规约。
 - [x] S02 后端改为 safe 异步提交，保留持久化及审查收尾。
-- [ ] S03 Worker 改用 safe 消费驱动及关闭接口。
+- [x] S03 Worker 沿用 StreamConsumer，以 SDK RAII 释放并退出消费组。
 - [ ] S04 Worker 改为原归属下的异步位点提交。
 - [ ] S05 清理原生确认实现及无用配置，更新使用说明。
-- [ ] S06 完成定向测试、动态／静态验证和驱动性能对比。
+- [ ] S06 完成定向测试及动态／静态验证。
 
 各步完成后勾选，并在此记录改动、实际验证命令及结果、剩余限制。
 
@@ -406,3 +406,27 @@ EventConsumer 直接使用 SDK safe CommitMode::Async 入队当前记录的 offs
 后端 README 已说明请求入队语义及 commit_timeout_ms 仍被共享配置接受、校验，但不再供后端使用。Worker、共享 OffsetCommit、配置字段和部署配置未修改；未运行 Worker、Isolate、静态模式或完整 workspace 测试，静态复验及驱动性能比较仍按 S06 完成。S03 的执行步骤见[消费驱动与关闭计划](../10-kafka-judging-design.md#124-s03-worker-safe-消费驱动与关闭)。
 
 三份变更 Markdown 的 Prettier、本地链接／锚点及稳定编号检查通过，`git diff --check` 通过；原 K 任务清单保持不变，S02 已勾选，S03–S06 未完成。
+
+### 10.3 S03 保留 StreamConsumer 与 RAII 释放
+
+用户撤回 BaseConsumer 改型，要求保留 StreamConsumer 和原消费驱动，采用 SDK RAII 释放消费者、退出组。S03 仍需移除 K04 的原生关闭调用，已据此缩小任务并完成；Kafka 设计升级为 v20，审核决定 R39、Worker 设计、研究及使用说明同步。原计划因消费改型而安排的接收延迟／空闲 CPU 对比已撤回，静态链接复验仍在 S06。
+
+[close.rs](../../crates/worker/src/kafka/close.rs) 移除 6 处 unsafe 及所有原生调用。服务先失效原归属，在阻塞线程等待在途提交释放 Arc，再取得独占消费者并由 SDK 析构退出组；等待最后一个引用是为避免销毁某个 Arc 后便误报释放完成。StreamConsumer、recv、pause/resume、归属回调及任务位点确认流程保持原实现。
+
+BLOCKED 仍独立开始消费者释放，不等待终态发布，状态 RPC 和生产者继续运行。共同消息期限约束交接及等待释放；SDK 析构中的关闭错误由 SDK 日志报告。超时会明确报错，但不取消已开始的阻塞析构，不承诺进程在该期限内完全退出。
+
+实际检查均通过：
+
+- `cargo fmt --all -- --check`、`cargo check --workspace --all-targets --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings`。
+- `cargo test -p acorn-worker --locked --lib`：3 项通过，包含既有终态只发布一次、位点失败只重试本阶段和撤销旧归属检查。
+- 以下三项真实 Kafka 检查分别通过，复用既有受控管理器，没有新增测试函数。覆盖容量／撤销／正常停机、BLOCKED 后另一 Worker 接管且原 RPC／生产者可用，以及结果积压与共同消息预算；独立 topic 和消费组均已清理。
+
+```sh
+ACORN_TEST_KAFKA_SERVERS=localhost:9092 cargo test -p acorn-worker --locked --test kafka real_kafka_worker_capacity_and_shutdown -- --ignored
+ACORN_TEST_KAFKA_SERVERS=localhost:9092 cargo test -p acorn-worker --locked --test kafka real_kafka_blocked_worker_leaves_group_for_replacement -- --ignored
+ACORN_TEST_KAFKA_SERVERS=localhost:9092 cargo test -p acorn-worker --locked --test kafka real_kafka_result_backpressure_and_total_shutdown_budget -- --ignored
+```
+
+本轮仅验证默认动态链接及上述路径，未重跑真实 Isolate、静态模式、完整 Worker 或 workspace 测试；未验证 broker 故障下 SDK 析构的最长耗时。手写 Rust 仅共享 OffsetCommit 仍含 9 处 unsafe，任务位点异步提交由 S04 修改，模块及配置清理留到 S05。S04 的步骤见[异步任务位点计划](../10-kafka-judging-design.md#125-s04-worker-异步任务位点提交)。
+
+五份变更使用说明与 Kafka 记录的完整 Prettier 检查通过，第 01 篇仅检查本次修改段落；全部变更文档的本地链接／锚点、稳定编号及 `git diff --check` 通过。原 K 清单和 R01–R38 决定保留，新增 R39；S03 已勾选，S04–S06 未完成。

@@ -1,6 +1,6 @@
 # Kafka safe 位点确认路线研究
 
-第 1–5 节保留针对原 v18 实现的路线研究与实测，第 6 节记录 K04 复查和用户最终确认。当前合同见[Kafka 设计 v19](../10-kafka-judging-design.md)，代码改型按[实施记录](../d02-execution/10-kafka-judging-execution.md#10-safe-接口修复跟踪)推进。这里的 safe 指业务代码不直接操作原生指针；rdkafka 本身仍通过 FFI 使用 librdkafka。
+第 1–5 节保留针对原 v18 实现的路线研究与实测，第 6 节记录 K04 复查和用户最终确认。当前合同见[Kafka 设计 v20](../10-kafka-judging-design.md)，代码改型按[实施记录](../d02-execution/10-kafka-judging-execution.md#10-safe-接口修复跟踪)推进。这里的 safe 指业务代码不直接操作原生指针；rdkafka 本身仍通过 FFI 使用 librdkafka。
 
 ## 1. 结论与路线
 
@@ -131,14 +131,16 @@ safe 读回会增加客户端与 broker 的请求编码、分配和响应处理�
 
 接受位点滞后、提交失败发现延迟及更多事件重放，不承诺每个异步提交最终自动成功；例如尾部提交失败且之后没有新事件时，位点可能保持落后。位点越界继续明确报错，不新增自动重置。旧 PENDING 审查仍按启动规则中断，不自动重新调用模型。此前第 1–5 节的读回路线及性能数据作为比较记录保留，不是当前建议的实施路线。
 
-### 6.2 当前 unsafe 分布与调用关系
+### 6.2 K04 原生调用复查快照
+
+下表保留 S02/S03 之前的 K04 复查结果；后续实现状态见实施记录。
 
 | 位置                                                        | unsafe 块数 | 当前作用                                                   | 对原计划的影响                             |
 | ----------------------------------------------------------- | ----------- | ---------------------------------------------------------- | ------------------------------------------ |
 | [共享 commit 模块](../../crates/kafka/src/commit.rs)        | 9           | 创建、提交、等待及释放原生位点结果队列，检查结果和分区错误 | K04 已让两端共用它；只改后端不能删除该模块 |
 | [Worker close 模块](../../crates/worker/src/kafka/close.rs) | 6           | 发起消费关闭、处理原生错误并检查实际 closed                | 与位点确认不同，异步提交不能替代关闭能力   |
 
-后端在 EventConsumer::confirm 调用 OffsetCommit::start/wait。Worker 在 [handoff::commit](../../crates/worker/src/kafka/handoff.rs) 持有原归属短锁时提交，然后在锁外分段等待实际结果；[消费服务](../../crates/worker/src/kafka/service.rs) 还独立驱动 BLOCKED 和正常停机的关闭。当前手写 Rust 源码未检出其他 unsafe 块。
+后端在 EventConsumer::confirm 调用 OffsetCommit::start/wait。Worker 在 [handoff::commit](../../crates/worker/src/kafka/handoff.rs) 持有原归属短锁时提交，然后在锁外分段等待实际结果；[消费服务](../../crates/worker/src/kafka/service.rs) 还独立驱动 BLOCKED 和正常停机的关闭。当时的手写 Rust 源码未检出其他 unsafe 块。
 
 ### 6.3 已确认的两端修复范围
 
@@ -146,18 +148,18 @@ safe 读回会增加客户端与 broker 的请求编码、分配和响应处理�
 
 1. 后端事件提交：按第 6.1 节改用 CommitMode::Async，移除实际结果等待及相关阻塞任务，保留数据库与审查收尾顺序。
 2. Worker 任务提交：终态仍须取得事件发布的 broker 确认；之后在原归属短锁下异步提交任务 offset+1。入队成功即可释放条目及结果名额，只有同步可见的入队失败参与当前阶段重试，不再等待本次位点结果。保留 FIFO、不跨越未完成记录、撤销后不提交旧归属以及终态不重复发布。
-3. Worker 消费关闭：改用 BaseConsumer 的 safe close_queue/closed 接口，并调整服务的消费驱动。维持持续服务重平衡、忙时暂停接纳及不增加未执行任务队列；关闭期间继续驱动，确认 closed 后释放句柄。不能把 unsubscribe 或直接 drop 当作同等完成依据，也不能以高频固定轮询替代当前驱动而不检查延迟和开销。
+3. Worker 消费关闭：按用户后续决定保留 StreamConsumer 和 recv 驱动，移除原生关闭调用，以 SDK RAII 释放消费者并退出组。先失效原归属并等待在途提交释放引用，在阻塞线程销毁最后一个 SDK 句柄；BLOCKED 不等待终态发布，状态 RPC 和结果生产者继续运行。
 
-SDK 0.39.0 的 [BaseConsumer](https://docs.rs/rdkafka/0.39.0/rdkafka/consumer/base_consumer/struct.BaseConsumer.html#method.close_queue) 提供 safe close_queue、closed 和 poll；[StreamConsumer](https://docs.rs/rdkafka/0.39.0/rdkafka/consumer/stream_consumer/struct.StreamConsumer.html) 没有公开对应关闭接口或内部 BaseConsumer 句柄。因此仅替换 close.rs 中的函数调用不够，需要同步调整 Worker 消费、交接参数和关闭驱动。BaseConsumer 的 safe 接口不自动承诺完整停机有界，仍须沿用并验证共同消息预算。
+原 v19 方案因 StreamConsumer 没有公开显式 safe close_queue/closed 接口，曾计划改用 BaseConsumer；用户随后明确选择保留 StreamConsumer，以 RAII 退出组，按审核决定 R39 纳入 v20。SDK 析构在阻塞线程执行，应用等待受共同消息预算限制；等待超时不会取消析构，也不能据此宣称已经退出组。SDK 析构中的关闭错误由其日志报告，不再由业务接口逐项返回。
 
-用户在了解额外成本后明确接受第 2 项：Worker 终态发布确认、位点请求入队后即可释放结果名额；接受位点滞后及重新编译、执行同一源码的可能，不要求每次执行结果相同。首个有效终态、原分区归属、隔离及资源限制保持有效。第 3 项继续使用 SDK safe 接口完成实际关闭，不放宽 BLOCKED 与共同消息预算的合同。
+用户在了解额外成本后明确接受第 2 项：Worker 终态发布确认、位点请求入队后即可释放结果名额；接受位点滞后及重新编译、执行同一源码的可能，不要求每次执行结果相同。首个有效终态、原分区归属、隔离及资源限制保持有效。第 3 项改按 R39 采用 SDK RAII，保留 BLOCKED 服务边界，并区分共同预算内的等待与不可取消的底层析构。
 
-方案现已确认并纳入[修复计划](../10-kafka-judging-design.md#12-safe-接口修复计划)，两端不读回、不逐条等待位点回执，不新增自动重置位点或自动重新审查。S01 完成规约更新，S02–S06 的代码修改及检查由[实施记录](../d02-execution/10-kafka-judging-execution.md#10-safe-接口修复跟踪)跟踪，不能将方案确认写成实现完成。
+方案现已确认并纳入[修复计划](../10-kafka-judging-design.md#12-safe-接口修复计划)，两端不读回、不逐条等待位点回执，不新增自动重置位点或自动重新审查。规约及实现修改后的实际检查由[实施记录](../d02-execution/10-kafka-judging-execution.md#10-safe-接口修复跟踪)跟踪，不能将方案确认写成实现完成。
 
 ### 6.4 配套修改与验证
 
 若两端都改为不等待位点结果，才可整体移除共享 OffsetCommit 及不再使用的 commit_timeout_ms 字段、默认值、校验和示例；部署配置也需同步删除该字段。只改后端时，该字段继续供 Worker 使用。结果发布仍保留 delivery_timeout_ms 和 queue_timeout_ms，消息总收尾仍使用 shutdown_timeout_ms。
 
-需要同步 Kafka 设计第 6–8 节、Worker／后端／自动审查的受影响合同及三个 crate README。更新现有位点失败测试为入队失败语义，复用已有后端链路、Worker 容量／撤销／正常停机、BLOCKED 替代接管和结果积压／总预算检查；消费者改型还需比较驱动延迟及运行时开销。无需新增恢复框架、数据库表、消息协议或完整故障矩阵，正式入口切换仍属于 K05。
+需要同步 Kafka 设计第 6–8 节、Worker／后端／自动审查的受影响合同及三个 crate README。更新现有位点失败测试为入队失败语义，复用已有后端链路、Worker 容量／撤销／正常停机、BLOCKED 替代接管和结果积压／总预算检查；消费驱动保持不变，撤回原计划中的驱动延迟及空闲 CPU 对比。无需新增恢复框架、数据库表、消息协议或完整故障矩阵，正式入口切换仍属于 K05。
 
-本次复查仅完成 rebase、源码及 SDK 接口检查和本文同步；生产 Rust 代码未改动，未运行代码编译或集成测试。文档格式、本地链接及编号单独检查。
+K04 合入时的复查仅完成 rebase、源码及 SDK 接口检查和本文同步；生产 Rust 代码未改动，未运行代码编译或集成测试。文档格式、本地链接及编号单独检查。

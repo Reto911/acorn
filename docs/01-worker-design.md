@@ -237,7 +237,7 @@ Job 结束时，若本阶段执行进程尚未启动或进程树已确认停止�
 
 [Kafka 服务](../crates/worker/src/kafka/service.rs)通过最新快照通道取得进度及终态，复用同一接纳、执行和停止入口；消费位点、原分区归属、结果 FIFO 及消费者关闭遵循[Kafka 设计第 6 节](10-kafka-judging-design.md#6-worker-消费与执行)。终态消息取得 broker 发布确认后，在原分区归属短锁下异步提交任务位点；请求入队即释放结果条目及名额，不逐条等位点回执。临时入队失败只重试当前阶段，不重发已确认终态。该调用路径不使用 RPC 的结果 ACK 淘汰流程，按通道身份释放对应运行记录，避免旧交接删除新的同 ID 执行。
 
-Kafka 任务重放可以重新编译和执行同一源码，接受因此增加的沙箱资源占用；数据库保留首个有效终态，重复执行不新建提交。消费驱动使用 safe BaseConsumer 接口，忙时暂停接纳仍驱动组事件，关闭使用 close_queue/closed 并服从共同消息预算；BLOCKED 仍保留执行位置、状态 RPC 和结果生产者。当前可执行文件仍选择 RPC 路径；Kafka safe 改型按[修复计划](10-kafka-judging-design.md#12-safe-接口修复计划)推进，正式切换与旧协议移除由 Kafka 生命周期任务统一处理。
+Kafka 任务重放可以重新编译和执行同一源码，接受因此增加的沙箱资源占用；数据库保留首个有效终态，重复执行不新建提交。消费驱动沿用 StreamConsumer，忙时暂停接纳仍驱动组事件；关闭前失效原归属，最后一个消费者句柄在阻塞线程通过 SDK RAII 释放并退出组。共同消息预算约束释放等待，超时不取消已经开始的 SDK 析构；BLOCKED 仍保留执行位置、状态 RPC 和结果生产者。当前可执行文件仍选择 RPC 路径；Kafka safe 改型按[修复计划](10-kafka-judging-design.md#12-safe-接口修复计划)推进，正式切换与旧协议移除由 Kafka 生命周期任务统一处理。
 
 H01 在执行位置保存 `stop_unconfirmed`：接纳时为 false，状态查询返回 `RUNNING`；执行器返回且 `is_available()` 为 false 时，在发布终态的同一次持锁更新中设为 true，返回 `BLOCKED`。安全收尾时删除执行位置，返回 `IDLE`。停机标记直接读取 `Jobs.stopping`，未确认结果数量复用 `Jobs::unacknowledged_count()`，容量来自配置；状态回复不包含 Job ID、源码、测试数据、路径或诊断正文。
 

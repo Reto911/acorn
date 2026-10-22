@@ -354,7 +354,7 @@ fn begin_close(
     }
 }
 
-/// Observe the actual SDK close completion rather than treating an unsubscribe as completion.
+/// Observe release of the final consumer handle through the SDK destructor.
 async fn finish_close(closing: &mut Option<JoinHandle<Result<()>>>) -> Result<()> {
     match closing {
         Some(closing) => closing.await.context("KafkaWorkerConsumerCloseFailed")?,

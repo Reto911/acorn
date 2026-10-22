@@ -109,6 +109,8 @@ target/debug/acorn-worker --config "$HOME/.config/acorn/worker.toml"
 
 Kafka 服务保持本机单槽，执行期间持续驱动消费组，忙或结果名额不足时暂停分区。执行前预留结果容量，同一 Job 的待发进度只保留最新快照；终态按 FIFO 发布，确认后只重试原任务位点。失去原分区归属的执行仍可回传终态，但不提交旧位点。BLOCKED 后立即开始关闭任务消费者并退出组，状态 RPC 和结果生产者继续运行；正常停机通过既有停止通道收尾执行，再以 `kafka.shutdown_timeout_ms` 限制全部结果及位点的共同消息收尾。
 
+任务消费沿用 StreamConsumer，退出组由 SDK RAII 完成。释放前失效原归属，等待在途提交释放消费者引用，再在阻塞线程销毁最后一个句柄；SDK 关闭错误由 SDK 日志报告。共同消息预算同时约束等待消费者释放，超时会报告未完成收尾，但不会取消已经开始的析构，进程退出仍可能等待它。
+
 ## gRPC 接口
 
 服务名为 `acorn.worker.v1.JudgeWorker`，定义见 [worker.proto](../../proto/acorn/worker/v1/worker.proto)。Rust 类型和调用入口由 [acorn-protocol](../protocol/README.md)提供。
