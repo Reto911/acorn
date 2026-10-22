@@ -2,11 +2,10 @@
 
 use std::time::Duration;
 
-use acorn_protocol::worker::v1::JobFailure;
-
 use super::{
     Pending, Scheduler,
-    worker_client::{Error, ErrorKind, Observation, WorkerClient},
+    validation::Observation,
+    worker_client::{Error, ErrorKind, WorkerClient},
 };
 use crate::{
     config::Config,
@@ -95,22 +94,9 @@ pub(super) async fn track(
                 tokio::time::sleep(Duration::from_millis(config.scheduler.poll_interval_ms)).await
             }
             Ok(Observation::Terminal(terminal)) => {
-                let prepared = review.prepare_automatic(review_mode, &terminal)?;
-                let saved = scheduler
-                    .save_terminal(
-                        database,
-                        &id,
-                        &terminal,
-                        prepared.as_ref().map(|review| &review.attempt),
-                    )
+                let prepared = scheduler
+                    .persist_terminal(database, review, &id, review_mode, &terminal)
                     .await?;
-                let prepared = if saved {
-                    prepared
-                } else {
-                    drop(prepared);
-                    None
-                };
-                tracing::info!(submission = %id, worker = address, saved, "Submission terminal committed");
                 if let Err(error) = client.acknowledge(&id).await {
                     tracing::warn!(submission = %id, worker = address, error = %error, "Result acknowledgement failed");
                 }
@@ -142,21 +128,7 @@ async fn save_failure(
     config: &Config,
 ) -> anyhow::Result<()> {
     tracing::warn!(submission = id, worker = address, error = %error, "Worker tracking failed");
-    let mut diagnostic = error.diagnostic.clone();
-    let mut end = diagnostic
-        .len()
-        .min(config.results.failure_diagnostic_max_bytes);
-    while !diagnostic.is_char_boundary(end) {
-        end -= 1;
-    }
-    diagnostic.truncate(end);
-    let terminal = TerminalOutcome::failed(
-        &JobFailure {
-            code: error.code.into(),
-            diagnostic,
-        },
-        &config.results,
-    )?;
+    let terminal = TerminalOutcome::local_failure(error.code, &error.diagnostic, &config.results)?;
     scheduler
         .save_terminal(database, id, &terminal, None)
         .await?;

@@ -2,6 +2,7 @@
 
 pub mod kafka;
 mod tracking;
+mod validation;
 pub mod worker_client;
 
 use std::{
@@ -18,7 +19,7 @@ use tokio::{
 use crate::{
     config::Config,
     database::{self, Database},
-    llm_review::{ReviewAttempt, ReviewService},
+    llm_review::{PreparedReview, ReviewAttempt, ReviewMode, ReviewService},
     submissions::{JudgingRecovery, JudgingTask, TerminalOutcome},
 };
 use worker_client::WorkerClient;
@@ -323,6 +324,39 @@ impl Scheduler {
         Ok(changed)
     }
 
+    /// Share automatic intent preparation and atomic terminal persistence across transports.
+    pub(crate) async fn persist_terminal(
+        &self,
+        database: &Database,
+        review: &ReviewService,
+        id: &str,
+        mode: ReviewMode,
+        terminal: &TerminalOutcome,
+    ) -> database::Result<Option<PreparedReview>> {
+        let prepared = review.prepare_automatic(mode, terminal)?;
+        let saved = self
+            .save_terminal(
+                database,
+                id,
+                terminal,
+                prepared.as_ref().map(|review| &review.attempt),
+            )
+            .await?;
+        tracing::info!(submission = id, saved, "Submission terminal committed");
+        Ok(if saved { prepared } else { None })
+    }
+
+    /// Observe whether an ID still owns the admission permit required for publication retries.
+    fn awaiting_admission(&self, id: &str) -> bool {
+        self.shared
+            .state
+            .lock()
+            .expect("Scheduler state lock poisoned")
+            .known
+            .get(id)
+            .is_some_and(Option::is_some)
+    }
+
     /// Remove unsent payloads and take a permit at most once after a committed state change.
     fn release_pending(&self, id: &str) {
         let mut state = self
@@ -348,6 +382,7 @@ impl Scheduler {
             .expect("Scheduler state lock poisoned")
             .known
             .remove(id);
+        self.shared.changed.notify_one();
     }
 
     /// Stop reservations and new dispatch; already reserved handoffs may still finish.

@@ -107,7 +107,7 @@ flowchart LR
 | tasks  | SubmitJobRequest | 沿用 job_id、language_id、source、cases 和 run_limits，携带完整任务                          |
 | events | GetJobReply      | 沿用 job_id、state、phase、completed_cases、total_cases 和终态 oneof，发送既有运行状态及终态 |
 
-Worker 使用已有进度更新机制产生 GetJobReply 状态事件，Scheduler 沿用原[响应校验](../crates/backend/src/scheduler/worker_client.rs)及处理规则：
+Worker 使用已有进度更新机制产生 GetJobReply 状态事件，Scheduler 沿用原[响应校验](../crates/backend/src/scheduler/validation.rs)及处理规则：
 
 - RUNNING 接受 PREPARING、COMPILING、RUNNING_CASE、CHECKING，分别保留原语言、已完成用例数及终态缺失等校验；首次合法运行事件推进业务 running，后续运行事件继续等待终态，阶段和逐点进度不写库。
 - FINISHED/FAILED 必须处于 DONE，保留原 result/failure、verdict、用例序号、输出及统计校验，首次合法终态落库后不可覆盖。
@@ -219,7 +219,7 @@ delete 策略按日志段清理过期数据，消费完成不会立即删除日�
 
 ## 7. 后端事件处理
 
-后端事件消费者接替原 Scheduler 轮询的结果处理，复用[响应校验](../crates/backend/src/scheduler/worker_client.rs)，按第 3.3 节推进状态。
+后端事件消费者接替原 Scheduler 轮询的结果处理，复用[响应校验](../crates/backend/src/scheduler/validation.rs)，按第 3.3 节推进状态。
 
 自动审查调用点从[轮询跟踪](../crates/backend/src/scheduler/tracking.rs)迁至事件消费者，复用 prepare_automatic、save_terminal 和本地 handoff，沿用[自动交接合同](08-llm-code-review-design.md#71-自动交接)。原 Worker 业务 ACK 调用处改为提交事件消费位点；首次机器终态和审查初态仍在同一数据库事务保存，重复事件不再次交接审查。
 

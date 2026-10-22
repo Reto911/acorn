@@ -3,17 +3,16 @@
 use std::{future::Future, time::Duration};
 
 use acorn_protocol::worker::v1::{
-    self as proto, AcknowledgeResultRequest, GetJobReply, GetJobRequest, JobPhase, JobState,
-    SubmitJobRequest, get_job_reply::Terminal,
+    self as proto, AcknowledgeResultRequest, GetJobRequest, JobState, SubmitJobRequest,
 };
 use tonic::{Code, Request, Response, Status, transport::Channel};
 
 use crate::{
     config::{GrpcConfig, ResultsConfig},
     health::{ExecutionState, ProbeError, ProbeErrorCode, WorkerStatus},
-    submissions::TerminalOutcome,
 };
 
+use super::validation::{Observation, validate};
 pub use proto::judge_worker_client::JudgeWorkerClient;
 
 /// Classification used to decide whether admission was explicitly refused.
@@ -78,14 +77,6 @@ impl Error {
     }
 }
 
-/// Validated progress or a terminal ready for conditional database persistence.
-pub(crate) enum Observation {
-    /// Execution is still active; no transient progress is written to SQLite.
-    Running,
-    /// The complete bounded terminal has passed the response checks.
-    Terminal(TerminalOutcome),
-}
-
 /// A cheap clone shares one lazy channel for its configured Worker address.
 #[derive(Clone)]
 pub(crate) struct WorkerClient {
@@ -144,7 +135,7 @@ impl WorkerClient {
                 .get_job(request(GetJobRequest { job_id: id.into() }, duration)),
         )
         .await?;
-        validate(reply, id, language, total, &self.results)
+        validate(reply, id, language, total, &self.results).map_err(Error::invalid)
     }
 
     /// Confirm only after the caller has committed its business terminal.
@@ -240,75 +231,12 @@ async fn bounded<T>(
     }
 }
 
-/// Validate identity, state, phase, progress and the bounded terminal together.
-fn validate(
-    reply: GetJobReply,
-    id: &str,
-    language: &str,
-    total: u32,
-    limits: &ResultsConfig,
-) -> Result<Observation, Error> {
-    if reply.job_id != id || reply.total_cases != total || reply.completed_cases > total {
-        return Err(Error::invalid(
-            "GetJob identity or case count does not match the task",
-        ));
-    }
-    let state = JobState::try_from(reply.state).ok();
-    let phase = JobPhase::try_from(reply.phase).ok();
-    if state == Some(JobState::Running) {
-        let valid_phase = match phase {
-            Some(JobPhase::Preparing) => reply.completed_cases == 0,
-            Some(JobPhase::Compiling) => language == "c" && reply.completed_cases == 0,
-            Some(JobPhase::RunningCase) => reply.completed_cases < total,
-            Some(JobPhase::Checking) => true,
-            _ => false,
-        };
-        return if valid_phase && reply.terminal.is_none() {
-            Ok(Observation::Running)
-        } else {
-            Err(Error::invalid(
-                "Running Job has an invalid phase, progress or terminal",
-            ))
-        };
-    }
-    if phase != Some(JobPhase::Done) {
-        return Err(Error::invalid("Terminal Job must be in the done phase"));
-    }
-    let terminal = match (state, reply.terminal) {
-        (Some(JobState::Finished), Some(Terminal::Result(result))) => {
-            let expected = match proto::Verdict::try_from(result.verdict).ok() {
-                Some(proto::Verdict::Accepted) => total,
-                Some(proto::Verdict::CompileError) => 0,
-                _ => result
-                    .failed_case
-                    .as_ref()
-                    .map_or(0, |case| case.case_index),
-            };
-            if reply.completed_cases != expected {
-                return Err(Error::invalid(
-                    "Terminal progress does not match the verdict",
-                ));
-            }
-            TerminalOutcome::judged(&result, total, limits)
-        }
-        (Some(JobState::Failed), Some(Terminal::Failure(failure))) => {
-            TerminalOutcome::failed(&failure, limits)
-        }
-        _ => {
-            return Err(Error::invalid(
-                "Job state does not match its terminal message",
-            ));
-        }
-    }
-    .map_err(Error::invalid)?;
-    Ok(Observation::Terminal(terminal))
-}
-
 #[cfg(test)]
 mod tests {
     //! Contract checks for transient progress and terminal correspondence.
 
     use super::*;
+    use acorn_protocol::worker::v1::{GetJobReply, JobPhase, get_job_reply::Terminal};
 
     /// Occupancy and counts accept only the three status conditions agreed at the boundary.
     #[test]
@@ -369,6 +297,20 @@ mod tests {
             validate(reply.clone(), "job", "python", 2, &config.results),
             Ok(Observation::Running)
         ));
+        for (phase, completed) in [
+            (JobPhase::Preparing, 0),
+            (JobPhase::Compiling, 0),
+            (JobPhase::RunningCase, 1),
+            (JobPhase::Checking, 2),
+        ] {
+            let mut snapshot = reply.clone();
+            snapshot.phase = phase.into();
+            snapshot.completed_cases = completed;
+            assert!(matches!(
+                validate(snapshot, "job", "c", 2, &config.results),
+                Ok(Observation::Running)
+            ));
+        }
         reply.phase = JobPhase::Compiling as i32;
         assert!(validate(reply.clone(), "job", "python", 2, &config.results).is_err());
         reply.phase = JobPhase::Done as i32;

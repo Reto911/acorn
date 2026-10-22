@@ -302,6 +302,16 @@ LLM 增量按固定版本 review_mode 与已校验机器结果判断门槛，在
 
 迟到结果不能覆盖已保存失败；如果在本次仍有路由的处理流程中拿到旧终态，可丢弃内容并 ACK。任务跟踪结束后，不额外扫描旧 Worker 查找迟到结果。
 
+### 7.4 Kafka 发布与事件处理入口
+
+[`scheduler::kafka`](../crates/backend/src/scheduler/kafka.rs) 提供 Publisher、EventConsumer 和 EventProcessor。发布和消费分别运行，调用方提供停止信号并监督返回错误；正式入口编排见[Kafka 生命周期设计](10-kafka-judging-design.md#91-后端启动与停止)。
+
+Publisher 从同一个有界本地队列取得任务，发送期间 ID 与许可继续由 Scheduler 持有。首次发送前只读取业务状态，网络等待不持有数据库连接；临时交接失败保留同一编码任务，按既有重试间隔继续。投递确认后仅以 queued 为条件写 dispatching；合法运行或终态落库后不再安排本地重发，已在途的发送仍完成一次。无法继续的客户端或配置错误通过发布服务返回。
+
+EventConsumer 按事件组串行读取。Database::judging_context 仅查询当前状态及固定版本的语言、用例数和 review_mode；[`validation`](../crates/backend/src/scheduler/validation.rs) 同时供事件处理和旧 RPC 路径使用。首次运行写库后归还许可，后续合法运行快照不再写状态；可信身份下的无效响应保存 InvalidWorkerResponse，无法解码或无法关联身份的消息保留位点并结束消费服务。
+
+首次终态通过 Scheduler::persist_terminal 共用审查准备和条件持久化，之后在 commit_timeout_ms 内等待实际事件位点确认。确认成功、失败或超时后均完成已保存审查的本地交接；随后清除 ID，确认失败向调用方报告。数据库保存失败时不发起位点提交，重复终态不准备或交接第二次审查。
+
 ## 8. 启动、停机与故障
 
 ### 8.1 启动

@@ -1,7 +1,6 @@
 //! Contracts over MySQL, backend processes, HTTP and controlled or real Workers.
 
-#[path = "support/review_workflow.rs"]
-mod review_workflow;
+mod cases;
 mod support;
 
 use std::{sync::atomic::Ordering, time::Duration};

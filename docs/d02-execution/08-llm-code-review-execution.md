@@ -95,7 +95,7 @@ L03 已完成。[审查服务](../../crates/backend/src/llm_review/service.rs)�
 - `cargo fmt --all -- --check`、`cargo check --workspace --all-targets --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings`：最终通过，覆盖程序入口、全部现有测试目标和更新后的真实 Worker 夹具。
 - 沙箱执行 `cargo test -p acorn-backend --locked --lib --test llm_review --test workflow`：九项单元测试通过，新增自动门槛小表覆盖全部用例级 verdict 的首例／后续失败、AC、CE、执行失败及三种模式；五项客户端网络测试绑定回环端口时返回 Operation not permitted，命令失败，未执行 workflow。
 - 随后在可绑定回环端口的宿主环境执行 `cargo test -p acorn-backend --locked --test llm_review --test workflow`，五项 L02 客户端测试通过。首轮新增 workflow 用例因测试误用 python3 而非既有 python 标识失败；修正夹具后运行 `cargo test -p acorn-backend --locked --test workflow`，并在补充条件终态未生效检查后再次运行，最终三十一项常规测试通过，两个真实 Isolate 验收按原规则忽略。
-- [七项新增 workflow 检查](../../crates/backend/tests/support/review_workflow.rs)使用临时 SQLite、受控 gRPC 和 Axum Responses 服务。覆盖单运行／单排队容量、FIFO、队列满、独立 Scheduler 容量、重复投递、迟到机器终态的名额释放、禁用服务及 ACK 失败。实际模型 POST 处理器断言 Scheduler 身份已释放且 ACK 已调用；卡住响应时仍能保存下一条机器终态并读取数据库。
+- [七项新增 workflow 检查](../../crates/backend/tests/cases/review_workflow.rs)使用临时 SQLite、受控 gRPC 和 Axum Responses 服务。覆盖单运行／单排队容量、FIFO、队列满、独立 Scheduler 容量、重复投递、迟到机器终态的名额释放、禁用服务及 ACK 失败。实际模型 POST 处理器断言 Scheduler 身份已释放且 ACK 已调用；卡住响应时仍能保存下一条机器终态并读取数据库。
 - ACK 完成门控检查确认：机器结果和 PENDING 已落库、ACK 尚未结束时停止审查，PENDING 此时不被交接收尾覆盖；ACK 完成后保存 ReviewInterrupted，未发模型 POST。实际后端子进程另验证旧 PENDING 启动中断、排队任务使用旧版本策略、重启不补发、运行及排队审查停机中断、停机中新机器终态的原子中断，以及 HTTP 查询持续可用；60 秒模型预算内的未完成请求不阻止既有 5 秒进程退出检查。
 - 受控 503 仅使该审查保存 ReviewApiFailed，后续审查正常完成。临时数据库触发器拒绝审查完成写入时，后端明确故障退出，机器 AC 和 ACK 保留，未写成的审查仍为 PENDING；没有把内存意见或失败记录伪称为已保存。
 - 变更 Markdown 的本地链接与锚点、代码块闭合、既有标题编号保留，以及 `git diff --check`：通过。
@@ -117,7 +117,7 @@ L04 已完成。[审查服务](../../crates/backend/src/llm_review/service.rs)�
 - `cargo fmt --all -- --check`、`cargo check --workspace --all-targets --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings`：最终通过。首次 Clippy 报告接纳结果枚举的变体大小差异；将携带审查详情的变体改为 Box 后修正，没有增加 lint 豁免。
 - `cargo test -p acorn-backend --locked --lib`：十项通过，新增必填可空预期 ID 的解析检查，覆盖遗漏、错误类型、非法 UUID、未知字段及规范化。
 - 在可绑定回环端口的宿主环境执行 `cargo test -p acorn-backend --locked --test database --test workflow`：九项数据库和首轮三十八项 workflow 常规测试通过，两个真实 Isolate 验收按原规则忽略。补充题目／历史字段断言后，`cargo test -p acorn-backend --locked --test workflow published_queries_and_history_shapes` 定向通过；补充并发首次接纳后再执行 `cargo test -p acorn-backend --locked --test workflow`，最终三十九项常规测试通过、两个真实验收忽略。
-- [八项新增 workflow 检查](../../crates/backend/tests/support/review_workflow.rs)沿用受控 Axum、gRPC 和临时 SQLite。验证禁用题目的手动 CE／首例 WA、非 finished 拒绝、404、服务禁用和停止边界、队列满保留旧记录、PASS／FAILED 重跑、旧 ID 不启动下一轮、公共意见与五状态历史组合筛选。八个并发首次请求取得一个 202、七个 200、同一 review_id，模型仅收到一次 POST；已 PENDING 时另验证满队列下并发复用，不重复调用。
+- [八项新增 workflow 检查](../../crates/backend/tests/cases/review_workflow.rs)沿用受控 Axum、gRPC 和临时 SQLite。验证禁用题目的手动 CE／首例 WA、非 finished 拒绝、404、服务禁用和停止边界、队列满保留旧记录、PASS／FAILED 重跑、旧 ID 不启动下一轮、公共意见与五状态历史组合筛选。八个并发首次请求取得一个 202、七个 200、同一 review_id，模型仅收到一次 POST；已 PENDING 时另验证满队列下并发复用，不重复调用。
 - 连续重跑窗口通过正式完成写入提前暴露上一轮终态、保持旧执行活动来构造；新一轮取得不同 ID，旧完成不会覆盖或误合并新交接，最终新意见可保存。意见及失败数据只由受控响应或数据库夹具构造，不代表真实模型判断。
 - 取消等待检查在实际 HTTP 路由已登记操作、SQLite 写锁尚未释放时丢弃请求等待；解锁后 PENDING 交接并保存 PASS。独立后端子进程另在登记后断开 TCP 等待并发送停止信号，锁未释放期间健康 GET 仍为 200、新手动 POST 为 BackendStopping；解锁后保存 FAILED/ReviewInterrupted，进程正常退出，未发模型请求。
 - 变更 Markdown 的本地链接与锚点、代码块闭合、既有编号保留、项目说明 shell／内嵌 Python 语法，以及 `git diff --check`：通过。

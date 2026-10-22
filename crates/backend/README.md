@@ -16,6 +16,8 @@ acorn-backend 是 Acorn 的 HTTP 后端，使用 Axum、Tokio 和 SQLx。它管�
 
 一个后端进程运行一个 Scheduler，可连接多个 Worker。每个提交固定创建时的题目版本，源码和测试数据随任务交给 Worker；提交 ID 同时作为 Worker Job ID。
 
+库接口 `scheduler::kafka::Publisher` 和 `EventConsumer` 分别提供任务发布与事件消费，`EventProcessor` 共用状态持久化和审查交接。调用方先用 `Database::judging_recovery`／`Scheduler::restore` 恢复本地所有权，再运行两项服务，提供停止信号并监督错误。Kafka 组位点需由部署初始化，运行规则见 [Kafka 设计](../../docs/10-kafka-judging-design.md)。下述可执行文件入口使用 gRPC 调度。
+
 ## 启动
 
 先按 [初始化说明](../../docs/09-mysql-migration-design.md#7-sql-改写与全新初始化)初始化数据库并预置用户、题目，再按 [Worker 说明](../worker/README.md#启动)启动节点。在仓库根目录执行：

@@ -184,6 +184,18 @@ pub struct JudgingRecovery {
     pub running: Vec<String>,
 }
 
+/// Fixed submission metadata needed to validate an event without loading task payloads.
+pub struct JudgingContext {
+    /// Current persisted state, used to skip repeated running writes and review preparation.
+    pub state: SubmissionState,
+    /// Original language, used for execution-phase validation.
+    pub language_id: String,
+    /// Case count from the submission's immutable problem version.
+    pub total_cases: u32,
+    /// Automatic review policy from that same fixed version.
+    pub review_mode: ReviewMode,
+}
+
 /// Creation result returned only after the transaction and connection are released.
 #[derive(Debug)]
 pub struct CreatedSubmission {
@@ -300,6 +312,25 @@ pub struct TerminalOutcome {
 }
 
 impl TerminalOutcome {
+    /// Bound a locally reported transport or protocol diagnostic before constructing a failure.
+    pub(crate) fn local_failure(
+        code: &str,
+        diagnostic: &str,
+        limits: &ResultsConfig,
+    ) -> Result<Self> {
+        let mut end = diagnostic.len().min(limits.failure_diagnostic_max_bytes);
+        while !diagnostic.is_char_boundary(end) {
+            end -= 1;
+        }
+        Self::failed(
+            &proto::JobFailure {
+                code: code.into(),
+                diagnostic: diagnostic[..end].into(),
+            },
+            limits,
+        )
+    }
+
     /// Validate result shape and raw-byte budgets before Base64 JSON serialization.
     pub fn judged(
         result: &proto::JudgeResult,

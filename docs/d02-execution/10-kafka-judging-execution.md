@@ -4,7 +4,7 @@
 
 ## 1. 当前状态
 
-设计版本为 v18，K01 与 K02 的 6 项任务已完成，其余 16 项尚未开始。已接入 Kafka 依赖、配置和编解码，并完成数据库状态条件更新、本地许可收尾和等待恢复入口。当前服务入口仍通过 gRPC 判题，Kafka 发布／消费与生命周期按 K03–K06 继续实现。进度见[任务清单](#4-任务清单)，审核决定见[审核记录](../d01-review/10-kafka-judging-review.md#2-已确认决定与草案修正)。
+设计版本为 v18，K01–K03 的 9 项任务已完成，其余 13 项尚未开始。后端已提供任务发布、事件消费、实际位点确认及自动审查交接入口，并完成动态／静态链接下的真实后端 Kafka 链路检查。当前正式服务入口仍通过 gRPC 判题；Worker 消费执行和正式生命周期切换按 K04–K06 继续实现。进度见[任务清单](#4-任务清单)，审核决定见[审核记录](../d01-review/10-kafka-judging-review.md#2-已确认决定与草案修正)。
 
 ## 2. 文档工作
 
@@ -45,9 +45,9 @@
 
 任务定义见[设计 K03](../10-kafka-judging-design.md#k03-后端发布及事件消费)。
 
-- [ ] K03.1 实现任务发布、临时失败重试及投递确认后的条件更新。
-- [ ] K03.2 实现事件校验、状态推进、终态幂等及手动位点提交。
-- [ ] K03.3 迁移自动审查交接，重复终态不重复交接，位点提交失败仍完成本地交接。
+- [x] K03.1 实现任务发布、临时失败重试及投递确认后的条件更新。
+- [x] K03.2 实现事件校验、状态推进、终态幂等及手动位点提交。
+- [x] K03.3 迁移自动审查交接，重复终态不重复交接，位点提交失败仍完成本地交接。
 
 ### 4.4 K04 Worker 消费与结果队列
 
@@ -205,3 +205,45 @@ Database::judging_recovery 和 Scheduler::restore 提供后台处理前的恢复
 K02.1–K02.3 完成。KV02 的数据库、本地接纳和恢复接口已检查；正式进程仍使用 gRPC 启动路径，新的等待恢复入口尚未由 main 调用。K03 接入 Kafka 发布、事件校验与消费位点，以及终态审查交接；K05 切换正式启动恢复和生命周期，同时移除旧在途中断路径。
 
 本轮未执行完整 workflow、真实 Kafka 或 Isolate 判题检查，不能据此认为 Kafka 端到端链路已经完成。部署配置和数据库结构不需要调整。
+
+## 7. K03 后端发布及事件消费
+
+### 7.1 实现内容
+
+K03.1：scheduler::kafka::Publisher 从 K02 的有界队列取得完整任务，以原 Submission ID 编码并发送。发送占用由现有 ID 记录保持，数据库连接在网络等待前归还。broker 确认后仅条件更新 queued → dispatching；临时失败保留同一编码任务及许可，按既有重试间隔继续。首次合法运行或终态落库后停止后续重发，已经在途的发送正常取得一次结果；迟到确认不会回退状态。编码超限或无法继续的客户端／配置错误通过发布服务报告并保留持久状态；一次发送失败不作为任务已无法继续的证据。
+
+K03.2：EventConsumer 串行读取事件，复用提取后的 scheduler::validation。Database::judging_context 仅读取当前状态与固定版本的语言、用例数、review_mode，不加载源码或用例内容。首次运行使用 K02 的条件写入及许可收尾；后续合法运行快照不重复写状态。可信身份下的无效事件保存 InvalidWorkerResponse；无法解码、ID 无效或无法关联提交时记录消息位置并结束消费服务，保留未提交位点。
+
+位点通过 librdkafka 显式提交结果队列确认；原生调用集中在一个小模块，队列和事件分别使用 RAII 释放。等待放在阻塞线程并传入原生有限超时，同时受应用 commit_timeout_ms 约束；确认读取总体与分区错误，仅提交当前已处理记录的下一位点。未增加依赖，复用现有 rdkafka 导出的绑定。
+
+K03.3：Scheduler::persist_terminal 共用 prepare_automatic、save_terminal 及重复条件更新的审查许可收尾，原 RPC 跟踪也使用该入口。机器终态及审查初态先原子提交，归还判题许可，再尝试确认事件位点。确认成功、失败或超时均继续本次审查的本地 handoff，之后清除本地 ID；确认失败仍向调用方返回错误，消费服务不跨过该记录继续处理。重复终态保留首次结果和审查 ID，不新建审查。
+
+新增 4 个测试函数：发布重试／早到进度窗口、关键写入后才能确认事件、提交失败／超时仍交接审查、真实后端 Kafka 链路。其余校验、固定版本、许可及审查检查复用并扩展现有用例。
+
+workflow 的 Kafka 与审查用例放在 [tests/cases](../../crates/backend/tests/cases/mod.rs)，通过普通 mod 声明加载；support 仅保留共享夹具和辅助代码。两组用例仍属于同一个 workflow 集成测试目标，保留既有模块名供测试命令筛选。
+
+### 7.2 实际检查与修正
+
+- `cargo fmt --all -- --check`、`cargo check --workspace --all-targets --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings`：通过。
+- `cargo test -p acorn-backend --locked --lib`：11 项通过。最终定向复验 3 项 Scheduler 库测试，覆盖四个运行阶段、终态对应、临时失败重试和早到进度后停止重发，全部通过。
+- 定向执行 4 项 database 和 12 项 workflow 测试：全部通过。覆盖固定版本事件元信息（包括不同版本的用例数和 review_mode）、状态／审查不可覆盖、首次运行与重复快照、关键 UPDATE 失败不发起确认、未知提交拒绝确认，以及已有 gRPC ACK 和自动审查交接的兼容路径。使用独立 MySQL 夹具和既有受控模型端点。
+- 用例目录整理后，格式检查与 workspace 全目标 Clippy 再次通过；`cargo test -p acorn-backend --locked --test workflow -- --list` 编译通过并保留全部 43 个用例。定向复验 kafka_commit_errors_preserve_automatic_handoff 和默认动态链接的 real_kafka_backend_publication_and_events，两项通过。
+- 真实后端链路命令如下，默认动态链接与静态链接各一项通过。检查完整任务原始字节、dispatching 仍持许可、首次 RUNNING 释放许可、首次 AC 不被迟到失败覆盖，以及事件消费组实际位点推进。结束后收到独立测试 topic 与事件组的删除确认，独立测试库由夹具清理。
+
+```sh
+# 同时设置既有 MySQL 测试变量 ACORN_TEST_DATABASE_CONFIG 与 MYSQL_PASSWORD。
+ACORN_TEST_KAFKA_SERVERS=localhost:9092 cargo test -p acorn-backend --locked --test workflow real_kafka_backend_publication_and_events -- --ignored
+ACORN_TEST_KAFKA_SERVERS=localhost:9092 cargo test -p acorn-backend --locked --no-default-features --features kafka-static --test workflow real_kafka_backend_publication_and_events -- --ignored
+```
+
+初次数据库用例因 DROP TRIGGER 不支持 prepared statement 协议失败，改用既有 raw_sql 执行后通过。初期编译中的未使用导入及 SDK 私有 API 调用也已修正。
+
+真实 Kafka 检查最初在手动异步提交回调上反复超时；SDK 日志确认 broker 已返回提交成功，而该手动接口未向 ConsumerContext 回传本次结果。改用显式结果队列等待实际确认后通过，并移除临时日志与轮询代码。该问题通过单项真实链路定位，未把异步提交入队当成位点确认成功。
+
+实施记录、Kafka 设计和 backend README 的整体 Prettier 检查通过；第 03、08 篇仅检查本次新增段落，均通过并沿用已有全文格式。5 份变更 Markdown 的 102 个本地链接／锚点有效，既有标题保持稳定，新增第 03 篇 7.4 节及本记录第 7 节；代码块与 22 项任务编号检查通过，其中 9 项已完成。`git diff --check` 通过。
+
+### 7.3 完成状态与后续边界
+
+K03.1–K03.3 完成，KV01/KV03 的后端事件校验、发送窗口及结果确认已作上述检查。Publisher 与 EventConsumer 提供独立可调用服务，调用方传入停止信号并监督错误；正式 main 尚未切换。K04 实现 Worker 的 Kafka 接纳、执行和结果交接；K05 负责两端正式生命周期、有限停机编排及旧 RPC 移除；成员观测和 Kafka 健康仍归 K06。
+
+本轮真实消息由测试端模拟 Worker 收发，不执行源码或 Isolate，也不代表完整 Kafka 判题端到端验收。没有改动部署配置、业务 topic、业务组位点或 MySQL 表结构。

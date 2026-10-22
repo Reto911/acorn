@@ -3,6 +3,8 @@
 use acorn_backend::{
     config::Config,
     database::{Database, Error},
+    llm_review::{ReviewMode, ReviewService},
+    scheduler::kafka::EventProcessor,
     scheduler::{AdmissionError, Scheduler},
     submissions::{
         CreateSubmission, SubmissionFilter, SubmissionState, TerminalDetails, TerminalOutcome,
@@ -178,7 +180,7 @@ async fn published_queries_and_fixed_version_creation() {
 
     let mut connection = fixture.connection().await;
     sqlx::raw_sql("START TRANSACTION;
-        INSERT INTO problem_versions (problem_id, version_no, title, statement, comparison_mode, published_at_ms) SELECT problem_id, 2, 'Version two', statement, comparison_mode, published_at_ms + 1 FROM problem_versions WHERE problem_id = 1 AND version_no = 1;
+        INSERT INTO problem_versions (problem_id, version_no, title, statement, comparison_mode, review_mode, published_at_ms) SELECT problem_id, 2, 'Version two', statement, comparison_mode, 'ENABLE-ALL', published_at_ms + 1 FROM problem_versions WHERE problem_id = 1 AND version_no = 1;
         INSERT INTO problem_version_languages SELECT problem_id, 2, language_id, cpu_time_ms, wall_time_ms, 1 FROM problem_version_languages WHERE problem_id = 1 AND version_no = 1 AND language_id = 'c';
         INSERT INTO test_cases VALUES (1, 2, 1, X'00FF010A', X'FF000A');
         UPDATE problems SET current_version_no = 2 WHERE id = 1;
@@ -211,6 +213,16 @@ async fn published_queries_and_fixed_version_creation() {
     assert_eq!(repeated.task.unwrap().request.cases.len(), 104);
     let new = database.create_submission(request("c")).await.unwrap();
     assert_eq!(new.info.version_no, 2);
+    for (id, expected, mode) in [
+        (&created.info.id, 104, ReviewMode::Disabled),
+        (&new.info.id, 1, ReviewMode::EnableAll),
+    ] {
+        let context = database.judging_context(id).await.unwrap().unwrap();
+        assert_eq!(context.state, SubmissionState::Queued);
+        assert_eq!(context.language_id, "c");
+        assert_eq!(context.total_cases, expected);
+        assert_eq!(context.review_mode, mode);
+    }
     let task = new.task.unwrap();
     assert_eq!(task.request.run_limits.as_ref().unwrap().memory_kib, 1);
     assert_eq!(task.request.cases[0].input, [0, 255, 1, 10]);
@@ -712,6 +724,132 @@ async fn judging_recovery_and_once_only_permit_release() {
         assert!(!scheduler.contains(id));
     }
     assert_eq!(scheduler.snapshot().pending_used, 0);
+    fixture.close().await;
+}
+
+/// Event confirmation follows critical persistence, and repeated running snapshots stay read-only.
+#[tokio::test]
+async fn kafka_events_confirm_only_persisted_changes() {
+    use acorn_protocol::records;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let fixture = Fixture::new().await;
+    let first = fixture
+        .database
+        .create_submission(request("c"))
+        .await
+        .unwrap();
+    let second = fixture
+        .database
+        .create_submission(request("python"))
+        .await
+        .unwrap();
+    let scheduler = Scheduler::restore(
+        &fixture.config,
+        fixture.database.judging_recovery().await.unwrap(),
+    )
+    .unwrap();
+    let (review, review_task) =
+        ReviewService::start(&fixture.config.llm_review, fixture.database.clone()).unwrap();
+    let processor = EventProcessor::new(
+        &fixture.config,
+        scheduler.clone(),
+        fixture.database.clone(),
+        review.clone(),
+    );
+    let mut event = proto::GetJobReply {
+        job_id: first.info.id.clone(),
+        state: proto::JobState::Running.into(),
+        phase: proto::JobPhase::Preparing.into(),
+        total_cases: 104,
+        ..Default::default()
+    };
+    let confirms = AtomicUsize::new(0);
+    let encoded =
+        records::encode_event(&event, fixture.config.kafka.max_event_record_bytes).unwrap();
+    processor
+        .process(encoded.payload(), async {
+            assert_eq!(
+                fixture
+                    .database
+                    .submission_state(&first.info.id)
+                    .await
+                    .unwrap(),
+                Some(SubmissionState::Running)
+            );
+            assert_eq!(scheduler.snapshot().pending_used, 1);
+            confirms.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let mut control = fixture.connection().await;
+    sqlx::raw_sql("CREATE TRIGGER reject_event_update BEFORE UPDATE ON submissions FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Controlled event write failure'")
+        .execute(&mut control).await.unwrap();
+    // A second running event must confirm without issuing another UPDATE.
+    processor
+        .process(encoded.payload(), async {
+            confirms.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    event.job_id = second.info.id.clone();
+    let encoded =
+        records::encode_event(&event, fixture.config.kafka.max_event_record_bytes).unwrap();
+    assert!(
+        processor
+            .process(encoded.payload(), async {
+                confirms.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+            .await
+            .is_err()
+    );
+    assert_eq!(confirms.load(Ordering::SeqCst), 2);
+    assert_eq!(scheduler.snapshot().pending_used, 1);
+    sqlx::raw_sql("DROP TRIGGER reject_event_update")
+        .execute(&mut control)
+        .await
+        .unwrap();
+    // Identity is known, but Python cannot enter the C compiling phase.
+    event.phase = proto::JobPhase::Compiling.into();
+    let encoded =
+        records::encode_event(&event, fixture.config.kafka.max_event_record_bytes).unwrap();
+    processor
+        .process(encoded.payload(), async {
+            confirms.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let stored = fixture
+        .database
+        .submission(&second.info.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let Some(TerminalDetails::Failure(failure)) = stored.terminal_details else {
+        panic!("Expected protocol failure");
+    };
+    assert_eq!(failure.code, "InvalidWorkerResponse");
+    assert_eq!(scheduler.snapshot().pending_used, 0);
+    event.job_id = Uuid::new_v4().to_string();
+    let encoded =
+        records::encode_event(&event, fixture.config.kafka.max_event_record_bytes).unwrap();
+    assert!(
+        processor
+            .process(encoded.payload(), async {
+                confirms.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+            .await
+            .is_err()
+    );
+    assert_eq!(confirms.load(Ordering::SeqCst), 3);
+    control.close().await.unwrap();
+    review.stop();
+    review_task.await.unwrap().unwrap();
     fixture.close().await;
 }
 

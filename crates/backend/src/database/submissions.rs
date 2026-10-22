@@ -8,8 +8,8 @@ use crate::{
     config::Config,
     llm_review::{ReviewAttempt, ReviewMode, ReviewStatus, ReviewTrigger},
     submissions::{
-        CreateSubmission, CreatedSubmission, JudgingRecovery, JudgingTask, Submission,
-        SubmissionFilter, SubmissionInfo, SubmissionState, TerminalOutcome, Verdict,
+        CreateSubmission, CreatedSubmission, JudgingContext, JudgingRecovery, JudgingTask,
+        Submission, SubmissionFilter, SubmissionInfo, SubmissionState, TerminalOutcome, Verdict,
     },
 };
 
@@ -23,6 +23,38 @@ use super::{
 const INFO_COLUMNS: &str = "id, problem_id, version_no, language_id, state, verdict, review_status, created_at_ms, terminal_at_ms";
 
 impl Database {
+    /// Read only the persisted state before a queued payload is first published.
+    pub async fn submission_state(&self, id: &str) -> Result<Option<SubmissionState>> {
+        self.observe("Read submission state", false, async {
+            let state =
+                sqlx::query_scalar::<_, String>("SELECT state FROM submissions WHERE id = ?")
+                    .bind(id)
+                    .fetch_optional(&self.pool)
+                    .await?;
+            state
+                .map(|state| SubmissionState::parse(&state))
+                .transpose()
+        })
+        .await
+    }
+
+    /// Read the original event-validation context without source or test-case contents.
+    pub async fn judging_context(&self, id: &str) -> Result<Option<JudgingContext>> {
+        self.observe("Read judging event context", false, async {
+            let row = sqlx::query("SELECT s.state, s.language_id, v.review_mode, (SELECT COUNT(*) FROM test_cases c WHERE c.problem_id = s.problem_id AND c.version_no = s.version_no) AS total_cases FROM submissions s JOIN problem_versions v ON v.problem_id = s.problem_id AND v.version_no = s.version_no WHERE s.id = ?")
+                .bind(id).fetch_optional(&self.pool).await?;
+            row.map(|row| {
+                Ok(JudgingContext {
+                    state: SubmissionState::parse(&row.try_get::<String, _>("state")?)?,
+                    language_id: row.try_get("language_id")?,
+                    total_cases: u32::try_from(row.try_get::<i64, _>("total_cases")?)
+                        .map_err(|error| Error::Data(error.into()))?,
+                    review_mode: ReviewMode::parse(&row.try_get::<String, _>("review_mode")?)?,
+                })
+            }).transpose()
+        }).await
+    }
+
     /// Look up a creation key scoped to the deployment-configured test user.
     pub async fn submission_by_key(&self, key: Uuid) -> Result<Option<Submission>> {
         self.observe("Read creation key", false, async {
