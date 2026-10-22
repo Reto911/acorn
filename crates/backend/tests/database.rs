@@ -727,9 +727,9 @@ async fn judging_recovery_and_once_only_permit_release() {
     fixture.close().await;
 }
 
-/// Event confirmation follows critical persistence, and repeated running snapshots stay read-only.
+/// Offset enqueue follows critical persistence, and repeated running snapshots stay read-only.
 #[tokio::test]
-async fn kafka_events_confirm_only_persisted_changes() {
+async fn kafka_events_enqueue_only_persisted_changes() {
     use acorn_protocol::records;
     use std::sync::atomic::{AtomicUsize, Ordering};
     let fixture = Fixture::new().await;
@@ -763,33 +763,33 @@ async fn kafka_events_confirm_only_persisted_changes() {
         total_cases: 104,
         ..Default::default()
     };
-    let confirms = AtomicUsize::new(0);
+    let enqueued = AtomicUsize::new(0);
     let encoded =
         records::encode_event(&event, fixture.config.kafka.max_event_record_bytes).unwrap();
     processor
-        .process(encoded.payload(), async {
-            assert_eq!(
-                fixture
-                    .database
-                    .submission_state(&first.info.id)
-                    .await
-                    .unwrap(),
-                Some(SubmissionState::Running)
-            );
+        .process(encoded.payload(), || {
             assert_eq!(scheduler.snapshot().pending_used, 1);
-            confirms.fetch_add(1, Ordering::SeqCst);
+            enqueued.fetch_add(1, Ordering::SeqCst);
             Ok(())
         })
         .await
         .unwrap();
+    assert_eq!(
+        fixture
+            .database
+            .submission_state(&first.info.id)
+            .await
+            .unwrap(),
+        Some(SubmissionState::Running)
+    );
 
     let mut control = fixture.connection().await;
     sqlx::raw_sql("CREATE TRIGGER reject_event_update BEFORE UPDATE ON submissions FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Controlled event write failure'")
         .execute(&mut control).await.unwrap();
-    // A second running event must confirm without issuing another UPDATE.
+    // A second running event must enqueue its offset without issuing another UPDATE.
     processor
-        .process(encoded.payload(), async {
-            confirms.fetch_add(1, Ordering::SeqCst);
+        .process(encoded.payload(), || {
+            enqueued.fetch_add(1, Ordering::SeqCst);
             Ok(())
         })
         .await
@@ -799,14 +799,14 @@ async fn kafka_events_confirm_only_persisted_changes() {
         records::encode_event(&event, fixture.config.kafka.max_event_record_bytes).unwrap();
     assert!(
         processor
-            .process(encoded.payload(), async {
-                confirms.fetch_add(1, Ordering::SeqCst);
+            .process(encoded.payload(), || {
+                enqueued.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             })
             .await
             .is_err()
     );
-    assert_eq!(confirms.load(Ordering::SeqCst), 2);
+    assert_eq!(enqueued.load(Ordering::SeqCst), 2);
     assert_eq!(scheduler.snapshot().pending_used, 1);
     sqlx::raw_sql("DROP TRIGGER reject_event_update")
         .execute(&mut control)
@@ -817,8 +817,8 @@ async fn kafka_events_confirm_only_persisted_changes() {
     let encoded =
         records::encode_event(&event, fixture.config.kafka.max_event_record_bytes).unwrap();
     processor
-        .process(encoded.payload(), async {
-            confirms.fetch_add(1, Ordering::SeqCst);
+        .process(encoded.payload(), || {
+            enqueued.fetch_add(1, Ordering::SeqCst);
             Ok(())
         })
         .await
@@ -839,14 +839,14 @@ async fn kafka_events_confirm_only_persisted_changes() {
         records::encode_event(&event, fixture.config.kafka.max_event_record_bytes).unwrap();
     assert!(
         processor
-            .process(encoded.payload(), async {
-                confirms.fetch_add(1, Ordering::SeqCst);
+            .process(encoded.payload(), || {
+                enqueued.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             })
             .await
             .is_err()
     );
-    assert_eq!(confirms.load(Ordering::SeqCst), 3);
+    assert_eq!(enqueued.load(Ordering::SeqCst), 3);
     control.close().await.unwrap();
     review.stop();
     review_task.await.unwrap().unwrap();

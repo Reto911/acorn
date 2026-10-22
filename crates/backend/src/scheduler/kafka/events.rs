@@ -1,12 +1,10 @@
-//! Serial event persistence, actual offset confirmation and automatic review handoff.
-
-use std::{future::Future, sync::Arc, time::Duration};
+//! Serial event persistence, asynchronous offset submission and automatic review handoff.
 
 use acorn_protocol::records;
 use anyhow::{Context, Result};
 use rdkafka::{
     Message, Offset, TopicPartitionList,
-    consumer::{Consumer, StreamConsumer},
+    consumer::{CommitMode, Consumer, StreamConsumer},
     message::BorrowedMessage,
 };
 use tokio::sync::watch;
@@ -23,7 +21,7 @@ use crate::{
     submissions::{SubmissionState, TerminalOutcome},
 };
 
-/// Business processing remains independent of the transport's confirmation mechanism.
+/// Business processing remains independent of the transport's commit enqueue mechanism.
 pub struct EventProcessor {
     /// Local ID ownership and once-only admission release.
     scheduler: Scheduler,
@@ -35,8 +33,6 @@ pub struct EventProcessor {
     results: ResultsConfig,
     /// Maximum encoded event payload before decoding.
     record_limit: usize,
-    /// Application wait for an actual broker commit result.
-    commit_timeout: Duration,
 }
 
 impl EventProcessor {
@@ -53,18 +49,17 @@ impl EventProcessor {
             review,
             results: config.results.clone(),
             record_limit: config.kafka.max_event_record_bytes,
-            commit_timeout: Duration::from_millis(config.kafka.commit_timeout_ms),
         }
     }
 
-    /// Validate and persist before polling confirmation; always hand off a committed review.
+    /// Validate and persist before enqueuing the offset; always hand off a committed review.
     ///
-    /// Confirmation must concern this record only. Errors return after local handoff,
-    /// so the consumer stops without fetching or confirming a later event.
+    /// The callback must enqueue this record's offset only, without waiting for a broker reply.
+    /// Enqueue errors return after local handoff, so the consumer stops before a later event.
     pub async fn process(
         &self,
         payload: &[u8],
-        confirmation: impl Future<Output = Result<()>>,
+        enqueue_commit: impl FnOnce() -> Result<()>,
     ) -> Result<()> {
         let event = records::decode_event(payload, self.record_limit)?;
         Uuid::parse_str(&event.job_id).context("KafkaInvalidJobId")?;
@@ -119,11 +114,8 @@ impl EventProcessor {
                 }
             }
         };
-        let confirmed = tokio::time::timeout(self.commit_timeout, confirmation)
-            .await
-            .context("KafkaEventCommitTimedOut")
-            .and_then(|result| result);
-        // A failed or unknown commit cannot discard the already persisted review intent.
+        let enqueued = enqueue_commit();
+        // An enqueue failure cannot discard the already persisted review intent.
         let handoff = match prepared {
             Some(prepared) => self.review.handoff(id.clone(), prepared).await.map(|_| ()),
             None => Ok(()),
@@ -133,18 +125,18 @@ impl EventProcessor {
         }
         if let Err(error) = handoff {
             return Err(error).with_context(|| {
-                format!("Review handoff failed; event confirmation: {confirmed:?}")
+                format!("Review handoff failed; event commit enqueue: {enqueued:?}")
             });
         }
-        confirmed
+        enqueued
     }
 }
 
-/// Event consumer owns subscription and confirmation; it never joins the Worker task group.
+/// Event consumer owns subscription and offset submission; it never joins the Worker task group.
 pub struct EventConsumer {
     /// SDK consumer with explicit offsets and auto-reset disabled.
-    consumer: Arc<StreamConsumer>,
-    /// Shared state transition, review and commit-wait flow.
+    consumer: StreamConsumer,
+    /// Shared state transition, review and commit enqueue flow.
     processor: EventProcessor,
 }
 
@@ -159,7 +151,7 @@ impl EventConsumer {
         let consumer: StreamConsumer = super::consumer_config(&config.kafka).create()?;
         consumer.subscribe(&[&config.kafka.events_topic])?;
         Ok(Self {
-            consumer: Arc::new(consumer),
+            consumer,
             processor: EventProcessor::new(config, scheduler, database, review),
         })
     }
@@ -190,7 +182,7 @@ impl EventConsumer {
                     .payload()
                     .context("KafkaRecordDecodeFailed: missing event payload")?;
                 self.processor
-                    .process(payload, self.confirm(&message))
+                    .process(payload, || self.enqueue_commit(&message))
                     .await
             }
             .await;
@@ -202,19 +194,16 @@ impl EventConsumer {
         }
     }
 
-    /// Wait for this record's explicit commit result off the Tokio executor.
-    async fn confirm(&self, message: &BorrowedMessage<'_>) -> Result<()> {
+    /// Enqueue this processed record's next offset without waiting for broker confirmation.
+    fn enqueue_commit(&self, message: &BorrowedMessage<'_>) -> Result<()> {
         let mut offsets = TopicPartitionList::new();
         offsets.add_partition_offset(
             message.topic(),
             message.partition(),
             Offset::Offset(message.offset() + 1),
         )?;
-        let consumer = self.consumer.clone();
-        let timeout = self.processor.commit_timeout;
-        tokio::task::spawn_blocking(move || {
-            acorn_kafka::commit::OffsetCommit::start(consumer.as_ref(), &offsets)?.wait(timeout)
-        })
-        .await?
+        self.consumer
+            .commit(&offsets, CommitMode::Async)
+            .context("KafkaEventCommitEnqueueFailed")
     }
 }

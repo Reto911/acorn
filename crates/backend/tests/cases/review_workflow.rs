@@ -925,16 +925,15 @@ async fn automatic_fifo_capacity_and_worker_release() {
     endpoint.close().await;
 }
 
-/// Failed and timed-out offset confirmations still hand off one persisted automatic review.
+/// Failed offset enqueue still hands off one persisted review, and replay retains its identity.
 #[tokio::test]
 async fn kafka_commit_errors_preserve_automatic_handoff() {
     use acorn_protocol::{
         records,
         worker::v1::{GetJobReply, JobPhase, JobState, Verdict, get_job_reply::Terminal},
     };
-    let endpoint = Endpoint::start(false).await;
-    let mut fixture = endpoint.fixture("ENABLE-ALL").await;
-    fixture.config.kafka.commit_timeout_ms = 100;
+    let endpoint = Endpoint::start(true).await;
+    let fixture = endpoint.fixture("ENABLE-ALL").await;
     let scheduler = Scheduler::restore(&fixture.config, Default::default()).unwrap();
     let (review, task) =
         ReviewService::start(&fixture.config.llm_review, fixture.database.clone()).unwrap();
@@ -944,72 +943,73 @@ async fn kafka_commit_errors_preserve_automatic_handoff() {
         fixture.database.clone(),
         review.clone(),
     );
-    for (index, timeout) in [false, true].into_iter().enumerate() {
-        let created = fixture
-            .database
-            .create_submission(CreateSubmission {
-                problem_id: 1,
-                language_id: "python".into(),
-                source: b"review after commit failure".to_vec(),
-                request_key: Uuid::new_v4(),
-            })
-            .await
-            .unwrap();
-        let total_cases = created.task.as_ref().unwrap().request.cases.len() as u32;
-        scheduler
-            .enqueue(created.task.unwrap(), scheduler.reserve().unwrap())
-            .unwrap();
-        let event = GetJobReply {
-            job_id: created.info.id.clone(),
-            state: JobState::Finished.into(),
-            phase: JobPhase::Done.into(),
-            total_cases,
-            completed_cases: total_cases,
-            terminal: Some(Terminal::Result(JudgeResult {
-                verdict: Verdict::Accepted.into(),
-                ..Default::default()
-            })),
-        };
-        let encoded =
-            records::encode_event(&event, fixture.config.kafka.max_event_record_bytes).unwrap();
-        let initial = Mutex::new(None);
-        let error = processor
-            .process(encoded.payload(), async {
-                let stored = fixture
-                    .database
-                    .submission(&created.info.id)
-                    .await
-                    .unwrap()
-                    .unwrap();
-                assert_eq!(stored.info.state, SubmissionState::Finished);
-                assert_eq!(stored.info.review_status, ReviewStatus::Pending);
-                assert_eq!(scheduler.snapshot().pending_used, 0);
-                *initial.lock().unwrap() = Some(stored.review.unwrap().id);
-                if timeout {
-                    std::future::pending::<()>().await;
-                }
-                anyhow::bail!("Controlled offset commit failure")
-            })
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains(if timeout {
-            "KafkaEventCommitTimedOut"
-        } else {
-            "Controlled offset commit failure"
-        }));
-        let completed = review_state(&fixture.database, &created.info.id, ReviewStatus::Pass).await;
-        assert_eq!(
-            Some(completed.review.unwrap().id),
-            initial.into_inner().unwrap()
-        );
-        assert_eq!(endpoint.count(), index + 1);
-        processor
-            .process(encoded.payload(), async { Ok(()) })
-            .await
-            .unwrap();
-        assert_eq!(endpoint.count(), index + 1);
-        assert!(!scheduler.contains(&created.info.id));
-    }
+    let created = fixture
+        .database
+        .create_submission(CreateSubmission {
+            problem_id: 1,
+            language_id: "python".into(),
+            source: b"review after commit enqueue failure".to_vec(),
+            request_key: Uuid::new_v4(),
+        })
+        .await
+        .unwrap();
+    let total_cases = created.task.as_ref().unwrap().request.cases.len() as u32;
+    scheduler
+        .enqueue(created.task.unwrap(), scheduler.reserve().unwrap())
+        .unwrap();
+    let event = GetJobReply {
+        job_id: created.info.id.clone(),
+        state: JobState::Finished.into(),
+        phase: JobPhase::Done.into(),
+        total_cases,
+        completed_cases: total_cases,
+        terminal: Some(Terminal::Result(JudgeResult {
+            verdict: Verdict::Accepted.into(),
+            ..Default::default()
+        })),
+    };
+    let encoded =
+        records::encode_event(&event, fixture.config.kafka.max_event_record_bytes).unwrap();
+    let error = processor
+        .process(encoded.payload(), || {
+            assert_eq!(scheduler.snapshot().pending_used, 0);
+            assert_eq!(endpoint.count(), 0);
+            anyhow::bail!("Controlled offset commit enqueue failure")
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Controlled offset commit enqueue failure")
+    );
+    let stored = fixture
+        .database
+        .submission(&created.info.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.info.state, SubmissionState::Finished);
+    assert_eq!(stored.info.review_status, ReviewStatus::Pending);
+    let initial = stored.review.unwrap().id;
+    assert!(!scheduler.contains(&created.info.id));
+    endpoint.state.release.send_replace(true);
+    let completed = review_state(&fixture.database, &created.info.id, ReviewStatus::Pass).await;
+    assert_eq!(completed.review.unwrap().id, initial);
+    assert_eq!(endpoint.count(), 1);
+    processor
+        .process(encoded.payload(), || Ok(()))
+        .await
+        .unwrap();
+    let repeated = fixture
+        .database
+        .submission(&created.info.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(repeated.review.unwrap().id, initial);
+    assert_eq!(endpoint.count(), 1);
+    assert!(!scheduler.contains(&created.info.id));
     review.stop();
     task.await.unwrap().unwrap();
     fixture.close().await;

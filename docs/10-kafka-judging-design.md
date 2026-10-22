@@ -528,3 +528,12 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test -p acorn-backend --locked --lib --test config_results
 cargo test -p acorn-worker --locked
 ```
+
+### 12.4 S03 Worker safe 消费驱动与关闭
+
+在后端完成 S02 后，按以下顺序调整 Worker；任务位点仍保留原有确认等待，异步提交及名额释放时机由 S04 修改。
+
+1. 将 KafkaWorker 的消费者改为 BaseConsumer，注册 SDK 队列非空通知后再共享句柄；同步 handoff::commit 的消费者参数类型，保留原归属检查、共享 OffsetCommit 及其预算。
+2. 调整 receive 和消费驱动：以 SDK 队列通知唤醒非阻塞 poll，保留满足消费组存活要求的周期驱动；核对控制事件后继续处理及通知注册时序，避免遗漏唤醒。执行忙或结果满时继续 pause 并服务重平衡，沿用未接纳记录的 seek，不增加未执行任务队列，也不在 Tokio 执行线程阻塞轮询。
+3. 用 SDK safe close_queue/closed 替换 close.rs 的原生调用，关闭期间继续驱动并观察实际 closed，再在运行时外释放句柄。保留关闭前失效原归属、BLOCKED 不等待终态发布即开始退出组、状态 RPC 和生产者继续可用，以及正常停机的共同消息期限。
+4. 复用 Worker 现有库测试及三项真实 Kafka 检查：容量与正常停机、BLOCKED 后另一 Worker 接管、结果积压与总消息预算。执行 fmt、workspace check 和必需 Clippy；静态模式复验及消息接收延迟／空闲 CPU 对比按 S06 汇总。

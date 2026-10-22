@@ -4,9 +4,9 @@
 
 ## 1. 当前状态
 
-当前设计为 v19；K01–K04 的 13 项任务按 v18 完成，其余 9 项尚未实施。后端已提供任务发布、事件消费、实际位点确认及自动审查交接入口；Worker 已提供 Kafka 单槽消费、结果 FIFO、原分区归属及有限消息收尾服务，完成受控管理器和一条真实 Isolate 的 Kafka 检查，实际范围见[第 9 节](#9-k04-worker-消费与结果队列)。当前正式服务入口仍通过 gRPC 判题；下一步 K05 统一接入正式生命周期并移除旧业务 RPC，随后按 K06–K07 推进观测和整体交付。进度见[任务清单](#4-任务清单)，审核决定见[审核记录](../d01-review/10-kafka-judging-review.md#2-已确认决定与草案修正)。
+当前设计为 v19；K01–K04 的 13 项任务按 v18 完成，其余 9 项尚未实施。后端已提供任务发布、事件消费、异步位点提交及自动审查交接入口；Worker 已提供 Kafka 单槽消费、结果 FIFO、原分区归属及有限消息收尾服务，完成受控管理器和一条真实 Isolate 的 Kafka 检查，实际范围见[第 9 节](#9-k04-worker-消费与结果队列)。当前正式服务入口仍通过 gRPC 判题；下一步 K05 统一接入正式生命周期并移除旧业务 RPC，随后按 K06–K07 推进观测和整体交付。进度见[任务清单](#4-任务清单)，审核决定见[审核记录](../d01-review/10-kafka-judging-review.md#2-已确认决定与草案修正)。
 
-Safe 接口修复方案已确认，S01 完成规约同步；S02–S06 尚未实施，生产代码仍使用 v18 的逐条位点确认。按[修复步骤](../10-kafka-judging-design.md#12-safe-接口修复计划)在[第 10 节](#10-safe-接口修复跟踪)单独跟踪，不改变原 K01–K07 任务编号或历史完成记录。
+Safe 接口修复方案已确认，S01 完成规约同步，S02 已将后端改为 safe 异步位点提交；Worker 暂保留原位点确认及原生关闭实现，S03–S06 尚未实施。按[修复步骤](../10-kafka-judging-design.md#12-safe-接口修复计划)在[第 10 节](#10-safe-接口修复跟踪)单独跟踪，不改变原 K01–K07 任务编号或历史完成记录。
 
 ## 2. 文档工作
 
@@ -370,10 +370,10 @@ K04.1–K04.4 完成，KV04 的单槽、原分区撤销与重获、交接阶段�
 
 ## 10. Safe 接口修复跟踪
 
-步骤定义、顺序及完成条件见[设计第 12 节](../10-kafka-judging-design.md#12-safe-接口修复计划)。用户已接受两端异步位点提交及 Worker 重复执行成本。S01 已完成，当前设计为 v19；S02–S06 未实施，生产代码仍沿用 v18，不将规约更新视为程序已完成改型。
+步骤定义、顺序及完成条件见[设计第 12 节](../10-kafka-judging-design.md#12-safe-接口修复计划)。用户已接受两端异步位点提交及 Worker 重复执行成本。S01–S02 已完成，后端使用 v19 的异步提交；Worker 位点确认和关闭仍沿用原实现，S03–S06 未实施。
 
 - [x] S01 确认 Worker 取舍并同步受影响规约。
-- [ ] S02 后端改为 safe 异步提交，保留持久化及审查收尾。
+- [x] S02 后端改为 safe 异步提交，保留持久化及审查收尾。
 - [ ] S03 Worker 改用 safe 消费驱动及关闭接口。
 - [ ] S04 Worker 改为原归属下的异步位点提交。
 - [ ] S05 清理原生确认实现及无用配置，更新使用说明。
@@ -388,3 +388,21 @@ K04.1–K04.4 完成，KV04 的单槽、原分区撤销与重获、交接阶段�
 S01 仅改文档。commit_timeout_ms 的代码字段、配置示例及 crate README 在 S05 清理；当前生产代码和部署配置未变更，没有运行 Rust、Kafka、MySQL 或沙箱测试。
 
 本次修改的 Markdown 格式、本地链接／锚点及稳定编号检查通过，`git diff --check` 通过。Prettier 检查覆盖 Kafka 设计及配套审核、研究和实施记录全文；第 01、03、08 篇仅检查本次修改的 Kafka 段落。
+
+### 10.2 S02 后端异步位点提交
+
+EventConsumer 直接使用 SDK safe CommitMode::Async 入队当前记录的 offset+1，不读回、不等待 broker 回执；移除后端 OffsetCommit 调用、spawn_blocking、确认超时及不再需要的消费者 Arc。EventProcessor::process 接收同步 FnOnce 回调，校验和必要数据库写入完成后才调用；请求入队成功或失败均先交接已保存的审查，再清理终态本地 ID。入队失败保留错误并结束当前消费服务，不继续处理后续事件。
+
+复用两项现有测试：数据库用例调整为 kafka_events_enqueue_only_persisted_changes，继续检查关键写入失败不调用提交、重复运行快照不写库、非法身份拒绝提交及许可收尾；kafka_commit_errors_preserve_automatic_handoff 改为同步入队失败，使用已有模型响应门保留 PENDING，检查审查仍完成且重放保留同一审查 ID、只发起一次模型调用。移除原确认超时分支，没有新增测试函数。
+
+实际检查均通过：
+
+- `cargo fmt --all -- --check`、`cargo check --workspace --all-targets --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings`。
+- `cargo test -p acorn-backend --locked --lib --test config_results`：11 项库测试及 9 项配置测试通过。
+- `cargo test -p acorn-backend --locked --test database kafka_events_enqueue_only_persisted_changes`：1 项通过。
+- `cargo test -p acorn-backend --locked --test workflow kafka_commit_errors_preserve_automatic_handoff`：1 项通过。
+- `ACORN_TEST_KAFKA_SERVERS=localhost:9092 cargo test -p acorn-backend --locked --test workflow real_kafka_backend_publication_and_events -- --ignored`：默认动态链接下 1 项通过，覆盖任务原始字节、投递与运行许可边界、首次终态不被覆盖及实际消费组位点推进。沿用既有 MySQL 测试变量与独立夹具；本例的 topic、消费组和数据库已清理。
+
+后端 README 已说明请求入队语义及 commit_timeout_ms 仍被共享配置接受、校验，但不再供后端使用。Worker、共享 OffsetCommit、配置字段和部署配置未修改；未运行 Worker、Isolate、静态模式或完整 workspace 测试，静态复验及驱动性能比较仍按 S06 完成。S03 的执行步骤见[消费驱动与关闭计划](../10-kafka-judging-design.md#124-s03-worker-safe-消费驱动与关闭)。
+
+三份变更 Markdown 的 Prettier、本地链接／锚点及稳定编号检查通过，`git diff --check` 通过；原 K 任务清单保持不变，S02 已勾选，S03–S06 未完成。
