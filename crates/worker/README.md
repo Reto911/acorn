@@ -93,6 +93,16 @@ target/debug/acorn-worker --config "$HOME/.config/acorn/worker.toml"
 
 请求中的单用例限额受 Worker 配置上限约束。内存、单文件和磁盘空间配置使用 KiB；源码、输出、消息和编译产物预算使用字节；时间使用毫秒。部署多个节点时，将各 Worker 预算与[后端配置](../backend/README.md#配置)对齐。
 
+### Kafka 客户端配置
+
+构建默认动态链接系统 librdkafka（至少 2.12.1），需要开发包及 pkg-config；静态构建方法见[根说明](../../README_zh-CN.md#构建)。仅构建 Worker 时可执行 `cargo build -p acorn-worker --locked --no-default-features --features kafka-static`。
+
+`[kafka]` 必填，必须显式提供 `bootstrap_servers`、`tasks_topic`、`events_topic` 和 `tasks_group_id`。端点使用 `host:port` 或 `[IPv6]:port`，不带 URL 协议；两个 topic 必须不同。消息上限及 `delivery_timeout_ms`、`queue_timeout_ms`、`commit_timeout_ms`、`shutdown_timeout_ms` 的默认值与范围见[后端配置](../backend/README.md#kafka-客户端配置)，两端按部署对齐。使用已有配置时，将 `[kafka]` 节合并到实际 `--config` 指定的文件，保留工具路径、沙箱和执行配置。
+
+`kafka::KafkaConfig` 将配置字段和事件发送／任务接收方向交给 [acorn-kafka](../kafka/README.md) 的共享校验及客户端策略，提供事件生产者和任务消费者的客户端选项，采用 PLAINTEXT、幂等生产及 `acks=all`、手动位点、`auto.offset.reset=error`、classic 消费组，两者均禁止自动创建 topic。传输开销和队列软限制沿用[后端配置说明](../backend/README.md#kafka-客户端配置)，但发送预算对应事件、接收预算对应任务。
+
+当前服务入口使用 gRPC 判题。Kafka 消息编解码接口见[共享协议](../protocol/README.md#kafka-消息编解码)。
+
 ## gRPC 接口
 
 服务名为 `acorn.worker.v1.JudgeWorker`，定义见 [worker.proto](../../proto/acorn/worker/v1/worker.proto)。Rust 类型和调用入口由 [acorn-protocol](../protocol/README.md)提供。

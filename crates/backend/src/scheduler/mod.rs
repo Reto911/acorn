@@ -1,5 +1,6 @@
 //! Bounded in-memory admission, FIFO dispatch and independent Worker tracking tasks.
 
+pub mod kafka;
 mod tracking;
 pub mod worker_client;
 

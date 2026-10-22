@@ -3,6 +3,7 @@
 pub mod config;
 pub mod executor;
 mod jobs;
+pub mod kafka;
 pub mod language;
 pub mod logging;
 pub mod rpc;

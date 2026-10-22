@@ -13,6 +13,8 @@ use clap::Parser;
 use serde::Deserialize;
 use sqlx::mysql::{MySqlConnectOptions, MySqlSslMode};
 
+pub use crate::scheduler::kafka::KafkaConfig;
+
 use crate::llm_review::{ReviewAttempt, ReviewTrigger, policy::PROMPT_VERSION};
 
 /// Command-line options for the backend process.
@@ -28,6 +30,11 @@ pub struct Cli {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// Kafka transport settings for the judging communication migration.
+    pub kafka: KafkaConfig,
+    /// Independent Worker consumer-group observation settings.
+    #[serde(default)]
+    pub worker_membership: WorkerMembershipConfig,
     /// HTTP listener, request body and pagination settings.
     pub http: HttpConfig,
     /// Existing MySQL database, bounded connection pool and finite lock waits.
@@ -217,6 +224,55 @@ impl HealthConfig {
     }
 }
 
+/// Independent consumer-group observation, separate from health sampling.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WorkerMembershipConfig {
+    /// Worker task group to observe, matching the deployed Workers' tasks_group_id.
+    pub tasks_group_id: String,
+    /// Delay after a completed group observation, in milliseconds.
+    pub interval_ms: u64,
+    /// Maximum duration of one blocking group query, in milliseconds.
+    pub timeout_ms: u64,
+}
+
+impl Default for WorkerMembershipConfig {
+    /// Use a five-second interval and a one-second query budget.
+    fn default() -> Self {
+        Self {
+            tasks_group_id: "acorn-judge-workers-v1".into(),
+            interval_ms: 5_000,
+            timeout_ms: 1_000,
+        }
+    }
+}
+
+impl WorkerMembershipConfig {
+    /// Reject invalid SDK timeouts and overflowing observation ages.
+    pub fn validate(&self) -> Result<()> {
+        acorn_kafka::validate_group_id(&self.tasks_group_id, "worker_membership.tasks_group_id")?;
+        ensure!(
+            self.interval_ms > 0,
+            "worker_membership.interval_ms must be positive"
+        );
+        ensure!(
+            (1..=i32::MAX as u64).contains(&self.timeout_ms),
+            "worker_membership.timeout_ms must fit positive client milliseconds"
+        );
+        self.stale_after()?;
+        Ok(())
+    }
+
+    /// Consider a sample expired after two complete observation budgets.
+    pub fn stale_after(&self) -> Result<Duration> {
+        self.interval_ms
+            .checked_add(self.timeout_ms)
+            .and_then(|cycle| cycle.checked_mul(2))
+            .map(Duration::from_millis)
+            .context("Worker membership stale threshold overflows milliseconds")
+    }
+}
+
 /// Raw task ceilings aligned by deployment with the Worker request contract.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -400,6 +456,8 @@ impl Config {
 
     /// Check the configured resource, pagination and endpoint requirements.
     pub fn validate(&self) -> Result<()> {
+        self.kafka.validate()?;
+        self.worker_membership.validate()?;
         self.llm_review.validate()?;
         ensure!(
             self.health.interval_ms > 0,
@@ -564,6 +622,10 @@ impl Config {
             self.grpc.max_request_bytes >= request_required,
             "gRPC request limit cannot hold configured payload"
         );
+        ensure!(
+            self.kafka.max_task_record_bytes >= request_required,
+            "Kafka task record limit cannot hold configured payload"
+        );
         let result_required = self
             .results
             .stdout_max_bytes
@@ -577,6 +639,10 @@ impl Config {
         ensure!(
             self.grpc.max_response_bytes >= result_required,
             "gRPC response limit cannot hold bounded results"
+        );
+        ensure!(
+            self.kafka.max_event_record_bytes >= result_required,
+            "Kafka event record limit cannot hold bounded results"
         );
         Ok(())
     }

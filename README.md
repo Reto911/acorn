@@ -22,8 +22,9 @@ The backend serves the browser over HTTP JSON and dispatches jobs to Workers ove
 | [crates/backend](crates/backend/README.md)   | Rust backend, HTTP API, Scheduler, health collection, and LLM reviews    |
 | [crates/worker](crates/worker/README.md)     | C/Python judging executor, Isolate wrapper, and gRPC service             |
 | [crates/protocol](crates/protocol/README.md) | Protobuf messages and generated gRPC clients and servers                 |
+| [crates/kafka](crates/kafka/README.md)       | Shared Kafka defaults, validation, and client configuration policy       |
 | [web](web/README.md)                         | Browser interface built with Vue 3, TypeScript, Element Plus, and Monaco |
-| [sql](sql/README.md)                         | MySQL schema and the built-in A + B problem                             |
+| [sql](sql/README.md)                         | MySQL schema and the built-in A + B problem                              |
 | [config](config)                             | Example TOML configurations for the backend and Worker                   |
 | [examples](examples)                         | Development user seed SQL and sample submissions                         |
 | [docs](docs/README.md)                       | Architecture, interface contracts, and development records               |
@@ -32,15 +33,16 @@ The backend serves the browser over HTTP JSON and dispatches jobs to Workers ove
 
 ### Requirements
 
-| Dependency                                             | Purpose                                                           |
-| ------------------------------------------------------ | ----------------------------------------------------------------- |
-| Linux, Isolate, cgroups, and filesystem user quotas    | Isolated execution and resource limits                            |
-| GCC and Python 3                                       | C compilation and Python execution                                |
-| Rust/Cargo 1.94.0 or later                              | Build the Rust 2024 edition workspace and its locked dependencies |
-| `protoc` with proto3 optional support                  | Generate the shared gRPC protocol                                 |
-| MySQL 8.4 / InnoDB and the MySQL command-line client | Initialize and manage the database                                |
-| Node.js 24.x, at least 24.21.0; pnpm 12.11.2           | Install, build, and run the frontend                              |
-| curl                                                   | Call the HTTP API from the command line                           |
+| Dependency                                                      | Purpose                                                               |
+| --------------------------------------------------------------- | --------------------------------------------------------------------- |
+| Linux, Isolate, cgroups, and filesystem user quotas             | Isolated execution and resource limits                                |
+| GCC and Python 3                                                | C compilation and Python execution                                    |
+| Rust/Cargo 1.94.0 or later                                      | Build the Rust 2024 edition workspace and its locked dependencies     |
+| `protoc` with proto3 optional support                           | Generate the shared gRPC protocol                                     |
+| librdkafka development package (at least 2.12.1) and pkg-config | Default dynamic build; provide the matching shared library at runtime |
+| MySQL 8.4 / InnoDB and the MySQL command-line client            | Initialize and manage the database                                    |
+| Node.js 24.x, at least 24.21.0; pnpm 12.11.2                    | Install, build, and run the frontend                                  |
+| curl                                                            | Call the HTTP API from the command line                               |
 
 Have an administrator prepare Isolate, cgroups, user quotas, and execution permissions using the [Worker installation guide](crates/worker/README.md#安装与沙箱准备). The paths to GCC, Python, and Isolate are configured in the Worker TOML file.
 
@@ -55,6 +57,14 @@ cargo build --workspace --locked
 ```
 
 The executables are `target/debug/acorn-worker` and `target/debug/acorn-backend`. `protoc` is resolved from PATH, or from the `PROTOC` environment variable.
+
+The default `kafka-dynamic` feature uses the system librdkafka through pkg-config. To build the bundled librdkafka statically, install a C/C++ toolchain, CMake, make or Ninja, and pkg-config, then run:
+
+```sh
+cargo build --workspace --locked --no-default-features --features acorn-backend/kafka-static,acorn-worker/kafka-static
+```
+
+Static linking here applies to librdkafka. Select the same link mode for the backend and Worker in each workspace build.
 
 Install frontend dependencies:
 
@@ -143,27 +153,29 @@ Keep the original idempotency key and content when resending the same request. G
 
 Both the backend and Worker read TOML through `--config <PATH>`; restart the service after changes. All submissions belong to the preconfigured user selected by the backend's `test_user.user_id`. HTTP and gRPC have no built-in authentication; restrict access through a reverse proxy or firewall.
 
-| Setting                               | Example value                | Purpose                                                                    |
-| ------------------------------------- | ---------------------------- | -------------------------------------------------------------------------- |
-| Worker `server.listen`                | `127.0.0.1:50051`            | gRPC listening address                                                     |
-| Worker `sandbox.box_id`               | `0`                          | Isolate box ID reserved on this host                                       |
-| Backend `http.listen`                 | `127.0.0.1:8080`             | HTTP API listening address                                                 |
-| Backend `database.endpoint` | `127.0.0.1:3306` | MySQL host and TCP port |
-| Backend `database.name` | `appdb` | Initialized schema version 4 database |
-| Backend `database.username` | `example_user` | Business read/write account |
-| Backend `MYSQL_PASSWORD` | Process environment | Database password |
-| Backend `database.max_connections` | `4` | Shared application pool ceiling |
-| Backend `database.acquire_timeout_ms` | `5000` | Entire connection acquisition budget |
-| Backend `database.lock_wait_timeout_secs` | `3` | Session row and metadata lock wait |
-| Backend `scheduler.workers`           | `["http://127.0.0.1:50051"]` | Worker endpoint list                                                       |
-| Backend `scheduler.pending_max_count` | `128`                        | Capacity for submissions awaiting Worker admission                         |
-| Backend `llm_review.enabled`          | `false`                      | Enable LLM reviews                                                         |
-| Frontend `API_PROXY_TARGET`           | `http://127.0.0.1:8080`      | API proxy target for the development server                                |
-| Frontend `VITE_SOURCE_MAX_BYTES`      | `65536`                      | Source byte limit checked before submission                                |
+| Setting                                   | Example value                | Purpose                                            |
+| ----------------------------------------- | ---------------------------- | -------------------------------------------------- |
+| Worker `server.listen`                    | `127.0.0.1:50051`            | gRPC listening address                             |
+| Worker `sandbox.box_id`                   | `0`                          | Isolate box ID reserved on this host               |
+| Backend `http.listen`                     | `127.0.0.1:8080`             | HTTP API listening address                         |
+| Backend `database.endpoint`               | `127.0.0.1:3306`             | MySQL host and TCP port                            |
+| Backend `database.name`                   | `appdb`                      | Initialized schema version 4 database              |
+| Backend `database.username`               | `example_user`               | Business read/write account                        |
+| Backend `MYSQL_PASSWORD`                  | Process environment          | Database password                                  |
+| Backend `database.max_connections`        | `4`                          | Shared application pool ceiling                    |
+| Backend `database.acquire_timeout_ms`     | `5000`                       | Entire connection acquisition budget               |
+| Backend `database.lock_wait_timeout_secs` | `3`                          | Session row and metadata lock wait                 |
+| Backend `scheduler.workers`               | `["http://127.0.0.1:50051"]` | Worker endpoint list                               |
+| Backend `scheduler.pending_max_count`     | `128`                        | Capacity for submissions awaiting Worker admission |
+| Backend `llm_review.enabled`              | `false`                      | Enable LLM reviews                                 |
+| Frontend `API_PROXY_TARGET`               | `http://127.0.0.1:8080`      | API proxy target for the development server        |
+| Frontend `VITE_SOURCE_MAX_BYTES`          | `65536`                      | Source byte limit checked before submission        |
 
 The backend reads `MYSQL_PASSWORD` from its process environment and uses MySQL with SSL disabled. It does not load `.env` automatically. Connections use utf8mb4_0900_bin, READ COMMITTED, strict SQL mode, and finite lock waits.
 
 Align request, message, and result budgets between the backend and all Workers. Field suffixes `_ms`, `_kib`, and `_bytes` indicate units. See the [backend example](config/backend.example.toml), [Worker example](config/worker.example.toml), and [frontend configuration guide](web/README.md#配置与-api-代理) for the complete settings.
+
+Both backend and Worker configurations require `[kafka]` with bootstrap endpoints, both topics, and their role's consumer group; budgets have defaults. The backend also provides independent `[worker_membership]` observation settings. See the [backend guide](crates/backend/README.md#kafka-客户端配置), [Worker guide](crates/worker/README.md#kafka-客户端配置), and [protocol guide](crates/protocol/README.md#kafka-消息编解码) for fields, client options, and message codecs. For existing configurations, merge the example `[kafka]` section into the file passed to `--config`, preserving database, review, and other settings. `[worker_membership]` may be omitted to use its defaults.
 
 ### Multiple Workers
 

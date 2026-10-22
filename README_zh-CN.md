@@ -22,8 +22,9 @@ Acorn 是支持 C 和 Python 3 的单文件源码判题系统，提供浏览器�
 | [crates/backend](crates/backend/README.md)   | Rust 后端、HTTP API、Scheduler、健康采集和 LLM 审查  |
 | [crates/worker](crates/worker/README.md)     | C/Python 判题执行器、Isolate 封装和 gRPC 服务        |
 | [crates/protocol](crates/protocol/README.md) | Protobuf 消息及生成的 gRPC 客户端、服务端            |
+| [crates/kafka](crates/kafka/README.md)       | Kafka 配置默认值、通用校验和共享客户端策略           |
 | [web](web/README.md)                         | Vue 3、TypeScript、Element Plus 和 Monaco 浏览器界面 |
-| [sql](sql/README.md)                         | MySQL 建表脚本及内置两数求和题                      |
+| [sql](sql/README.md)                         | MySQL 建表脚本及内置两数求和题                       |
 | [config](config)                             | 后端和 Worker 的 TOML 配置示例                       |
 | [examples](examples)                         | 开发用户预置 SQL 和提交源码样例                      |
 | [docs](docs/README.md)                       | 架构设计、接口合同和开发记录                         |
@@ -32,15 +33,16 @@ Acorn 是支持 C 和 Python 3 的单文件源码判题系统，提供浏览器�
 
 ### 运行环境
 
-| 依赖                                         | 用途                                  |
-| -------------------------------------------- | ------------------------------------- |
-| Linux、Isolate、控制组和文件系统用户配额     | 隔离执行及资源限制                    |
-| GCC、Python 3                                | C 编译和 Python 执行                  |
-| Rust/Cargo 1.94.0 或更新版本                 | 构建 Rust 2024 edition 工程及锁定依赖 |
-| 支持 proto3 optional 的 `protoc`             | 构建共享 gRPC 协议                    |
-| MySQL 8.4／InnoDB 及 MySQL 命令行客户端 | 初始化和管理数据库                    |
-| Node.js 24.x，至少 24.21.0；pnpm 12.11.2     | 安装、构建和运行前端                  |
-| curl                                         | 从命令行调用 HTTP API                 |
+| 依赖                                          | 用途                                  |
+| --------------------------------------------- | ------------------------------------- |
+| Linux、Isolate、控制组和文件系统用户配额      | 隔离执行及资源限制                    |
+| GCC、Python 3                                 | C 编译和 Python 执行                  |
+| Rust/Cargo 1.94.0 或更新版本                  | 构建 Rust 2024 edition 工程及锁定依赖 |
+| 支持 proto3 optional 的 `protoc`              | 构建共享 gRPC 协议                    |
+| librdkafka 开发包（至少 2.12.1）和 pkg-config | 默认动态构建；运行环境提供对应共享库  |
+| MySQL 8.4／InnoDB 及 MySQL 命令行客户端       | 初始化和管理数据库                    |
+| Node.js 24.x，至少 24.21.0；pnpm 12.11.2      | 安装、构建和运行前端                  |
+| curl                                          | 从命令行调用 HTTP API                 |
 
 先由管理员按 [Worker 安装说明](crates/worker/README.md#安装与沙箱准备)准备 Isolate、控制组、用户配额和执行权限。Worker 使用的 GCC、Python 和 Isolate 路径在 TOML 中指定。
 
@@ -55,6 +57,14 @@ cargo build --workspace --locked
 ```
 
 可执行文件为 `target/debug/acorn-worker` 和 `target/debug/acorn-backend`。`protoc` 从 PATH 查找，也可通过 `PROTOC` 环境变量指定。
+
+默认启用 `kafka-dynamic`，通过 pkg-config 使用系统 librdkafka。显式静态构建需要 C/C++ 工具链、CMake、make 或 Ninja 和 pkg-config，由 Cargo 构建随附的 librdkafka 源码：
+
+```sh
+cargo build --workspace --locked --no-default-features --features acorn-backend/kafka-static,acorn-worker/kafka-static
+```
+
+静态仅指 librdkafka；同一次 workspace 构建为后端和 Worker 选择一致的链接方式。
 
 安装前端依赖：
 
@@ -143,27 +153,29 @@ curl --fail-with-body "http://127.0.0.1:8080/api/v1/submissions/$ACORN_SUBMISSIO
 
 后端与 Worker 均通过 `--config <PATH>` 读取 TOML，修改后重启生效。所有提交归属于后端 `test_user.user_id` 指定的预置用户。HTTP 和 gRPC 未内置鉴权，部署时通过反向代理或防火墙限制访问。
 
-| 配置项                             | 示例值                       | 用途                                             |
-| ---------------------------------- | ---------------------------- | ------------------------------------------------ |
-| Worker `server.listen`             | `127.0.0.1:50051`            | gRPC 监听地址                                    |
-| Worker `sandbox.box_id`            | `0`                          | 本机独占的 Isolate box ID                        |
-| 后端 `http.listen`                 | `127.0.0.1:8080`             | HTTP API 监听地址                                |
-| 后端 `database.endpoint` | `127.0.0.1:3306` | MySQL 主机和 TCP 端口 |
-| 后端 `database.name` | `appdb` | 已初始化的结构版本 4 数据库 |
-| 后端 `database.username` | `example_user` | 业务读写账户 |
-| 后端 `MYSQL_PASSWORD` | 进程环境变量 | 数据库密码 |
-| 后端 `database.max_connections` | `4` | 共享应用连接池上限 |
-| 后端 `database.acquire_timeout_ms` | `5000` | 整个连接取得过程的预算 |
-| 后端 `database.lock_wait_timeout_secs` | `3` | 会话行锁与元数据锁等待 |
-| 后端 `scheduler.workers`           | `["http://127.0.0.1:50051"]` | Worker 地址列表                                  |
-| 后端 `scheduler.pending_max_count` | `128`                        | 等待 Worker 接纳的提交容量                       |
-| 后端 `llm_review.enabled`          | `false`                      | LLM 审查开关                                     |
-| 前端 `API_PROXY_TARGET`            | `http://127.0.0.1:8080`      | 开发服务的 API 代理目标                          |
-| 前端 `VITE_SOURCE_MAX_BYTES`       | `65536`                      | 提交源码字节上限预检                             |
+| 配置项                                 | 示例值                       | 用途                        |
+| -------------------------------------- | ---------------------------- | --------------------------- |
+| Worker `server.listen`                 | `127.0.0.1:50051`            | gRPC 监听地址               |
+| Worker `sandbox.box_id`                | `0`                          | 本机独占的 Isolate box ID   |
+| 后端 `http.listen`                     | `127.0.0.1:8080`             | HTTP API 监听地址           |
+| 后端 `database.endpoint`               | `127.0.0.1:3306`             | MySQL 主机和 TCP 端口       |
+| 后端 `database.name`                   | `appdb`                      | 已初始化的结构版本 4 数据库 |
+| 后端 `database.username`               | `example_user`               | 业务读写账户                |
+| 后端 `MYSQL_PASSWORD`                  | 进程环境变量                 | 数据库密码                  |
+| 后端 `database.max_connections`        | `4`                          | 共享应用连接池上限          |
+| 后端 `database.acquire_timeout_ms`     | `5000`                       | 整个连接取得过程的预算      |
+| 后端 `database.lock_wait_timeout_secs` | `3`                          | 会话行锁与元数据锁等待      |
+| 后端 `scheduler.workers`               | `["http://127.0.0.1:50051"]` | Worker 地址列表             |
+| 后端 `scheduler.pending_max_count`     | `128`                        | 等待 Worker 接纳的提交容量  |
+| 后端 `llm_review.enabled`              | `false`                      | LLM 审查开关                |
+| 前端 `API_PROXY_TARGET`                | `http://127.0.0.1:8080`      | 开发服务的 API 代理目标     |
+| 前端 `VITE_SOURCE_MAX_BYTES`           | `65536`                      | 提交源码字节上限预检        |
 
 后端从进程环境读取 `MYSQL_PASSWORD`，MySQL SSL 显式禁用，程序不自动加载 `.env`。连接使用 utf8mb4_0900_bin、READ COMMITTED、严格 SQL 模式和有限锁等待。
 
 请求、消息和结果预算需要在后端与各 Worker 之间对齐。字段以 `_ms`、`_kib`、`_bytes` 标明单位。完整配置见[后端示例](config/backend.example.toml)、[Worker 示例](config/worker.example.toml)和[前端配置说明](web/README.md#配置与-api-代理)。
+
+后端与 Worker 的配置均要求 `[kafka]`，包含端点、两个 topic 和各自消费组；预算可使用默认值。后端另有独立的 `[worker_membership]` 采集配置。字段、客户端选项与消息编解码接口见[后端说明](crates/backend/README.md#kafka-客户端配置)、[Worker 说明](crates/worker/README.md#kafka-客户端配置)和[协议说明](crates/protocol/README.md#kafka-消息编解码)。 使用已有配置时，将示例中的 `[kafka]` 节合并到实际 `--config` 指定的文件，保留数据库及审查等已有配置；`[worker_membership]` 可省略并使用默认值。
 
 ### 多 Worker
 

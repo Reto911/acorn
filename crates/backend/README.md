@@ -9,7 +9,7 @@ acorn-backend 是 Acorn 的 HTTP 后端，使用 Axum、Tokio 和 SQLx。它管�
 | `http`                    | JSON API、分页筛选、请求限制和错误响应                     |
 | `problems`、`submissions` | 题目版本查询、幂等创建、提交详情和历史                     |
 | `scheduler`               | 有界内存队列、Worker 选择、gRPC 分派与轮询、保存结果后 ACK |
-| `database`                | MySQL 访问、短事务和条件状态更新                          |
+| `database`                | MySQL 访问、短事务和条件状态更新                           |
 | `llm_review`              | 自动及手动审查、独立队列、模型调用和最新意见保存           |
 | `health`                  | 数据库与 Worker 共享采集、最近观测缓存                     |
 | `config`、`logging`       | TOML 配置和英文 stderr 日志                                |
@@ -41,24 +41,47 @@ target/debug/acorn-backend --config "$HOME/.config/acorn/backend.toml"
 
 完整字段见 [backend.example.toml](../../config/backend.example.toml)。
 
-| 配置节       | 主要设置                                    | 示例值                              |
-| ------------ | ------------------------------------------- | ----------------------------------- |
-| `http`       | 监听地址、JSON 请求上限、默认及最大页长     | `127.0.0.1:8080`，512 KiB，20 / 100 |
-| `database` | 端点、库名、用户名、连接池上限及等待预算 | `127.0.0.1:3306`、`appdb`、4 个连接、5000 ms 取得等待、3 秒锁等待 |
-| `test_user`  | 所有提交的归属用户 ID                       | `1`                                 |
-| `scheduler`  | Worker 列表、待接纳容量、轮询及节点重试间隔 | 128 个名额，100 / 1000 ms           |
-| `grpc`       | 各 RPC 超时、消息发送及接收上限             | 1000 ms，16 MiB / 1 MiB             |
-| `request`    | 源码、用例、原始载荷及单用例资源上限        | 源码 64 KiB，最多 128 个用例        |
-| `results`    | 编译诊断、stdout、stderr 和故障说明保留上限 | 前三项各 64 KiB，故障说明 512 字节  |
-| `health`     | 每轮采集后的间隔、单项探测超时              | 5000 / 1000 ms                      |
-| `llm_review` | 审查开关、模型地址、凭据、并发和预算        | 默认关闭；详见下文                  |
-| `logging`    | 日志过滤级别                                | `info`                              |
+| 配置节       | 主要设置                                    | 示例值                                                            |
+| ------------ | ------------------------------------------- | ----------------------------------------------------------------- |
+| `http`       | 监听地址、JSON 请求上限、默认及最大页长     | `127.0.0.1:8080`，512 KiB，20 / 100                               |
+| `database`   | 端点、库名、用户名、连接池上限及等待预算    | `127.0.0.1:3306`、`appdb`、4 个连接、5000 ms 取得等待、3 秒锁等待 |
+| `test_user`  | 所有提交的归属用户 ID                       | `1`                                                               |
+| `scheduler`  | Worker 列表、待接纳容量、轮询及节点重试间隔 | 128 个名额，100 / 1000 ms                                         |
+| `grpc`       | 各 RPC 超时、消息发送及接收上限             | 1000 ms，16 MiB / 1 MiB                                           |
+| `request`    | 源码、用例、原始载荷及单用例资源上限        | 源码 64 KiB，最多 128 个用例                                      |
+| `results`    | 编译诊断、stdout、stderr 和故障说明保留上限 | 前三项各 64 KiB，故障说明 512 字节                                |
+| `health`     | 每轮采集后的间隔、单项探测超时              | 5000 / 1000 ms                                                    |
+| `llm_review` | 审查开关、模型地址、凭据、并发和预算        | 默认关闭；详见下文                                                |
+| `logging`    | 日志过滤级别                                | `info`                                                            |
 
 数据库密码由进程环境变量 `MYSQL_PASSWORD` 提供，TOML 只保存非秘密连接字段；正式程序不自动加载 `.env`。MySQL SSL 显式禁用。API、Scheduler、审查与健康采集共用连接池，每条新连接设置 utf8mb4_0900_bin、READ COMMITTED、严格模式及两类锁等待。取得连接的等待预算与查询、锁等待分别计量；模型和 Worker 网络等待不借用数据库连接。
 
 后端的任务、执行及结果预算须与所有 Worker 对齐。待接纳容量包含已预留、已排队和正在等待 Worker 接纳的提交；Worker 接纳后释放该名额。
 
 HTTP 和 gRPC 的访问范围由部署端配置。后端使用配置中的预置用户作为提交归属；浏览器通过同源反向代理访问 API，静态页面由前端部署服务提供。
+
+### Kafka 客户端配置
+
+构建默认动态链接系统 librdkafka（至少 2.12.1），需要开发包及 pkg-config；静态构建方法见[根说明](../../README_zh-CN.md#构建)。仅构建后端时可执行 `cargo build -p acorn-backend --locked --no-default-features --features kafka-static`。
+
+`[kafka]` 必填，`bootstrap_servers`、`tasks_topic`、`events_topic` 和 `events_group_id` 必须显式配置。端点采用 `host:port` 或 `[IPv6]:port`，不带 URL 协议；两个 topic 必须不同。宿主访问 Compose 中的 EXTERNAL listener 可使用示例的 `localhost:9092`。使用已有私有配置时，将该节合并到实际 `--config` 指定的文件，其余数据库和审查配置保留原值；数值预算可省略并使用下表默认值。
+
+| 字段                     | 默认值     | 含义                           |
+| ------------------------ | ---------- | ------------------------------ |
+| `delivery_timeout_ms`    | `30000`    | 单次投递及客户端内部重试预算   |
+| `queue_timeout_ms`       | `1000`     | 等待进入生产者队列的预算       |
+| `commit_timeout_ms`      | `5000`     | 应用等待实际位点提交结果的预算 |
+| `shutdown_timeout_ms`    | `5000`     | 正常停机的总消息收尾预算       |
+| `max_task_record_bytes`  | `16777216` | 编码任务上限，最多 16 MiB      |
+| `max_event_record_bytes` | `1048576`  | 编码事件上限，最多 1 MiB       |
+
+时间预算必须为正且不超过 `2147483647` ms。编码上限须容纳配置允许的原始任务和有界结果及 Protobuf 开销。
+
+独立的 `[worker_membership]` 可省略，`tasks_group_id` 默认 `acorn-judge-workers-v1`，须与 Worker 任务组一致；`interval_ms` 默认 `5000`，`timeout_ms` 默认 `1000`；样本新鲜期限为 `2 × (interval_ms + timeout_ms)`，默认 12 秒。间隔必须为正，查询预算使用正的客户端毫秒范围，派生期限不可溢出。此配置与 `[health]` 独立。
+
+`scheduler::kafka::KafkaConfig` 将配置字段和任务发送／事件接收方向交给 [acorn-kafka](../kafka/README.md) 的共享校验及客户端策略，提供生产者及消费者的 `ClientConfig`：PLAINTEXT、禁止自动建 topic、幂等生产及 `acks=all`、手动位点和 `auto.offset.reset=error`、classic 消费组。任务生产者和事件消费者的传输上限分别在编码上限外预留 1024 字节，接收上限再预留 512 字节；生产队列最多 128 条且字节上限为两个最大记录，预取队列字节软上限为一个最大记录，可被单次 fetch 超过。
+
+当前服务入口使用 gRPC 判题。上述配置和客户端选项供 Kafka 驱动使用，消息接口见[共享协议](../protocol/README.md#kafka-消息编解码)。
 
 ## HTTP API
 
@@ -178,6 +201,14 @@ Ctrl-C 或 SIGTERM 停止新提交、新分派和审查接纳，等待在途判�
 日志输出到 stderr，以提交 ID 关联创建、分派和终态保存事件。关键数据库写入或调度任务失败会触发进程退出，错误原因写入日志。
 
 ## 检查命令
+
+Kafka 消息往返检查使用可创建／删除测试 topic 的独立测试环境，创建 UUID 命名的测试 topic，检查大任务及运行／终态事件的原始字节，结束后删除这些 topic：
+
+```sh
+ACORN_TEST_KAFKA_SERVERS=localhost:9092 cargo test -p acorn-backend --locked --test kafka -- --ignored --nocapture
+```
+
+该检查采用测试 topic 的显式起始位点，不使用业务组或改变业务位点。Kafka 服务与客户端须处于可互通的网络环境。
 
 在仓库根目录执行：
 

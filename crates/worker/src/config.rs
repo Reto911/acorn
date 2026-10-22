@@ -11,6 +11,8 @@ use clap::Parser;
 use serde::Deserialize;
 use tracing::level_filters::LevelFilter;
 
+pub use crate::kafka::KafkaConfig;
+
 /// Command-line options for the Worker process.
 #[derive(Debug, Parser)]
 #[command(version, about = env!("CARGO_PKG_DESCRIPTION"))]
@@ -24,6 +26,8 @@ pub struct Cli {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// Kafka transport settings for the judging communication migration.
+    pub kafka: KafkaConfig,
     /// gRPC transport settings.
     pub server: ServerConfig,
     /// Incoming Job payload limits.
@@ -203,6 +207,7 @@ impl Config {
 
     /// Reject zero limits, unsupported execution settings and unusable budgets.
     pub fn validate(&self) -> Result<()> {
+        self.kafka.validate()?;
         for (name, value) in [
             (
                 "server.max_request_bytes",
@@ -366,6 +371,10 @@ impl Config {
             self.server.max_request_bytes >= request_envelope,
             "Request message limit cannot hold the configured payload and protocol envelope"
         );
+        ensure!(
+            self.kafka.max_task_record_bytes >= request_envelope,
+            "Kafka task record limit cannot hold configured payload"
+        );
         let response_payload = self
             .execution
             .stdout_max_bytes
@@ -379,6 +388,10 @@ impl Config {
         ensure!(
             self.server.max_response_bytes >= response_required,
             "Response message limit cannot hold bounded results"
+        );
+        ensure!(
+            self.kafka.max_event_record_bytes >= response_required,
+            "Kafka event record limit cannot hold bounded results"
         );
         self.logging
             .level

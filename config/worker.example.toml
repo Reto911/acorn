@@ -55,3 +55,15 @@ acknowledged_queue_length = 128
 
 [logging]
 level = "info"
+
+[kafka]
+bootstrap_servers = ["localhost:9092"]
+tasks_topic = "acorn.judge.tasks.v1"
+events_topic = "acorn.judge.events.v1"
+tasks_group_id = "acorn-judge-workers-v1"
+delivery_timeout_ms = 30_000
+queue_timeout_ms = 1_000
+commit_timeout_ms = 5_000
+shutdown_timeout_ms = 5_000
+max_task_record_bytes = 16_777_216
+max_event_record_bytes = 1_048_576

@@ -52,6 +52,14 @@ use acorn_protocol::worker::v1::{
 
 [后端客户端](../backend/src/scheduler/worker_client.rs)负责调用 deadline、消息预算和响应转换；[Worker RPC 实现](../worker/src/rpc.rs)负责接纳与执行。协议 crate 负责共享类型和服务接口。
 
+## Kafka 消息编解码
+
+`acorn_protocol::records` 提供 `encode_task`／`decode_task` 和 `encode_event`／`decode_event`。任务复用 `SubmitJobRequest`，事件复用 `GetJobReply`，直接使用 Protobuf 二进制，不新增消息封装或字段。
+
+编码入口只接收消息和字节上限，返回 `EncodedRecord`；其 `key()` 直接来自同一消息的 `job_id`，`payload()` 返回编码字节。发送时按 UTF-8 使用 key。接收端按负载身份执行原业务校验，不额外比较 Kafka key。
+
+编码前检查 `encoded_len()`，解码前检查接收字节数，同时执行配置上限及任务 16 MiB／事件 1 MiB 的协议上限。超限返回 `KafkaRecordTooLarge`，无法解码返回 `KafkaRecordDecodeFailed`；错误不包含消息正文。身份、资源和状态形状仍由 Worker 接纳及后端事件处理校验，消费驱动负责关联 topic／partition／offset 并按设计处理错误。
+
 ## 检查命令
 
 在仓库根目录执行：

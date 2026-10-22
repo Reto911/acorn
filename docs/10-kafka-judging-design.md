@@ -1,6 +1,6 @@
 # Kafka 判题通信设计与实施计划
 
-版本：v14。本文规定后端与 Worker 之间的 Kafka 任务投递、状态回传、接纳容量及部署方案。实施时同步受影响的现行设计、协议、调用方和配置说明；进度及检查结果见[实施记录](d02-execution/10-kafka-judging-execution.md#4-任务清单)。
+版本：v16。本文规定后端与 Worker 之间的 Kafka 任务投递、状态回传、接纳容量及部署方案。实施时同步受影响的现行设计、协议、调用方和配置说明；进度及检查结果见[实施记录](d02-execution/10-kafka-judging-execution.md#4-任务清单)。
 
 ## 1. 目标、依据与范围
 
@@ -241,15 +241,15 @@ backend 和 worker 提供以下 Cargo 特性；工作区 rdkafka 依赖关闭默
 ```toml
 [features]
 default = ["kafka-dynamic"]
-kafka-dynamic = ["rdkafka/dynamic-linking"]
-kafka-static = ["rdkafka/cmake-build"]
+kafka-dynamic = ["rdkafka/dynamic-linking", "acorn-kafka/kafka-dynamic"]
+kafka-static = ["rdkafka/cmake-build", "acorn-kafka/kafka-static"]
 ```
 
 静态构建关闭默认特性后启用 kafka-static。
 
-Cargo 特性会合并，backend 对 worker 的开发依赖应关闭其默认特性；工作区构建为两个组件选择同一链接方式，并分别验证两种模式。依据见 [Cargo 特性规则](https://doc.rust-lang.org/cargo/reference/features.html)。
+Cargo 特性会合并，共享 acorn-kafka 的 workspace 依赖及 backend 对 worker 的开发依赖均关闭默认特性；backend／worker 向共享库转发对应链接特性。工作区构建为两个组件选择同一链接方式，并分别验证两种模式。依据见 [Cargo 特性规则](https://doc.rust-lang.org/cargo/reference/features.html)。
 
-以下配置示例的加载器、配置文件及默认值在 K01.2 中同步实现：
+两端配置要求 `[kafka]` 及端点、topic、各自消费组名；以下数值字段可省略并使用示例默认值。后端配置如下：
 
 ```toml
 [scheduler]
@@ -257,14 +257,21 @@ pending_max_count = 128
 workers = ["http://127.0.0.1:50051"]
 
 [kafka]
-bootstrap_servers = ["127.0.0.1:9092"]
+bootstrap_servers = ["localhost:9092"]
 tasks_topic = "acorn.judge.tasks.v1"
 events_topic = "acorn.judge.events.v1"
 events_group_id = "acorn-backend-judge-events-v1"
 delivery_timeout_ms = 30_000
+queue_timeout_ms = 1_000
 commit_timeout_ms = 5_000
+shutdown_timeout_ms = 5_000
 max_task_record_bytes = 16_777_216
 max_event_record_bytes = 1_048_576
+
+[worker_membership]
+tasks_group_id = "acorn-judge-workers-v1"
+interval_ms = 5_000
+timeout_ms = 1_000
 
 [health]
 interval_ms = 5_000
@@ -273,7 +280,9 @@ timeout_ms = 1_000
 
 Worker 使用相同的端点、topic、消息上限和交接预算，配置任务组 `tasks_group_id = "acorn-judge-workers-v1"`。
 
-成员观测单独配置采集参数，具体字段及默认值在 K01.2 中固定。
+成员观测单独使用 `[worker_membership]`：`tasks_group_id` 与 Worker 任务组一致，默认 `acorn-judge-workers-v1`；`interval_ms` 和 `timeout_ms` 默认 5000 和 1000，样本新鲜期限为 `2 × (interval_ms + timeout_ms)`，默认 12 秒。该节可省略并使用上述默认值。间隔必须为正，查询预算在客户端正毫秒范围内，派生期限不可溢出。
+
+Kafka 端点采用 `host:port` 或 `[IPv6]:port`，不带 URL 协议；topic 使用合法名称且任务、事件 topic 不同，组名非空且不含 NUL。两端消息交接的四个毫秒预算均须为正且不超过 2147483647；消息上限须在第 8.2 节编码边界内，且容纳已有原始任务和有界结果的 Protobuf 开销。
 
 客户端参数的用途如下，配置名采用 librdkafka 名称：
 
@@ -287,11 +296,13 @@ Worker 使用相同的端点、topic、消息上限和交接预算，配置任�
 | auto.offset.reset=error        | 消费者         | 无初始位点或位点越界时报告错误                                              |
 | group.protocol=classic         | 消费者         | 使用原有消费者组协议                                                        |
 
-commit_timeout_ms 是应用等待位点提交结果的上限，不是直接传给 librdkafka 的同名参数；只有驱动报告完成才能认为提交成功。delivery_timeout_ms 对应生产者 delivery.timeout.ms，限制单次消息投递及其内部重试；FutureProducer::send 的 queue_timeout 仅限制进入客户端队列的等待，两阶段等待均需有界。
+commit_timeout_ms 是应用等待位点提交结果的上限，不是直接传给 librdkafka 的同名参数；只有驱动报告完成才能认为提交成功。delivery_timeout_ms 对应生产者 delivery.timeout.ms，限制单次消息投递及其内部重试；FutureProducer::send 的 queue_timeout 仅限制进入客户端队列的等待，由 queue_timeout_ms 指定。shutdown_timeout_ms 规定正常停机的总消息收尾预算，与 Worker 沙箱停止预算分开。两阶段发送等待均需有界。
 
 按第 3.1 节的确认条件直接提交指定分区的 offset+1，不提交尚未处理的预取记录。接口语义见 [Consumer::commit](https://docs.rs/rdkafka/0.39.0/rdkafka/consumer/trait.Consumer.html#tymethod.commit)。
 
-预取缓冲使用 queued.max.messages.kbytes 等软限制，允许被一次 fetch 超过。参数依据见[librdkafka 2.12.1 配置](https://github.com/confluentinc/librdkafka/blob/v2.12.1/CONFIGURATION.md)，发送等待语义见 [FutureProducer](https://docs.rs/rdkafka/0.39.0/rdkafka/producer/struct.FutureProducer.html#method.send)。
+共享 `acorn-kafka` 负责数值默认值、端点／topic／组名及预算校验、传输和缓冲设置及客户端选项；两端 KafkaConfig 保留各自 TOML 字段、消费组名和任务／事件收发方向，通过借用配置视图调用共享策略。独立成员观测也复用组名校验。发布及事件消费仍归 Scheduler，Worker 消费归 Worker；共享库不建立连接或持有业务状态。`acorn_protocol::records` 继续负责消息编解码和由负载派生 key。
+
+生产者 message.max.bytes 及消费者 message.max.bytes、fetch.message.max.bytes、fetch.max.bytes 在对应编码上限外预留 1024 字节，receive.message.max.bytes 再增加 512 字节。生产者 queue.buffering.max.messages=128，queue.buffering.max.kbytes 为两个最大传输记录向上取整的 KiB 数；消费者 queued.min.messages=1，queued.max.messages.kbytes 为一个最大传输记录向上取整的 KiB 数。上述预取缓冲为软限制，允许被一次 fetch 超过。参数依据见[librdkafka 2.12.1 配置](https://github.com/confluentinc/librdkafka/blob/v2.12.1/CONFIGURATION.md)，发送等待语义见 [FutureProducer](https://docs.rs/rdkafka/0.39.0/rdkafka/producer/struct.FutureProducer.html#method.send)。
 
 ### 8.2 资源与部署边界
 
@@ -379,15 +390,15 @@ offsets.topic.replication.factor=1
 
 ### 11.1 依赖与执行顺序
 
-| 工作包                    | 前置依赖 | 主要修改范围                                                                    |
-| ------------------------- | -------- | ------------------------------------------------------------------------------- |
-| K01 依赖、配置与消息接入  | 无       | 工作区及 backend/worker 的 Cargo 依赖、配置加载器、Kafka 客户端设置与消息编解码 |
-| K02 数据库与本地接纳      | K01      | database/submissions、CreationService、Scheduler 接纳许可与启动装入             |
-| K03 后端发布及事件消费    | K02      | scheduler 发布与消费、worker_client 响应校验、自动审查交接                      |
-| K04 Worker 消费与结果队列 | K01      | Worker 接纳、执行回调、消费驱动、结果发送及位点管理                             |
-| K05 生命周期与旧流程移除  | K03、K04 | 后端和 Worker 入口、后台监督、worker.proto 及废弃 RPC 调用方                    |
-| K06 在线观测与健康页面    | K05      | 独立成员观测、创建接纳条件、health 缓存与 HTTP、健康页面                        |
-| K07 集成验收与部署交付    | K06      | Kafka 部署说明、现有测试夹具、使用文档与验收记录                                |
+| 工作包                    | 前置依赖 | 主要修改范围                                                                           |
+| ------------------------- | -------- | -------------------------------------------------------------------------------------- |
+| K01 依赖、配置与消息接入  | 无       | 工作区及共享库、backend/worker 的 Cargo 依赖、配置加载器、Kafka 客户端设置与消息编解码 |
+| K02 数据库与本地接纳      | K01      | database/submissions、CreationService、Scheduler 接纳许可与启动装入                    |
+| K03 后端发布及事件消费    | K02      | scheduler 发布与消费、worker_client 响应校验、自动审查交接                             |
+| K04 Worker 消费与结果队列 | K01      | Worker 接纳、执行回调、消费驱动、结果发送及位点管理                                    |
+| K05 生命周期与旧流程移除  | K03、K04 | 后端和 Worker 入口、后台监督、worker.proto 及废弃 RPC 调用方                           |
+| K06 在线观测与健康页面    | K05      | 独立成员观测、创建接纳条件、health 缓存与 HTTP、健康页面                               |
+| K07 集成验收与部署交付    | K06      | Kafka 部署说明、现有测试夹具、使用文档与验收记录                                       |
 
 第 11.2 节定义改动及完成条件，可勾选清单及实际检查结果见[实施记录](d02-execution/10-kafka-judging-execution.md#4-任务清单)。
 

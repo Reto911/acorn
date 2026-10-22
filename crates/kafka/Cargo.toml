@@ -1,0 +1,19 @@
+[package]
+name = "acorn-kafka"
+description = "Shared Acorn Kafka configuration policy and client options"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["kafka-dynamic"]
+kafka-dynamic = ["rdkafka/dynamic-linking"]
+kafka-static = ["rdkafka/cmake-build"]
+
+[dependencies]
+acorn-protocol.workspace = true
+anyhow.workspace = true
+rdkafka.workspace = true

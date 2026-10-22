@@ -8,11 +8,18 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["kafka-dynamic"]
+kafka-dynamic = ["rdkafka/dynamic-linking", "acorn-kafka/kafka-dynamic"]
+kafka-static = ["rdkafka/cmake-build", "acorn-kafka/kafka-static"]
+
 [dependencies]
+acorn-kafka.workspace = true
 acorn-protocol.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 nix.workspace = true
+rdkafka.workspace = true
 serde.workspace = true
 tempfile.workspace = true
 tokio.workspace = true

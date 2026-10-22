@@ -1,5 +1,7 @@
 //! Shared messages and generated client/server code for the Worker protocol.
 
+pub mod records;
+
 /// Worker protocol versions shared by the backend and Worker.
 pub mod worker {
     /// Generated messages and gRPC interfaces for `acorn.worker.v1`.
