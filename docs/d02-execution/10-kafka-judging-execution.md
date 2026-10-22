@@ -4,7 +4,7 @@
 
 ## 1. 当前状态
 
-设计版本为 v16，K01 的 3 项任务已完成，其余 19 项尚未开始。已接入依赖、两端配置与客户端选项、共享消息编解码，并完成两种链接构建及真实消息往返。当前服务入口仍通过 gRPC 判题，Kafka 发布／消费与生命周期按 K02–K06 继续实现。进度见[任务清单](#4-任务清单)，审核决定见[审核记录](../d01-review/10-kafka-judging-review.md#2-已确认决定与草案修正)。
+设计版本为 v18，K01 的 3 项任务已完成，其余 19 项尚未开始。已接入依赖、两端配置与客户端选项、共享消息编解码，并完成两种链接构建及真实消息往返。当前服务入口仍通过 gRPC 判题，Kafka 发布／消费与生命周期按 K02–K06 继续实现。进度见[任务清单](#4-任务清单)，审核决定见[审核记录](../d01-review/10-kafka-judging-review.md#2-已确认决定与草案修正)。
 
 ## 2. 文档工作
 
@@ -144,3 +144,35 @@ K01.1–K01.3 完成。KV01 的编解码、消息大小、运行及终态形状�
 - 变更及新增 Markdown 的 Prettier、本地链接／锚点、标题编号、TOML／shell 示例和中英文命令同步检查，以及 `git diff --check`：通过。
 
 配置格式、默认值和消息合同沿用 K01；实际部署已有配置在使用新版可执行文件启动前需合并必填的 `[kafka]`，仓库示例已经提供该节，数据库、审查及沙箱配置保留部署值。本轮未修改实际部署配置、Compose、业务 topic 或消费组位点，也未扩大到 MySQL／Isolate 判题验收。
+
+### 5.5 配置声明与组装统一
+
+进一步集中两端仍重复的 TOML 字段、Serde 默认值标注和配置组装。acorn-kafka 使用一个仅服务现有两种角色的私有宏，从同一份声明生成 BackendConfig 与 WorkerConfig；差别为消费组字段及收发方向。共享库因此直接使用既有 serde 依赖。两端原有模块只保留对应类型的重导出，均为 4 行。
+
+TOML 字段、默认值、未知字段拒绝规则、原有 Rust 导出路径和客户端策略沿用原合同。两端现有配置测试增加了消费组字段不得互换、消费者 group.id 必须匹配本端配置的断言，没有新增测试函数。
+
+实际检查：
+
+- `cargo fmt --all -- --check`、`cargo check --workspace --all-targets --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings`：通过。
+- 两端第 5.2 节的默认配置／库测试命令：后端 19 项、Worker 5 项通过；对应静态模式测试亦为 19 项、5 项通过。
+- `cargo build --workspace --locked` 及第 5.2 节的 workspace 静态构建命令：通过。
+- 第 5.2 节真实 Kafka 往返命令：一项通过，确认共享类型经原两端入口完成大任务及事件往返，测试 topic 已按既有流程删除。
+- 变更 Markdown 的格式、链接／锚点、标题编号、TOML／shell 示例及中英文命令同步，以及 `git diff --check`：通过。
+
+本次只调整共享配置的源码组织，未执行 MySQL／Isolate 或完整 workspace 测试。
+
+### 5.6 普通共享配置与本端收发方向
+
+按用户确认，去掉配置生成宏、两个角色配置类型及 ClientSettings 借用视图，直接使用一个普通 acorn_kafka::KafkaConfig，统一声明字段、Serde 默认值、校验及通用客户端策略。`[kafka]` 消费组字段统一为 group_id：后端值仍为事件组，Worker 值仍为任务组。独立 `[worker_membership].tasks_group_id` 用于指定被观测的 Worker 组。
+
+后端 scheduler::kafka 和 Worker kafka 保留实际职责，分别提供 producer_config／consumer_config 函数，选择各自任务／事件的收发消息上限，再调用共享策略。配置加载器、客户端调用方、两端配置及中英文和模块说明同步使用新合同。旧 Kafka 组字段按未知字段拒绝，使用现有配置时改名并保留组名值即可。
+
+复用原有配置及真实消息测试，增加收发方向对应消息上限、group_id 必填、旧字段拒绝和消费者组名的定向断言，没有新增测试函数。检查范围及结果如下：
+
+- `cargo fmt --all -- --check`、`cargo check --workspace --all-targets --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings`：通过。
+- 第 5.2 节两端默认及静态模式配置／库测试：后端各 19 项、Worker 各 5 项通过。
+- `cargo build --workspace --locked` 和第 5.2 节 workspace 静态构建命令：通过。
+- 第 5.2 节真实 Kafka 往返命令：一项通过；通过两端方向选择函数创建四种客户端，完成大任务及事件往返，并按既有流程删除独立测试 topic。
+- 变更 Markdown 的格式、链接／锚点、标题编号、TOML／shell 示例和中英文命令同步，以及 `git diff --check`：通过。
+
+本轮未修改实际部署配置或 Compose，未执行 MySQL／Isolate 或完整 workspace 测试。

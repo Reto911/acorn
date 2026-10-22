@@ -11,7 +11,7 @@ use clap::Parser;
 use serde::Deserialize;
 use tracing::level_filters::LevelFilter;
 
-pub use crate::kafka::KafkaConfig;
+pub use acorn_kafka::KafkaConfig;
 
 /// Command-line options for the Worker process.
 #[derive(Debug, Parser)]

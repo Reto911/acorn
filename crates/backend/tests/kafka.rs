@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use acorn_backend::config::Config;
+use acorn_backend::{config::Config, scheduler::kafka as backend_kafka};
 use acorn_protocol::{
     records::{self, EncodedRecord},
     worker::v1::{
@@ -10,6 +10,7 @@ use acorn_protocol::{
         get_job_reply::Terminal,
     },
 };
+use acorn_worker::kafka as worker_kafka;
 use anyhow::{Context, Result, ensure};
 use rdkafka::{
     Message, Offset, TopicPartitionList,
@@ -71,7 +72,7 @@ async fn real_kafka_message_roundtrip() -> Result<()> {
     backend.kafka.bootstrap_servers = servers.split(',').map(str::to_owned).collect();
     backend.kafka.tasks_topic = format!("acorntest.tasks.{id}");
     backend.kafka.events_topic = format!("acorntest.events.{id}");
-    backend.kafka.events_group_id = format!("acorntest.events.{id}");
+    backend.kafka.group_id = format!("acorntest.events.{id}");
     worker
         .kafka
         .bootstrap_servers
@@ -84,10 +85,11 @@ async fn real_kafka_message_roundtrip() -> Result<()> {
         .kafka
         .events_topic
         .clone_from(&backend.kafka.events_topic);
-    worker.kafka.tasks_group_id = format!("acorntest.tasks.{id}");
+    worker.kafka.group_id = format!("acorntest.tasks.{id}");
     backend.validate()?;
     worker.validate()?;
-    let admin: AdminClient<DefaultClientContext> = backend.kafka.producer_config().create()?;
+    let admin: AdminClient<DefaultClientContext> =
+        backend_kafka::producer_config(&backend.kafka).create()?;
     let options = AdminOptions::new()
         .operation_timeout(Some(Duration::from_secs(10)))
         .request_timeout(Some(Duration::from_secs(10)));
@@ -117,10 +119,14 @@ async fn real_kafka_message_roundtrip() -> Result<()> {
             created.iter().all(Result::is_ok),
             "Create test topics: {created:?}"
         );
-        let task_producer: FutureProducer = backend.kafka.producer_config().create()?;
-        let event_producer: FutureProducer = worker.kafka.producer_config().create()?;
-        let task_consumer: StreamConsumer = worker.kafka.consumer_config().create()?;
-        let event_consumer: StreamConsumer = backend.kafka.consumer_config().create()?;
+        let task_producer: FutureProducer =
+            backend_kafka::producer_config(&backend.kafka).create()?;
+        let event_producer: FutureProducer =
+            worker_kafka::producer_config(&worker.kafka).create()?;
+        let task_consumer: StreamConsumer =
+            worker_kafka::consumer_config(&worker.kafka).create()?;
+        let event_consumer: StreamConsumer =
+            backend_kafka::consumer_config(&backend.kafka).create()?;
         assign_test_topic(&task_consumer, topics[0])?;
         assign_test_topic(&event_consumer, topics[1])?;
         let task = SubmitJobRequest {

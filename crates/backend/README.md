@@ -64,7 +64,7 @@ HTTP 和 gRPC 的访问范围由部署端配置。后端使用配置中的预置
 
 构建默认动态链接系统 librdkafka（至少 2.12.1），需要开发包及 pkg-config；静态构建方法见[根说明](../../README_zh-CN.md#构建)。仅构建后端时可执行 `cargo build -p acorn-backend --locked --no-default-features --features kafka-static`。
 
-`[kafka]` 必填，`bootstrap_servers`、`tasks_topic`、`events_topic` 和 `events_group_id` 必须显式配置。端点采用 `host:port` 或 `[IPv6]:port`，不带 URL 协议；两个 topic 必须不同。宿主访问 Compose 中的 EXTERNAL listener 可使用示例的 `localhost:9092`。使用已有私有配置时，将该节合并到实际 `--config` 指定的文件，其余数据库和审查配置保留原值；数值预算可省略并使用下表默认值。
+`[kafka]` 必填，`bootstrap_servers`、`tasks_topic`、`events_topic` 和 `group_id` 必须显式配置。端点采用 `host:port` 或 `[IPv6]:port`，不带 URL 协议；两个 topic 必须不同。宿主访问 Compose 中的 EXTERNAL listener 可使用示例的 `localhost:9092`。使用已有私有配置时，将该节合并到实际 `--config` 指定的文件，其余数据库和审查配置保留原值；数值预算可省略并使用下表默认值。
 
 | 字段                     | 默认值     | 含义                           |
 | ------------------------ | ---------- | ------------------------------ |
@@ -77,9 +77,11 @@ HTTP 和 gRPC 的访问范围由部署端配置。后端使用配置中的预置
 
 时间预算必须为正且不超过 `2147483647` ms。编码上限须容纳配置允许的原始任务和有界结果及 Protobuf 开销。
 
-独立的 `[worker_membership]` 可省略，`tasks_group_id` 默认 `acorn-judge-workers-v1`，须与 Worker 任务组一致；`interval_ms` 默认 `5000`，`timeout_ms` 默认 `1000`；样本新鲜期限为 `2 × (interval_ms + timeout_ms)`，默认 12 秒。间隔必须为正，查询预算使用正的客户端毫秒范围，派生期限不可溢出。此配置与 `[health]` 独立。
+独立的 `[worker_membership]` 可省略，`tasks_group_id` 默认 `acorn-judge-workers-v1`，须与 Worker 的 `[kafka].group_id` 一致；`interval_ms` 默认 `5000`，`timeout_ms` 默认 `1000`；样本新鲜期限为 `2 × (interval_ms + timeout_ms)`，默认 12 秒。间隔必须为正，查询预算使用正的客户端毫秒范围，派生期限不可溢出。此配置与 `[health]` 独立。
 
-`scheduler::kafka::KafkaConfig` 将配置字段和任务发送／事件接收方向交给 [acorn-kafka](../kafka/README.md) 的共享校验及客户端策略，提供生产者及消费者的 `ClientConfig`：PLAINTEXT、禁止自动建 topic、幂等生产及 `acks=all`、手动位点和 `auto.offset.reset=error`、classic 消费组。任务生产者和事件消费者的传输上限分别在编码上限外预留 1024 字节，接收上限再预留 512 字节；生产队列最多 128 条且字节上限为两个最大记录，预取队列字节软上限为一个最大记录，可被单次 fetch 超过。
+两端配置直接使用 [acorn-kafka](../kafka/README.md) 的普通 `KafkaConfig`。`scheduler::kafka::producer_config(&config.kafka)`／`consumer_config(&config.kafka)` 分别选择任务生产／事件消费，并调用共享客户端策略：PLAINTEXT、禁止自动建 topic、幂等生产及 `acks=all`、手动位点和 `auto.offset.reset=error`、classic 消费组。任务生产者和事件消费者的传输上限分别在编码上限外预留 1024 字节，接收上限再预留 512 字节；生产队列最多 128 条且字节上限为两个最大记录，预取队列字节软上限为一个最大记录，可被单次 fetch 超过。
+
+既有后端配置的 `[kafka].events_group_id` 改名为 `group_id`，保留原事件消费组值。
 
 当前服务入口使用 gRPC 判题。上述配置和客户端选项供 Kafka 驱动使用，消息接口见[共享协议](../protocol/README.md#kafka-消息编解码)。
 

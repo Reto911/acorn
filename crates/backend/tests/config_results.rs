@@ -1,5 +1,6 @@
 //! Focused configuration and terminal-shape boundary checks.
 
+use acorn_backend::scheduler::kafka;
 use acorn_backend::{config::Config, database::Error, submissions::TerminalOutcome};
 use acorn_protocol::worker::v1::{FailedCase, JudgeResult, Verdict};
 
@@ -374,7 +375,7 @@ fn kafka_configuration_contract() {
         "bootstrap_servers",
         "tasks_topic",
         "events_topic",
-        "events_group_id",
+        "group_id",
     ] {
         let missing = example
             .lines()
@@ -385,19 +386,46 @@ fn kafka_configuration_contract() {
     }
     assert!(Config::parse(&example.replace("localhost:9092", "[::1]:9092")).is_ok());
     for options in [
-        config.kafka.producer_config(),
-        config.kafka.consumer_config(),
+        kafka::producer_config(&config.kafka),
+        kafka::consumer_config(&config.kafka),
     ] {
         assert_eq!(options.get("allow.auto.create.topics"), Some("false"));
         assert_eq!(options.get("security.protocol"), Some("PLAINTEXT"));
         options.create_native_config().unwrap();
     }
-    let producer = config.kafka.producer_config();
+    let producer = kafka::producer_config(&config.kafka);
     assert_eq!(producer.get("enable.idempotence"), Some("true"));
     assert_eq!(producer.get("acks"), Some("all"));
-    let consumer = config.kafka.consumer_config();
+    assert_eq!(
+        producer.get("message.max.bytes"),
+        Some(
+            (config.kafka.max_task_record_bytes + 1024)
+                .to_string()
+                .as_str()
+        )
+    );
+    let consumer = kafka::consumer_config(&config.kafka);
+    for obsolete in ["events_group_id", "tasks_group_id"] {
+        let text = example.replace(
+            "group_id = \"acorn-backend-judge-events-v1\"",
+            &format!("{obsolete} = \"acorn-backend-judge-events-v1\""),
+        );
+        assert!(Config::parse(&text).is_err(), "{obsolete}");
+    }
+    assert_eq!(
+        consumer.get("group.id"),
+        Some(config.kafka.group_id.as_str())
+    );
     assert_eq!(consumer.get("enable.auto.commit"), Some("false"));
     assert_eq!(consumer.get("enable.auto.offset.store"), Some("false"));
     assert_eq!(consumer.get("auto.offset.reset"), Some("error"));
     assert_eq!(consumer.get("group.protocol"), Some("classic"));
+    assert_eq!(
+        consumer.get("fetch.message.max.bytes"),
+        Some(
+            (config.kafka.max_event_record_bytes + 1024)
+                .to_string()
+                .as_str()
+        )
+    );
 }

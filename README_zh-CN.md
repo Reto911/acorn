@@ -175,7 +175,7 @@ curl --fail-with-body "http://127.0.0.1:8080/api/v1/submissions/$ACORN_SUBMISSIO
 
 请求、消息和结果预算需要在后端与各 Worker 之间对齐。字段以 `_ms`、`_kib`、`_bytes` 标明单位。完整配置见[后端示例](config/backend.example.toml)、[Worker 示例](config/worker.example.toml)和[前端配置说明](web/README.md#配置与-api-代理)。
 
-后端与 Worker 的配置均要求 `[kafka]`，包含端点、两个 topic 和各自消费组；预算可使用默认值。后端另有独立的 `[worker_membership]` 采集配置。字段、客户端选项与消息编解码接口见[后端说明](crates/backend/README.md#kafka-客户端配置)、[Worker 说明](crates/worker/README.md#kafka-客户端配置)和[协议说明](crates/protocol/README.md#kafka-消息编解码)。 使用已有配置时，将示例中的 `[kafka]` 节合并到实际 `--config` 指定的文件，保留数据库及审查等已有配置；`[worker_membership]` 可省略并使用默认值。
+后端与 Worker 的配置均要求 `[kafka]`，包含端点、两个 topic 和标识各自消费组的 `group_id`；预算可使用默认值。后端另有独立的 `[worker_membership]` 采集配置。字段、客户端选项与消息编解码接口见[后端说明](crates/backend/README.md#kafka-客户端配置)、[Worker 说明](crates/worker/README.md#kafka-客户端配置)和[协议说明](crates/protocol/README.md#kafka-消息编解码)。 已使用早先 Kafka 配置的，将后端 `[kafka].events_group_id` 或 Worker `[kafka].tasks_group_id` 改名为 `group_id`，保留原值。使用已有配置时，将示例中的 `[kafka]` 节合并到实际 `--config` 指定的文件，保留数据库及审查等已有配置；`[worker_membership]` 可省略并使用默认值。
 
 ### 多 Worker
 

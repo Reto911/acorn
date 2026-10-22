@@ -1,6 +1,6 @@
 # Kafka 判题通信设计与实施计划
 
-版本：v16。本文规定后端与 Worker 之间的 Kafka 任务投递、状态回传、接纳容量及部署方案。实施时同步受影响的现行设计、协议、调用方和配置说明；进度及检查结果见[实施记录](d02-execution/10-kafka-judging-execution.md#4-任务清单)。
+版本：v18。本文规定后端与 Worker 之间的 Kafka 任务投递、状态回传、接纳容量及部署方案。实施时同步受影响的现行设计、协议、调用方和配置说明；进度及检查结果见[实施记录](d02-execution/10-kafka-judging-execution.md#4-任务清单)。
 
 ## 1. 目标、依据与范围
 
@@ -260,7 +260,7 @@ workers = ["http://127.0.0.1:50051"]
 bootstrap_servers = ["localhost:9092"]
 tasks_topic = "acorn.judge.tasks.v1"
 events_topic = "acorn.judge.events.v1"
-events_group_id = "acorn-backend-judge-events-v1"
+group_id = "acorn-backend-judge-events-v1"
 delivery_timeout_ms = 30_000
 queue_timeout_ms = 1_000
 commit_timeout_ms = 5_000
@@ -278,9 +278,9 @@ interval_ms = 5_000
 timeout_ms = 1_000
 ```
 
-Worker 使用相同的端点、topic、消息上限和交接预算，配置任务组 `tasks_group_id = "acorn-judge-workers-v1"`。
+Worker 使用相同的端点、topic、消息上限和交接预算，`[kafka].group_id = "acorn-judge-workers-v1"` 指定任务消费组。后端的同名字段指定事件消费组。
 
-成员观测单独使用 `[worker_membership]`：`tasks_group_id` 与 Worker 任务组一致，默认 `acorn-judge-workers-v1`；`interval_ms` 和 `timeout_ms` 默认 5000 和 1000，样本新鲜期限为 `2 × (interval_ms + timeout_ms)`，默认 12 秒。该节可省略并使用上述默认值。间隔必须为正，查询预算在客户端正毫秒范围内，派生期限不可溢出。
+成员观测单独使用 `[worker_membership]`：`tasks_group_id` 与 Worker 的 `[kafka].group_id` 一致，默认 `acorn-judge-workers-v1`；`interval_ms` 和 `timeout_ms` 默认 5000 和 1000，样本新鲜期限为 `2 × (interval_ms + timeout_ms)`，默认 12 秒。该节可省略并使用上述默认值。间隔必须为正，查询预算在客户端正毫秒范围内，派生期限不可溢出。
 
 Kafka 端点采用 `host:port` 或 `[IPv6]:port`，不带 URL 协议；topic 使用合法名称且任务、事件 topic 不同，组名非空且不含 NUL。两端消息交接的四个毫秒预算均须为正且不超过 2147483647；消息上限须在第 8.2 节编码边界内，且容纳已有原始任务和有界结果的 Protobuf 开销。
 
@@ -300,7 +300,7 @@ commit_timeout_ms 是应用等待位点提交结果的上限，不是直接传�
 
 按第 3.1 节的确认条件直接提交指定分区的 offset+1，不提交尚未处理的预取记录。接口语义见 [Consumer::commit](https://docs.rs/rdkafka/0.39.0/rdkafka/consumer/trait.Consumer.html#tymethod.commit)。
 
-共享 `acorn-kafka` 负责数值默认值、端点／topic／组名及预算校验、传输和缓冲设置及客户端选项；两端 KafkaConfig 保留各自 TOML 字段、消费组名和任务／事件收发方向，通过借用配置视图调用共享策略。独立成员观测也复用组名校验。发布及事件消费仍归 Scheduler，Worker 消费归 Worker；共享库不建立连接或持有业务状态。`acorn_protocol::records` 继续负责消息编解码和由负载派生 key。
+共享 `acorn-kafka` 使用普通 KafkaConfig 结构体，统一声明 TOML 字段、Serde 默认值和配置校验，消费组字段为 group_id；共享库提供与角色无关的客户端策略和传输／缓冲设置。两端配置直接使用该类型；后端 scheduler::kafka 选择任务生产、事件消费，Worker kafka 选择事件生产、任务消费，各自通过 producer_config(&KafkaConfig)／consumer_config(&KafkaConfig) 向共享策略传入对应消息上限。独立成员观测也复用组名校验。发布及事件消费仍归 Scheduler，Worker 消费归 Worker；共享库不建立连接或持有业务状态。`acorn_protocol::records` 继续负责消息编解码和由负载派生 key。
 
 生产者 message.max.bytes 及消费者 message.max.bytes、fetch.message.max.bytes、fetch.max.bytes 在对应编码上限外预留 1024 字节，receive.message.max.bytes 再增加 512 字节。生产者 queue.buffering.max.messages=128，queue.buffering.max.kbytes 为两个最大传输记录向上取整的 KiB 数；消费者 queued.min.messages=1，queued.max.messages.kbytes 为一个最大传输记录向上取整的 KiB 数。上述预取缓冲为软限制，允许被一次 fetch 超过。参数依据见[librdkafka 2.12.1 配置](https://github.com/confluentinc/librdkafka/blob/v2.12.1/CONFIGURATION.md)，发送等待语义见 [FutureProducer](https://docs.rs/rdkafka/0.39.0/rdkafka/producer/struct.FutureProducer.html#method.send)。
 

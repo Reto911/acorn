@@ -13,7 +13,7 @@ use clap::Parser;
 use serde::Deserialize;
 use sqlx::mysql::{MySqlConnectOptions, MySqlSslMode};
 
-pub use crate::scheduler::kafka::KafkaConfig;
+pub use acorn_kafka::KafkaConfig;
 
 use crate::llm_review::{ReviewAttempt, ReviewTrigger, policy::PROMPT_VERSION};
 
@@ -228,7 +228,7 @@ impl HealthConfig {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct WorkerMembershipConfig {
-    /// Worker task group to observe, matching the deployed Workers' tasks_group_id.
+    /// Worker task group to observe, matching the deployed Workers' Kafka group_id.
     pub tasks_group_id: String,
     /// Delay after a completed group observation, in milliseconds.
     pub interval_ms: u64,

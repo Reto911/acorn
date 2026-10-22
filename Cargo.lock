@@ -39,6 +39,7 @@ dependencies = [
  "acorn-protocol",
  "anyhow",
  "rdkafka",
+ "serde",
 ]
 
 [[package]]

@@ -17,3 +17,4 @@ kafka-static = ["rdkafka/cmake-build"]
 acorn-protocol.workspace = true
 anyhow.workspace = true
 rdkafka.workspace = true
+serde.workspace = true
