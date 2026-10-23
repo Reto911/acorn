@@ -1,6 +1,6 @@
 # acorn-worker
 
-acorn-worker 是独立的 C/Python 判题进程，通过 gRPC 接收任务，在 Isolate 沙箱中编译和逐例执行，返回进度、判题结论及诊断。
+acorn-worker 是独立的 C/Python 判题进程，从 Kafka 消费任务并发布运行／终态事件，通过 gRPC 提供只读状态，在 Isolate 沙箱中编译和逐例执行，返回进度、判题结论及诊断。
 
 ## 执行方式
 
@@ -8,7 +8,7 @@ acorn-worker 是独立的 C/Python 判题进程，通过 gRPC 接收任务，在
 - C 源码以 `main.c` 编译一次，成功后将产物复制到各运行沙箱；Python 以 `main.py` 逐例启动解释器。
 - 编译和每个用例分别使用新沙箱，应用 CPU、墙钟、进程树内存、进程数、FD、文件和磁盘配额。
 - 输出比较先删除整个输出末尾的 ASCII 空白，再逐字节比较。
-- 终态保存在内存中，调用方保存结果后 ACK；已确认结果按定长 FIFO 淘汰。
+- 执行前预留结果名额，终态按 FIFO 发布；发布确认并成功入队原任务位点请求后释放名额。
 
 语言 ID 为 `c` 和 `python`。Python 使用部署提供的解释器与标准库，支持单文件提交。
 
@@ -73,9 +73,11 @@ cp config/worker.example.toml "$HOME/.config/acorn/worker.toml"
 target/debug/acorn-worker --config "$HOME/.config/acorn/worker.toml"
 ```
 
-启动时校验 TOML 并检查工具可调用性，随后监听 gRPC。命令行支持 `--help`、`--version`。通过后端提交源码的完整流程见[快速开始](../../README_zh-CN.md#quick-start)。
+启动时校验 TOML 并检查工具可调用性，随后启动 Kafka 消费和状态 gRPC。命令行支持 `--help`、`--version`。通过后端提交源码的完整流程见[快速开始](../../README_zh-CN.md#quick-start)。
 
 ## 配置
+
+已有部署配置须删除 `results.acknowledged_queue_length`；结果不再通过业务 ACK 缓存保留。
 
 完整字段见 [worker.example.toml](../../config/worker.example.toml)。配置在启动时读取，修改后重启生效。
 
@@ -88,7 +90,7 @@ target/debug/acorn-worker --config "$HOME/.config/acorn/worker.toml"
 | `languages.python` | Python 路径和运行参数                                      | `/usr/bin/python3`，`-I -B -S main.py`     |
 | `compile`          | 编译资源、诊断和导出产物预算                               | CPU 10 秒、墙钟 20 秒、内存 512 MiB        |
 | `sandbox`          | Isolate 路径、box ID、FD、文件／磁盘／inode 配额和收尾超时 | 文件 16 MiB，磁盘 64 MiB，4096 inode       |
-| `results`          | 未确认结果容量、已确认结果保留数量                         | 各 128 条                                  |
+| `results`          | 待交接结果容量                                             | 128 条                                     |
 | `logging`          | stderr 日志级别                                            | `info`                                     |
 
 请求中的单用例限额受 Worker 配置上限约束。内存、单文件和磁盘空间配置使用 KiB；源码、输出、消息和编译产物预算使用字节；时间使用毫秒。部署多个节点时，将各 Worker 预算与[后端配置](../backend/README.md#配置)对齐。
@@ -103,9 +105,9 @@ target/debug/acorn-worker --config "$HOME/.config/acorn/worker.toml"
 
 既有 Worker 配置的 `[kafka].tasks_group_id` 改名为 `group_id`，保留原任务消费组值。
 
-当前服务入口使用 gRPC 判题。Kafka 消息编解码接口见[共享协议](../protocol/README.md#kafka-消息编解码)。
+正式入口同时监督 Kafka 服务和状态 RPC。Kafka 消息编解码接口见[共享协议](../protocol/README.md#kafka-消息编解码)。
 
-库接口 `kafka::KafkaWorker::new(worker, producer)` 从 `rpc::WorkerService` 取得同一配置及执行入口，`run(stop)` 接收 `watch::Receiver<bool>` 并返回可监督的服务结果。调用方先按同一配置通过 `kafka::producer_config(&config.kafka).create()` 构造事件生产者，并保留 `WorkerService` 供状态 RPC 使用，且仅选择一种任务接入路径。正式消费组位点由部署初始化；服务不自动重置。
+库接口 `kafka::KafkaWorker::new(worker, producer)` 从 `rpc::WorkerService` 取得同一配置及执行入口，`run(stop)` 接收 `watch::Receiver<bool>` 并返回可监督的服务结果。调用方先按同一配置通过 `kafka::producer_config(&config.kafka).create()` 构造事件生产者，并保留 `WorkerService` 供状态 RPC 使用，由 Kafka 服务统一拥有执行停止流程。正式消费组位点由部署初始化；服务不自动重置。
 
 Kafka 服务保持本机单槽，执行期间持续驱动消费组，忙或结果名额不足时暂停分区。执行前预留结果容量，同一 Job 的待发进度只保留最新快照；终态按 FIFO 发布，取得 broker 确认后，在原归属短锁下以 safe 异步接口提交任务位点请求；入队成功即释放结果条目和名额，不读回、不逐条等待位点回执。临时入队失败只重试本阶段，不重发已确认终态。失去原分区归属的执行仍可回传终态，但不提交旧位点。BLOCKED 后立即开始关闭任务消费者并退出组，状态 RPC 和结果生产者继续运行；正常停机通过既有停止通道收尾执行，再以 `kafka.shutdown_timeout_ms` 限制全部结果及位点的共同消息收尾。
 
@@ -115,24 +117,21 @@ Kafka 服务保持本机单槽，执行期间持续驱动消费组，忙或结�
 
 服务名为 `acorn.worker.v1.JudgeWorker`，定义见 [worker.proto](../../proto/acorn/worker/v1/worker.proto)。Rust 类型和调用入口由 [acorn-protocol](../protocol/README.md)提供。
 
-| RPC                 | 用途                                              |
-| ------------------- | ------------------------------------------------- |
-| `SubmitJob`         | 提交 ID、语言、源码、用例和限额，立即返回接纳状态 |
-| `GetJob`            | 查询阶段、已完成用例数或终态                      |
-| `AcknowledgeResult` | 确认结果已保存，使记录进入可淘汰 FIFO             |
-| `GetWorkerStatus`   | 查询执行占用、停机标记、未确认结果数量和容量      |
+| RPC               | 用途                                         |
+| ----------------- | -------------------------------------------- |
+| `GetWorkerStatus` | 查询执行占用、停机标记、未确认结果数量和容量 |
 
-忙时、结果区满或停机时拒绝新任务，由后端管理排队。同 ID 的保留记录直接返回；结果被淘汰或进程重启后，该记录随之消失。Worker 的提交执行独立于 RPC 连接，调用方断开后继续执行。
+忙、结果区满或停机时暂停任务接纳；同原归属下仍保留的 ID 复用快照。位点滞后、重平衡或进程重启可能重复执行，后端保留首个有效终态。
 
 判题结论包括 AC、WA、CE、RE、TLE、MLE、OLE；基础设施错误返回独立的失败终态。CE 带编译诊断，用例失败带首个失败用例的 stdout/stderr、截断标记和可用资源统计。Python 语法错误在用例运行阶段形成 RE。
 
 ## 日志与停机
 
-英文日志输出到 stderr，`logging.level = "debug"` 可查看轮询和 ACK。Job ID 可用于与后端日志关联。
+英文日志输出到 stderr，`logging.level = "debug"` 可查看状态观测和重复任务。Job ID 可用于与后端日志关联。
 
-Ctrl-C 或 SIGTERM 先停止接纳，再停止当前执行并完成共同清理流程。`sandbox.shutdown_timeout_ms` 控制停机等待预算。正常退出码为 0，启动、监听或停机错误为 1。
+Ctrl-C 或 SIGTERM 先停止接纳，再停止当前执行并完成共同清理流程。`sandbox.shutdown_timeout_ms` 控制执行停止预算，随后 `kafka.shutdown_timeout_ms` 控制共同消息收尾及消费者释放等待。正常退出码为 0，启动、监听或停机错误为 1。
 
-停止无法确认时，Worker 保留执行占用并拒绝新任务，继续提供结果查询和 ACK；部署端根据错误日志处置。结果保存在本进程内存中，重启后由后端保留已落库的业务结果。
+停止无法确认时，Worker 保留执行占用并拒绝新任务，继续提供状态 RPC 和结果生产；部署端根据错误日志处置。结果保存在本进程内存中，重启后由后端保留已落库的业务结果。
 
 ## 检查命令
 
@@ -153,6 +152,8 @@ ACORN_TEST_KAFKA_SERVERS=localhost:9092 \
   cargo test -p acorn-worker --locked --test kafka real_kafka_result_backpressure_and_total_shutdown_budget -- --ignored
 ```
 
+正式入口的 Kafka 接纳、状态 RPC 和 SIGTERM 收尾可用 `cargo test -p acorn-worker --locked --test kafka real_kafka_executable_handles_sigterm -- --ignored` 检查，同样需要上述 Kafka 环境变量。
+
 这些用例复用受控 Isolate 管理器，检查消费、分区撤销、结果交接和停机，不作为隔离证据。一条真实 Isolate 判题另需空闲的专用 box ID：
 
 ```sh
@@ -169,13 +170,11 @@ ACORN_ISOLATE_BOX_ID=200 ACORN_ISOLATION_SENTINEL=host-only-value \
   cargo test -p acorn-worker --locked --test isolate_real -- --ignored --nocapture
 ```
 
-阶段测试按默认 `/var/lib/isolate` 根目录检查清理。执行器和 RPC 的真实测试分别使用：
+阶段测试按默认 `/var/lib/isolate` 根目录检查清理。执行器的真实测试使用：
 
 ```sh
 ACORN_ISOLATE_BOX_ID=201 \
   cargo test -p acorn-worker --locked --test executor -- --ignored --nocapture
-ACORN_ISOLATE_BOX_ID=202 \
-  cargo test -p acorn-worker --locked --test rpc -- --ignored --nocapture
 ```
 
 完整协议、资源规则和失败处理见 [Worker 设计](../../docs/01-worker-design.md)。

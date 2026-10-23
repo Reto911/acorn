@@ -183,7 +183,7 @@ delete 策略按日志段清理过期数据，消费完成不会立即删除日�
 
 ## 6. Worker 消费与执行
 
-输入约束复用[公共运行入口](../crates/worker/src/runtime.rs)的接纳校验，执行、停止和资源合同沿用[Worker 设计](01-worker-design.md#6-统一沙箱接口)。[Worker Kafka 服务](../crates/worker/src/kafka/service.rs)组合消费驱动、单槽执行通知及 FIFO 交接；旧 RPC 通过同一运行入口接纳。
+输入约束复用[公共运行入口](../crates/worker/src/runtime.rs)的接纳校验，执行、停止和资源合同沿用[Worker 设计](01-worker-design.md#6-统一沙箱接口)。[Worker Kafka 服务](../crates/worker/src/kafka/service.rs)组合消费驱动、单槽执行通知及 FIFO 交接；正式 Worker 入口同时监督 Kafka 服务和只读状态 RPC。
 
 ### 6.1 接纳与结果交接
 
@@ -198,7 +198,7 @@ delete 策略按日志段清理过期数据，消费完成不会立即删除日�
 
 队列只驻留内存，交接完成后移除条目。Worker 退出时未完成交接的结果可能丢失，对应任务依赖未提交位点重投。
 
-任务消费者沿用 StreamConsumer，事件生产者采用 FutureProducer。执行、结果发送和消费驱动分开；沿用 recv 持续服务消费组事件，执行忙或结果名额满时 pause 分区并限制预取及应用缓冲。重平衡回调只通知驱动，不等待执行。关闭时释放最后一个消费者句柄，由 SDK RAII 退出消费组；位点入队只在同步调用期间借用消费者，不跨 await 持有引用；SDK 析构放在阻塞线程，不阻塞 Tokio 执行线程。接口见 [StreamConsumer](https://docs.rs/rdkafka/0.39.0/rdkafka/consumer/stream_consumer/struct.StreamConsumer.html)。
+任务消费者沿用 StreamConsumer，事件生产者采用 FutureProducer。执行、结果发送和消费驱动分开；沿用 recv 持续服务消费组事件，执行忙或结果名额满时 pause 分区并限制预取及应用缓冲。重平衡回调只通知驱动，不等待执行。关闭时释放最后一个消费者句柄，由 SDK RAII 退出消费组；位点入队只在同步调用期间借用消费者，不跨 await 持有引用；SDK 析构放在阻塞线程，不阻塞 Tokio 执行线程。后端事件消费者同样在阻塞线程释放，预算约束应用等待而不能取消 SDK 析构。接口见 [StreamConsumer](https://docs.rs/rdkafka/0.39.0/rdkafka/consumer/stream_consumer/struct.StreamConsumer.html)。
 
 ### 6.2 分区撤销、断连与重复
 
@@ -229,7 +229,7 @@ delete 策略按日志段清理过期数据，消费完成不会立即删除日�
 
 后端事件消费者接替原 Scheduler 轮询的结果处理，复用[响应校验](../crates/backend/src/scheduler/validation.rs)，按第 3.3 节推进状态。
 
-自动审查调用点从[轮询跟踪](../crates/backend/src/scheduler/tracking.rs)迁至事件消费者，复用 prepare_automatic、save_terminal 和本地 handoff，沿用[自动交接合同](08-llm-code-review-design.md#71-自动交接)。原 Worker 业务 ACK 调用处改为提交事件消费位点；首次机器终态和审查初态仍在同一数据库事务保存，重复事件不再次交接审查。
+自动审查由[事件消费者](../crates/backend/src/scheduler/kafka/events.rs)交接，复用 prepare_automatic、save_terminal 和本地 handoff，沿用[自动交接合同](08-llm-code-review-design.md#71-自动交接)。机器终态保存后尝试提交事件消费位点；首次机器终态和审查初态仍在同一数据库事务保存，重复事件不再次交接审查。
 
 数据库提交后尝试异步提交本条事件位点，再完成本次审查的本地 handoff，不等逐条提交回执或模型调用。请求入队同步失败也不能跳过 handoff 或重新创建审查；先完成已保存审查的本地交接，再向监督方报告提交请求错误，消费服务不跨过本条继续处理。数据库错误时不发起位点提交，沿现有关键写入故障规则处理。
 

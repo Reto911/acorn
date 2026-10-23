@@ -3,11 +3,11 @@
 use crate::{
     config::Config,
     executor::{ExecutionProgress, Executor},
-    jobs::{Execution, JobRecord, Jobs},
+    jobs::{Execution, Jobs},
     sandbox::{StageControl, StopReason},
 };
 use acorn_protocol::worker::v1::{
-    GetJobReply, JobPhase, JobState, SubmitJobReply, SubmitJobRequest, get_job_reply::Terminal,
+    GetJobReply, JobPhase, JobState, SubmitJobRequest, get_job_reply::Terminal,
 };
 use anyhow::{Context, Result, ensure};
 use std::{
@@ -25,13 +25,13 @@ use tracing::Instrument;
 pub(crate) struct Shared {
     /// Startup configuration and trust-boundary limits.
     pub(crate) config: Config,
-    /// Atomic admission, progress, terminal and ACK transitions.
+    /// Atomic admission, progress and retained terminal notifications.
     pub(crate) jobs: Mutex<Jobs>,
     /// Exactly one executor, retained after an unconfirmed stop.
     executor: AsyncMutex<Executor>,
 }
 
-/// Cloneable RPC service with process-local deduplication and result retention.
+/// Shared execution service with process-local deduplication and bounded notifications.
 #[derive(Clone)]
 pub struct WorkerService {
     /// Shared state owned by the listener and admitted execution tasks.
@@ -85,7 +85,7 @@ impl WorkerService {
         Ok(())
     }
 
-    /// Validate an opaque ID for Job-scoped RPCs before looking up a record.
+    /// Validate an opaque task ID before looking up retained execution updates.
     pub(crate) fn validate_id(&self, job_id: &str) -> Result<(), Status> {
         if job_id.is_empty() || job_id.len() > self.shared.config.request.job_id_max_bytes {
             return Err(Status::invalid_argument("InvalidJob"));
@@ -137,34 +137,16 @@ impl WorkerService {
         Ok(())
     }
 
-    /// Return an existing record without validating or comparing repeated Job content.
-    fn duplicate(jobs: &Jobs, job_id: &str) -> Option<SubmitJobReply> {
-        jobs.records.get(job_id).map(|record| SubmitJobReply {
-            job_id: job_id.into(),
-            state: record.updates.borrow().state,
-            duplicate: true,
-        })
-    }
-    /// Admit an identified request through the common single-slot, deadline and stop-channel flow.
-    pub(crate) fn admit(&self, request: SubmitJobRequest) -> Result<Admission, Status> {
-        {
-            let jobs = self.shared.jobs.lock().expect("Job state lock poisoned");
-            if let Some(reply) = Self::duplicate(&jobs, &request.job_id) {
-                tracing::debug!(job = %request.job_id, "Duplicate Job submission");
-                return Ok(Admission {
-                    reply,
-                    updates: jobs.records[&request.job_id].updates.subscribe(),
-                });
-            }
+    /// Admit through the single-slot deadline and stop-channel flow, or reuse retained updates.
+    pub(crate) fn admit(
+        &self,
+        request: SubmitJobRequest,
+    ) -> Result<watch::Receiver<GetJobReply>, Status> {
+        let mut jobs = self.shared.jobs.lock().expect("Job state lock poisoned");
+        if let Some(updates) = jobs.records.get(&request.job_id) {
+            return Ok(updates.subscribe());
         }
         self.validate_job(&request)?;
-        let mut jobs = self.shared.jobs.lock().expect("Job state lock poisoned");
-        if let Some(reply) = Self::duplicate(&jobs, &request.job_id) {
-            return Ok(Admission {
-                reply,
-                updates: jobs.records[&request.job_id].updates.subscribe(),
-            });
-        }
         if jobs.stopping {
             tracing::warn!(job = %request.job_id, "Job rejected: WorkerUnavailable");
             return Err(Status::failed_precondition("WorkerUnavailable"));
@@ -172,10 +154,6 @@ impl WorkerService {
         if jobs.execution.is_some() {
             tracing::warn!(job = %request.job_id, "Job rejected: WorkerBusy");
             return Err(Status::resource_exhausted("WorkerBusy"));
-        }
-        if jobs.unacknowledged_count() >= self.shared.config.results.max_unacknowledged_results {
-            tracing::warn!(job = %request.job_id, "Job rejected: ResultBufferFull");
-            return Err(Status::resource_exhausted("ResultBufferFull"));
         }
         let job_id = request.job_id.clone();
         let deadline =
@@ -189,13 +167,7 @@ impl WorkerService {
             total_cases: request.cases.len() as u32,
             terminal: None,
         });
-        jobs.records.insert(
-            job_id.clone(),
-            JobRecord {
-                updates,
-                acknowledged: false,
-            },
-        );
+        jobs.records.insert(job_id.clone(), updates);
         tracing::info!(job = %job_id, language = %request.language_id, phase = "preparing", cases = request.cases.len(), "Job accepted");
         let shared = self.shared.clone();
         let execution_id = job_id.clone();
@@ -219,14 +191,7 @@ impl WorkerService {
             stop,
             task: Some(task),
         });
-        Ok(Admission {
-            reply: SubmitJobReply {
-                job_id,
-                state: JobState::Running as i32,
-                duplicate: false,
-            },
-            updates: receiver,
-        })
+        Ok(receiver)
     }
 
     /// Remove only the completed record belonging to this notification channel.
@@ -236,7 +201,7 @@ impl WorkerService {
         if jobs
             .records
             .get(&id)
-            .is_some_and(|r| r.updates.subscribe().same_channel(updates))
+            .is_some_and(|r| r.subscribe().same_channel(updates))
         {
             jobs.records.remove(&id);
         }
@@ -254,14 +219,6 @@ impl WorkerService {
     }
 }
 
-/// Admission metadata and the latest bounded execution snapshot.
-pub(crate) struct Admission {
-    /// Existing RPC acknowledgement, also identifying process-local duplicate admissions.
-    pub reply: SubmitJobReply,
-    /// Progress and immutable terminal updates, independent of the caller's connection.
-    pub updates: watch::Receiver<GetJobReply>,
-}
-
 /// Execute outside admission, publish a terminal, then release only a safe position.
 async fn execute(shared: Arc<Shared>, request: SubmitJobRequest, control: StageControl) {
     let job_id = request.job_id.clone();
@@ -271,7 +228,7 @@ async fn execute(shared: Arc<Shared>, request: SubmitJobRequest, control: StageC
             if progress.phase != JobPhase::Done {
                 let mut jobs = shared.jobs.lock().expect("Job state lock poisoned");
                 let record = jobs.records.get_mut(&job_id).expect("running Job record");
-                record.updates.send_modify(|reply| {
+                record.send_modify(|reply| {
                     reply.phase = progress.phase as i32;
                     reply.completed_cases = progress.completed_cases;
                 });
@@ -282,7 +239,7 @@ async fn execute(shared: Arc<Shared>, request: SubmitJobRequest, control: StageC
     drop(executor);
     let mut jobs = shared.jobs.lock().expect("Job state lock poisoned");
     let record = jobs.records.get_mut(&job_id).expect("running Job record");
-    record.updates.send_modify(|reply| {
+    record.send_modify(|reply| {
         reply.state = match outcome.terminal {
             Terminal::Result(_) => JobState::Finished as i32,
             Terminal::Failure(_) => JobState::Failed as i32,
@@ -299,5 +256,47 @@ async fn execute(shared: Arc<Shared>, request: SubmitJobRequest, control: StageC
             .expect("occupied execution slot")
             .stop_unconfirmed = true;
         tracing::error!(job = %job_id, "Execution slot retained after unconfirmed stop; deployment intervention required");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Admission validation retained after retiring the business RPC adapter.
+    use super::*;
+    use acorn_protocol::worker::v1::{RunLimits, TestCase};
+
+    /// Invalid language, limits and payload never register work; empty case bytes remain valid.
+    #[test]
+    fn validation_rejects_without_registering() {
+        let mut config =
+            Config::parse(include_str!("../../../config/worker.example.toml")).unwrap();
+        config.request.payload_max_bytes = 32;
+        let worker = WorkerService::new(config);
+        let valid = SubmitJobRequest {
+            job_id: "job".into(),
+            language_id: "python".into(),
+            source: b"pass".to_vec(),
+            cases: vec![TestCase::default()],
+            run_limits: Some(RunLimits {
+                cpu_time_ms: 1,
+                wall_time_ms: 1,
+                memory_kib: 1,
+            }),
+        };
+        assert!(worker.validate_job(&valid).is_ok());
+        let mut language = valid.clone();
+        language.language_id = "unknown".into();
+        let mut limits = valid.clone();
+        limits.run_limits.as_mut().unwrap().memory_kib = 0;
+        let mut payload = valid;
+        payload.cases[0].input = vec![0; 32];
+        for request in [language, limits, payload] {
+            assert_eq!(
+                worker.admit(request).unwrap_err().code(),
+                tonic::Code::InvalidArgument
+            );
+        }
+        assert!(worker.validate_id("").is_err());
+        assert!(worker.shared.jobs.lock().unwrap().records.is_empty());
     }
 }

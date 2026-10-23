@@ -37,7 +37,7 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::support::{
-    BackendProcess, Fixture, Harness, Mock, Mode, RpcServer, call, network_call, wait_for,
+    BackendProcess, Fixture, Harness, broker::Broker, call, network_call, terminal_reply, wait_for,
 };
 
 /// Controlled request captures and an explicit response gate, with no model credentials.
@@ -50,29 +50,11 @@ struct Responses {
     status: AtomicU16,
     /// Complete model body selected by the test, including representative invalid output.
     output: Mutex<Value>,
-    /// When present, verify ACK completion and local release at the actual model POST.
-    observer: Mutex<Option<(Scheduler, Arc<Mock>)>>,
 }
 
 /// Receive one Responses request, assert its release boundary and wait on the test gate.
 async fn respond(State(state): State<Arc<Responses>>, Json(body): Json<Value>) -> Response {
     let input: Value = serde_json::from_str(body["input"][0]["content"].as_str().unwrap()).unwrap();
-    if let Some((scheduler, worker)) = state.observer.lock().unwrap().as_ref() {
-        let jobs = worker.submitted.lock().unwrap();
-        let id = jobs
-            .iter()
-            .find(|(_, task)| task.source == input["source"].as_str().unwrap().as_bytes())
-            .map(|(id, _)| id)
-            .unwrap();
-        assert!(
-            !scheduler.contains(id),
-            "Model POST preceded Scheduler release"
-        );
-        assert!(
-            worker.acks.load(Ordering::SeqCst) > 0,
-            "Model POST preceded ACK"
-        );
-    }
     state.requests.lock().unwrap().push(input);
     let mut release = state.release.subscribe();
     if !*release.borrow_and_update() {
@@ -115,7 +97,6 @@ impl Endpoint {
             release,
             status: AtomicU16::new(200),
             output: Mutex::new(json!({"decision":"PASS", "summary":"未发现疑点", "findings":[]})),
-            observer: Mutex::new(None),
         });
         let app = Router::new()
             .route("/responses", post(respond))
@@ -149,7 +130,6 @@ impl Endpoint {
     async fn fixture(&self, mode: &str) -> Fixture {
         let mut fixture = Fixture::new().await;
         fixture.config.llm_review = self.config.clone();
-        fixture.config.scheduler.poll_interval_ms = 10;
         let mut connection = fixture.connection().await;
         sqlx::query(
             "UPDATE problem_versions SET review_mode = ? WHERE problem_id = 1 AND version_no = 1",
@@ -222,7 +202,7 @@ fn doubtful_output() -> Value {
 async fn manual_http_admission_pending_merge_and_queue_full() {
     let endpoint = Endpoint::start(true).await;
     *endpoint.state.output.lock().unwrap() = doubtful_output();
-    let harness = Harness::start_fixture(endpoint.fixture("DISABLED").await, &[Mode::Finish]).await;
+    let harness = Harness::start_fixture(endpoint.fixture("DISABLED").await, 1).await;
     let ce = harness.submit("c", "ce").await;
     let original = harness.terminal(&ce).await;
     let (_, _, initial) = call(
@@ -324,7 +304,7 @@ async fn concurrent_first_manual_requests_share_one_attempt() {
     let endpoint = Endpoint::start(true).await;
     let mut fixture = endpoint.fixture("DISABLED").await;
     fixture.config.llm_review.pending_max_count = 8;
-    let harness = Harness::start_fixture(fixture, &[Mode::Finish]).await;
+    let harness = Harness::start_fixture(fixture, 1).await;
     let id = harness.submit("python", "ac").await;
     harness.terminal(&id).await;
     assert!(harness.fixture.config.database.max_connections >= 2);
@@ -369,7 +349,7 @@ async fn concurrent_first_manual_requests_share_one_attempt() {
 #[tokio::test]
 async fn manual_http_rejections_preserve_records() {
     let endpoint = Endpoint::start(false).await;
-    let harness = Harness::start_fixture(endpoint.fixture("DISABLED").await, &[Mode::Finish]).await;
+    let harness = Harness::start_fixture(endpoint.fixture("DISABLED").await, 1).await;
     let id = harness.fixture.queued("python").await;
     for state in ["queued", "dispatching", "running", "failed"] {
         match state {
@@ -437,7 +417,7 @@ async fn manual_http_rejections_preserve_records() {
     assert_eq!(body["error"]["code"], "BackendStopping");
     assert_eq!(endpoint.count(), 0);
     harness.close().await;
-    let harness = Harness::start(&[Mode::Finish], 1).await;
+    let harness = Harness::start(1, 1).await;
     let id = harness.submit("python", "ac").await;
     let before = harness.terminal(&id).await;
     let (status, body) = manual(&harness.app, &id, None).await;
@@ -461,7 +441,7 @@ async fn manual_http_rejections_preserve_records() {
 #[tokio::test]
 async fn manual_rerun_expected_identity_and_preservation() {
     let endpoint = Endpoint::start(false).await;
-    let harness = Harness::start_fixture(endpoint.fixture("DISABLED").await, &[Mode::Finish]).await;
+    let harness = Harness::start_fixture(endpoint.fixture("DISABLED").await, 1).await;
     let id = harness.submit("python", "ac").await;
     harness.terminal(&id).await;
     assert_eq!(
@@ -544,7 +524,7 @@ async fn manual_rerun_expected_identity_and_preservation() {
 #[tokio::test]
 async fn manual_rerun_survives_previous_attempt_cleanup() {
     let endpoint = Endpoint::start(true).await;
-    let harness = Harness::start_fixture(endpoint.fixture("DISABLED").await, &[Mode::Finish]).await;
+    let harness = Harness::start_fixture(endpoint.fixture("DISABLED").await, 1).await;
     let id = harness.submit("python", "ac").await;
     harness.terminal(&id).await;
     let (_, first) = manual(&harness.app, &id, None).await;
@@ -600,7 +580,7 @@ async fn manual_rerun_survives_previous_attempt_cleanup() {
 /// GET exposes only public review fields and combines review filters with the existing query.
 #[tokio::test]
 async fn review_query_projection_and_history_filters() {
-    let harness = Harness::start(&[Mode::Finish], 8).await;
+    let harness = Harness::start(1, 8).await;
     for status in [
         ReviewStatus::Disabled,
         ReviewStatus::Pending,
@@ -721,7 +701,6 @@ async fn review_query_projection_and_history_filters() {
         .0,
         StatusCode::BAD_REQUEST
     );
-    assert_eq!(harness.servers[0].mock.submits.load(Ordering::SeqCst), 5);
     harness.close().await;
 }
 
@@ -731,7 +710,7 @@ async fn disconnected_manual_http_finishes_admission() {
     use std::{future::Future, task::Poll};
 
     let endpoint = Endpoint::start(false).await;
-    let harness = Harness::start_fixture(endpoint.fixture("DISABLED").await, &[Mode::Finish]).await;
+    let harness = Harness::start_fixture(endpoint.fixture("DISABLED").await, 1).await;
     let id = harness.submit("python", "ac").await;
     harness.terminal(&id).await;
     let mut connection = harness.fixture.connection().await;
@@ -762,6 +741,7 @@ async fn disconnected_manual_http_finishes_admission() {
 
 /// Process shutdown waits for a registered manual write and interruption after its client leaves.
 #[tokio::test]
+#[ignore = "requires isolated MySQL and ACORN_TEST_KAFKA_SERVERS"]
 async fn process_shutdown_drains_registered_manual_admission() {
     let endpoint = Endpoint::start(false).await;
     let mut fixture = endpoint.fixture("DISABLED").await;
@@ -781,8 +761,7 @@ async fn process_shutdown_drains_registered_manual_admission() {
         .save_terminal(&id, &terminal, None)
         .await
         .unwrap();
-    let server = RpcServer::start(Mode::Finish, fixture.database.clone()).await;
-    fixture.config.scheduler.workers = vec![server.address.clone()];
+    let broker = Broker::start(&mut fixture).await;
     let mut backend = BackendProcess::spawn(&fixture);
     let address = backend.listening().await;
     let mut connection = fixture.connection().await;
@@ -842,7 +821,7 @@ async fn process_shutdown_drains_registered_manual_admission() {
     assert_eq!(interrupted.info.state, SubmissionState::Finished);
     assert_eq!(endpoint.count(), 0);
     connection.close().await.unwrap();
-    server.close().await;
+    broker.close().await;
     fixture.close().await;
     endpoint.close().await;
 }
@@ -853,9 +832,7 @@ async fn automatic_fifo_capacity_and_worker_release() {
     let endpoint = Endpoint::start(true).await;
     let mut fixture = endpoint.fixture("ENABLE-ANY").await;
     fixture.config.scheduler.pending_max_count = 1;
-    let harness = Harness::start_fixture(fixture, &[Mode::Finish]).await;
-    *endpoint.state.observer.lock().unwrap() =
-        Some((harness.scheduler.clone(), harness.servers[0].mock.clone()));
+    let harness = Harness::start_fixture(fixture, 1).await;
     let created = harness
         .fixture
         .database
@@ -873,6 +850,7 @@ async fn automatic_fifo_capacity_and_worker_release() {
         .scheduler
         .enqueue(task.clone(), harness.scheduler.reserve().unwrap())
         .unwrap();
+    harness.terminal(&first).await;
     wait_for(|| endpoint.count() == 1).await;
     assert_eq!(
         harness.terminal(&first).await.info.review_status,
@@ -882,7 +860,8 @@ async fn automatic_fifo_capacity_and_worker_release() {
         .scheduler
         .enqueue(task, harness.scheduler.reserve().unwrap())
         .unwrap();
-    wait_for(|| !harness.scheduler.contains(&first)).await;
+    harness.terminal(&first).await;
+    assert!(!harness.scheduler.contains(&first));
     let second = harness.submit("python", "second").await;
     assert_eq!(
         harness.terminal(&second).await.info.review_status,
@@ -895,7 +874,6 @@ async fn automatic_fifo_capacity_and_worker_release() {
         ReviewErrorCode::ReviewQueueFull
     );
     assert_eq!(endpoint.count(), 1);
-    assert_eq!(harness.servers[0].mock.acks.load(Ordering::SeqCst), 3);
     endpoint.state.release.send_replace(true);
     review_state(&harness.fixture.database, &first, ReviewStatus::Pass).await;
     review_state(&harness.fixture.database, &second, ReviewStatus::Pass).await;
@@ -1016,46 +994,41 @@ async fn kafka_commit_errors_preserve_automatic_handoff() {
     endpoint.close().await;
 }
 
-/// A committed PENDING remains intact until ACK finishes, then stop prevents the model handoff.
+/// Stop after terminal persistence and synchronous offset enqueue, before local review handoff.
 #[tokio::test]
-async fn stop_between_terminal_commit_and_ack_completion() {
+async fn stop_between_terminal_commit_and_review_handoff() {
     let endpoint = Endpoint::start(false).await;
-    let mut fixture = endpoint.fixture("ENABLE-ALL").await;
-    fixture.config.grpc.ack_timeout_ms = 60_000;
-    let harness = Harness::start_fixture(fixture, &[Mode::Finish]).await;
-    let worker = &harness.servers[0].mock;
-    worker.ack_released.store(false, Ordering::SeqCst);
-    let id = harness.submit("python", "ac").await;
-    wait_for(|| worker.acks.load(Ordering::SeqCst) == 1).await;
-    let pending = review_state(&harness.fixture.database, &id, ReviewStatus::Pending)
-        .await
-        .review
-        .unwrap();
-    harness.review.stop();
-    assert_eq!(
-        harness
-            .fixture
-            .database
-            .submission(&id)
-            .await
-            .unwrap()
-            .unwrap()
-            .info
-            .review_status,
-        ReviewStatus::Pending
+    let fixture = endpoint.fixture("ENABLE-ALL").await;
+    let scheduler = Scheduler::restore(&fixture.config, Default::default()).unwrap();
+    let (review, task) =
+        ReviewService::start(&fixture.config.llm_review, fixture.database.clone()).unwrap();
+    let id = fixture.queued("python").await;
+    let processor = EventProcessor::new(
+        &fixture.config,
+        scheduler,
+        fixture.database.clone(),
+        review.clone(),
     );
-    assert!(harness.scheduler.contains(&id));
-    worker.ack_released.store(true, Ordering::SeqCst);
-    let interrupted = review_state(&harness.fixture.database, &id, ReviewStatus::Failed).await;
-    let review = interrupted.review.unwrap();
-    assert_eq!(review.id, pending.id);
+    let reply = terminal_reply(&id, b"ac", 104);
+    let encoded =
+        acorn_protocol::records::encode_event(&reply, fixture.config.kafka.max_event_record_bytes)
+            .unwrap();
+    processor
+        .process(encoded.payload(), || {
+            review.stop();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let interrupted = review_state(&fixture.database, &id, ReviewStatus::Failed).await;
+    assert_eq!(interrupted.info.state, SubmissionState::Finished);
     assert_eq!(
-        review.details.error.unwrap().code,
+        interrupted.review.unwrap().details.error.unwrap().code,
         ReviewErrorCode::ReviewInterrupted
     );
-    assert_eq!(interrupted.info.state, SubmissionState::Finished);
     assert_eq!(endpoint.count(), 0);
-    harness.close().await;
+    task.await.unwrap().unwrap();
+    fixture.close().await;
     endpoint.close().await;
 }
 
@@ -1063,10 +1036,8 @@ async fn stop_between_terminal_commit_and_ack_completion() {
 #[tokio::test]
 async fn stale_machine_terminal_releases_review_capacity() {
     let endpoint = Endpoint::start(false).await;
-    let harness =
-        Harness::start_fixture(endpoint.fixture("ENABLE-ANY").await, &[Mode::Running]).await;
-    let id = harness.submit("python", "stale-terminal").await;
-    wait_for(|| harness.servers[0].mock.gets.load(Ordering::SeqCst) > 0).await;
+    let harness = Harness::start_fixture(endpoint.fixture("ENABLE-ANY").await, 1).await;
+    let id = harness.fixture.queued("python").await;
     let terminal = TerminalOutcome::judged(
         &JudgeResult {
             verdict: acorn_protocol::worker::v1::Verdict::Accepted as i32,
@@ -1084,10 +1055,6 @@ async fn stale_machine_terminal_releases_review_capacity() {
             .await
             .unwrap()
     );
-    harness.servers[0]
-        .mock
-        .released
-        .store(true, Ordering::SeqCst);
     assert_eq!(
         harness.terminal(&id).await.info.review_status,
         ReviewStatus::Disabled
@@ -1100,13 +1067,13 @@ async fn stale_machine_terminal_releases_review_capacity() {
     endpoint.close().await;
 }
 
-/// Disabled review and failed ACK are independent of judging persistence and review execution.
+/// Review availability is independent of judging persistence.
 #[tokio::test]
-async fn unavailable_review_and_ack_failure_keep_machine_results() {
+async fn unavailable_review_keeps_machine_results() {
     let endpoint = Endpoint::start(false).await;
     let mut fixture = endpoint.fixture("ENABLE-ANY").await;
     fixture.config.llm_review.enabled = false;
-    let harness = Harness::start_fixture(fixture, &[Mode::Finish]).await;
+    let harness = Harness::start_fixture(fixture, 1).await;
     let id = harness.submit("python", "ac").await;
     let terminal = harness.terminal(&id).await;
     assert_eq!(
@@ -1118,14 +1085,10 @@ async fn unavailable_review_and_ack_failure_keep_machine_results() {
     assert_eq!(endpoint.count(), 0);
     harness.close().await;
 
-    let harness =
-        Harness::start_fixture(endpoint.fixture("ENABLE-ALL").await, &[Mode::AckFailure]).await;
-    *endpoint.state.observer.lock().unwrap() =
-        Some((harness.scheduler.clone(), harness.servers[0].mock.clone()));
+    let harness = Harness::start_fixture(endpoint.fixture("ENABLE-ALL").await, 1).await;
     let id = harness.submit("python", "ac").await;
     let terminal = review_state(&harness.fixture.database, &id, ReviewStatus::Pass).await;
     assert_eq!(terminal.info.state, SubmissionState::Finished);
-    assert_eq!(harness.servers[0].mock.acks.load(Ordering::SeqCst), 1);
     assert_eq!(endpoint.count(), 1);
     harness.close().await;
     endpoint.close().await;
@@ -1133,6 +1096,7 @@ async fn unavailable_review_and_ack_failure_keep_machine_results() {
 
 /// Startup interrupts old reviews and uses the queued submission's original version policy.
 #[tokio::test]
+#[ignore = "requires isolated MySQL and ACORN_TEST_KAFKA_SERVERS"]
 async fn process_review_startup_interrupts_without_reposting() {
     let endpoint = Endpoint::start(false).await;
     let mut fixture = endpoint.fixture("ENABLE-ALL").await;
@@ -1167,8 +1131,7 @@ async fn process_review_startup_interrupts_without_reposting() {
         .unwrap();
     let queued = fixture.queued("python").await;
     fixture.publish_next().await;
-    let server = RpcServer::start(Mode::Finish, fixture.database.clone()).await;
-    fixture.config.scheduler.workers = vec![server.address.clone()];
+    let broker = Broker::start(&mut fixture).await;
     let mut backend = BackendProcess::spawn(&fixture);
     backend.listening().await;
     let old_review = review_state(&fixture.database, &old, ReviewStatus::Failed)
@@ -1184,6 +1147,7 @@ async fn process_review_startup_interrupts_without_reposting() {
         old_review.details.error.unwrap().code,
         ReviewErrorCode::ReviewInterrupted
     );
+    broker.event(&terminal_reply(&queued, b"ac", 104)).await;
     review_state(&fixture.database, &queued, ReviewStatus::Pass).await;
     assert_eq!(endpoint.count(), 1);
     backend.terminate();
@@ -1193,95 +1157,99 @@ async fn process_review_startup_interrupts_without_reposting() {
     restarted.terminate();
     assert!(restarted.finish().await.0.success());
     assert_eq!(endpoint.count(), 1);
-    server.close().await;
+    broker.close().await;
     fixture.close().await;
     endpoint.close().await;
 }
 
-/// Normal process shutdown interrupts queued and running requests without waiting the HTTP budget.
+/// Shutdown cancels reviews and finishes an event whose terminal write has already begun.
 #[tokio::test]
+#[ignore = "requires isolated MySQL and ACORN_TEST_KAFKA_SERVERS"]
 async fn process_review_shutdown_cancels_and_marks_new_terminals() {
     let endpoint = Endpoint::start(true).await;
     let mut fixture = endpoint.fixture("ENABLE-ANY").await;
-    let server = RpcServer::start(Mode::Running, fixture.database.clone()).await;
-    fixture.config.scheduler.workers = vec![server.address.clone()];
-    server.mock.released.store(true, Ordering::SeqCst);
+    fixture.config.llm_review.pending_max_count = 2;
+    let broker = Broker::start(&mut fixture).await;
     let mut backend = BackendProcess::spawn(&fixture);
     let address = backend.listening().await;
     let mut ids = Vec::new();
     for source in ["running-review", "queued-review", "late-machine-terminal"] {
-        if ids.len() == 2 {
-            server.mock.released.store(false, Ordering::SeqCst);
-        }
         let (status, body) = network_call(
             address,
             "POST",
             "/api/v1/submissions",
-            Some(json!({
-                "problem_id":1, "language_id":"python", "source":source
-            })),
+            Some(json!({"problem_id":1,"language_id":"python","source":source})),
             Some(Uuid::new_v4()),
         )
         .await;
         assert_eq!(status, 202);
         let id = body["submission_id"].as_str().unwrap().to_owned();
         if ids.len() < 2 {
+            broker.event(&terminal_reply(&id, b"ac", 104)).await;
             review_state(&fixture.database, &id, ReviewStatus::Pending).await;
-            wait_for(|| server.mock.acks.load(Ordering::SeqCst) == ids.len() + 1).await;
             if ids.is_empty() {
                 wait_for(|| endpoint.count() == 1).await;
             }
         }
         ids.push(id);
     }
-    wait_for(|| server.mock.submits.load(Ordering::SeqCst) == 3).await;
+    // Publication must finish before locking the terminal row; otherwise its
+    // dispatching update could be mistaken for the event write being tested.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while fixture.database.submission_state(&ids[2]).await.unwrap()
+            != Some(SubmissionState::Dispatching)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut connection = fixture.connection().await;
+    let mut gate = connection.begin().await.unwrap();
+    sqlx::query("SELECT id FROM submissions WHERE id = ? FOR UPDATE")
+        .bind(&ids[2])
+        .execute(&mut *gate)
+        .await
+        .unwrap();
+    broker.event(&terminal_reply(&ids[2], b"ac", 104)).await;
+    fixture
+        .wait_for_queries(&mut gate, "UPDATE submissions SET state = ", 1)
+        .await;
     backend.terminate();
     backend
         .until_log("Backend stopping admission and dispatch")
         .await;
-    for id in &ids[..2] {
-        let review = review_state(&fixture.database, id, ReviewStatus::Failed)
-            .await
-            .review
-            .unwrap();
-        assert_eq!(
-            review.details.error.unwrap().code,
-            ReviewErrorCode::ReviewInterrupted
-        );
-    }
     assert_eq!(
         network_call(address, "GET", "/api/v1/health", None, None)
             .await
             .0,
         200
     );
-    server.mock.released.store(true, Ordering::SeqCst);
+    gate.commit().await.unwrap();
     let (status, logs) = backend.finish().await;
     assert!(status.success(), "{logs}");
-    assert!(logs.find("Review service stopped").unwrap() < logs.find("Backend stopped").unwrap());
     for id in &ids {
         let terminal = review_state(&fixture.database, id, ReviewStatus::Failed).await;
         assert_eq!(terminal.info.state, SubmissionState::Finished);
-        assert!(terminal.terminal_details.is_none());
         assert_eq!(
             terminal.review.unwrap().details.error.unwrap().code,
             ReviewErrorCode::ReviewInterrupted
         );
     }
-    assert_eq!(server.mock.acks.load(Ordering::SeqCst), 3);
     assert_eq!(endpoint.count(), 1);
-    server.close().await;
+    connection.close().await.unwrap();
+    broker.close().await;
     fixture.close().await;
     endpoint.close().await;
 }
 
 /// Ordinary API failures end one attempt; a critical completion write triggers process failure.
 #[tokio::test]
+#[ignore = "requires isolated MySQL and ACORN_TEST_KAFKA_SERVERS"]
 async fn review_api_failure_and_critical_completion_failure() {
     let endpoint = Endpoint::start(false).await;
     endpoint.state.status.store(503, Ordering::SeqCst);
-    let harness =
-        Harness::start_fixture(endpoint.fixture("ENABLE-ALL").await, &[Mode::Finish]).await;
+    let harness = Harness::start_fixture(endpoint.fixture("ENABLE-ALL").await, 1).await;
     let id = harness.submit("python", "api-failure").await;
     let failed = review_state(&harness.fixture.database, &id, ReviewStatus::Failed).await;
     assert_eq!(
@@ -1296,8 +1264,7 @@ async fn review_api_failure_and_critical_completion_failure() {
 
     endpoint.state.release.send_replace(false);
     let mut fixture = endpoint.fixture("ENABLE-ALL").await;
-    let server = RpcServer::start(Mode::Finish, fixture.database.clone()).await;
-    fixture.config.scheduler.workers = vec![server.address.clone()];
+    let broker = Broker::start(&mut fixture).await;
     let mut backend = BackendProcess::spawn(&fixture);
     let address = backend.listening().await;
     let (status, body) = network_call(
@@ -1312,6 +1279,7 @@ async fn review_api_failure_and_critical_completion_failure() {
     .await;
     assert_eq!(status, 202);
     let id = body["submission_id"].as_str().unwrap();
+    broker.event(&terminal_reply(id, b"ac", 104)).await;
     wait_for(|| endpoint.count() == 3).await;
     let mut connection = fixture.connection().await;
     sqlx::raw_sql("CREATE TRIGGER fail_review_completion BEFORE UPDATE ON submissions FOR EACH ROW BEGIN IF OLD.review_status = 'PENDING' THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Controlled review completion failure'; END IF; END")
@@ -1323,10 +1291,9 @@ async fn review_api_failure_and_critical_completion_failure() {
     let stored = fixture.database.submission(id).await.unwrap().unwrap();
     assert_eq!(stored.info.state, SubmissionState::Finished);
     assert_eq!(stored.info.review_status, ReviewStatus::Pending);
-    assert_eq!(server.mock.acks.load(Ordering::SeqCst), 1);
     assert_eq!(endpoint.count(), 3);
     connection.close().await.unwrap();
-    server.close().await;
+    broker.close().await;
     fixture.close().await;
     endpoint.close().await;
 }

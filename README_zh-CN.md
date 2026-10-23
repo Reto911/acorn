@@ -15,34 +15,35 @@ Acorn 是支持 C 和 Python 3 的单文件源码判题系统，提供浏览器�
 
 ## 项目结构
 
-后端通过 HTTP JSON 服务浏览器，通过 gRPC 向 Worker 分派任务；Worker 在 Isolate 中执行代码，后端将提交及结果保存到 MySQL。LLM 审查由后端的独立队列执行。
+后端通过 HTTP JSON 服务浏览器，通过 Kafka 发布任务并消费 Worker 事件，gRPC 仅提供 Worker 状态观测；Worker 在 Isolate 中执行代码，后端将提交及结果保存到 MySQL。LLM 审查由后端的独立队列执行。
 
-| 目录                                         | 内容                                                 |
-| -------------------------------------------- | ---------------------------------------------------- |
-| [crates/backend](crates/backend/README.md)   | Rust 后端、HTTP API、Scheduler、健康采集和 LLM 审查  |
-| [crates/worker](crates/worker/README.md)     | C/Python 判题执行器、Isolate 封装和 gRPC 服务        |
-| [crates/protocol](crates/protocol/README.md) | Protobuf 消息及生成的 gRPC 客户端、服务端            |
-| [crates/kafka](crates/kafka/README.md)       | Kafka 配置默认值、通用校验和共享客户端策略           |
-| [web](web/README.md)                         | Vue 3、TypeScript、Element Plus 和 Monaco 浏览器界面 |
-| [sql](sql/README.md)                         | MySQL 建表脚本及内置两数求和题                       |
-| [config](config)                             | 后端和 Worker 的 TOML 配置示例                       |
-| [examples](examples)                         | 开发用户预置 SQL 和提交源码样例                      |
-| [docs](docs/README.md)                       | 架构设计、接口合同和开发记录                         |
+| 目录                                         | 内容                                                    |
+| -------------------------------------------- | ------------------------------------------------------- |
+| [crates/backend](crates/backend/README.md)   | Rust 后端、HTTP API、Scheduler、健康采集和 LLM 审查     |
+| [crates/worker](crates/worker/README.md)     | C/Python 判题执行器、Isolate 封装、Kafka 消费和状态 RPC |
+| [crates/protocol](crates/protocol/README.md) | Protobuf 消息及生成的 gRPC 客户端、服务端               |
+| [crates/kafka](crates/kafka/README.md)       | Kafka 配置默认值、通用校验和共享客户端策略              |
+| [web](web/README.md)                         | Vue 3、TypeScript、Element Plus 和 Monaco 浏览器界面    |
+| [sql](sql/README.md)                         | MySQL 建表脚本及内置两数求和题                          |
+| [config](config)                             | 后端和 Worker 的 TOML 配置示例                          |
+| [examples](examples)                         | 开发用户预置 SQL 和提交源码样例                         |
+| [docs](docs/README.md)                       | 架构设计、接口合同和开发记录                            |
 
 ## 安装
 
 ### 运行环境
 
-| 依赖                                          | 用途                                  |
-| --------------------------------------------- | ------------------------------------- |
-| Linux、Isolate、控制组和文件系统用户配额      | 隔离执行及资源限制                    |
-| GCC、Python 3                                 | C 编译和 Python 执行                  |
-| Rust/Cargo 1.94.0 或更新版本                  | 构建 Rust 2024 edition 工程及锁定依赖 |
-| 支持 proto3 optional 的 `protoc`              | 构建共享 gRPC 协议                    |
-| librdkafka 开发包（至少 2.12.1）和 pkg-config | 默认动态构建；运行环境提供对应共享库  |
-| MySQL 8.4／InnoDB 及 MySQL 命令行客户端       | 初始化和管理数据库                    |
-| Node.js 24.x，至少 24.21.0；pnpm 12.11.2      | 安装、构建和运行前端                  |
-| curl                                          | 从命令行调用 HTTP API                 |
+| 依赖                                          | 用途                                   |
+| --------------------------------------------- | -------------------------------------- |
+| Linux、Isolate、控制组和文件系统用户配额      | 隔离执行及资源限制                     |
+| GCC、Python 3                                 | C 编译和 Python 执行                   |
+| Rust/Cargo 1.94.0 或更新版本                  | 构建 Rust 2024 edition 工程及锁定依赖  |
+| 支持 proto3 optional 的 `protoc`              | 构建共享 gRPC 协议                     |
+| librdkafka 开发包（至少 2.12.1）和 pkg-config | 默认动态构建；运行环境提供对应共享库   |
+| MySQL 8.4／InnoDB 及 MySQL 命令行客户端       | 初始化和管理数据库                     |
+| Node.js 24.x，至少 24.21.0；pnpm 12.11.2      | 安装、构建和运行前端                   |
+| 后端与 Worker 均可访问的 Kafka broker         | 任务及事件 topic、已初始化的消费组位点 |
+| curl                                          | 从命令行调用 HTTP API                  |
 
 先由管理员按 [Worker 安装说明](crates/worker/README.md#安装与沙箱准备)准备 Isolate、控制组、用户配额和执行权限。Worker 使用的 GCC、Python 和 Isolate 路径在 TOML 中指定。
 
@@ -101,6 +102,10 @@ mysql --host=127.0.0.1 --port=3306 --user=example_initializer --password --ssl-m
 这会创建结构版本 4、用户 1 和题号 1 的两数求和题，包含 C/Python 限额与 104 个测试用例。后续启动直接复用该数据库。初始化针对空库，遇到首个 SQL 错误即停止；后端启动检查结构版本和配置用户。初始化脚本使用 MySQL 方言，应用不导入旧库或自动升级。
 
 脚本内容、账户职责和初始化中途失败的处理见[SQL 说明](sql/README.md)。
+
+### 准备 Kafka
+
+配置可互通的 broker，按[部署合同](docs/10-kafka-judging-design.md#10-整体部署)创建任务及事件 topic 并初始化两个消费组位点。两份 TOML 的 topic 保持一致，后端事件组和 Worker 任务组分开；所有 Worker 共用任务组。服务禁止自动建 topic 和自动重置位点。
 
 ### 启动服务
 
@@ -177,15 +182,16 @@ curl --fail-with-body "http://127.0.0.1:8080/api/v1/submissions/$ACORN_SUBMISSIO
 
 后端与 Worker 的配置均要求 `[kafka]`，包含端点、两个 topic 和标识各自消费组的 `group_id`；预算可使用默认值。后端另有独立的 `[worker_membership]` 采集配置。字段、客户端选项与消息编解码接口见[后端说明](crates/backend/README.md#kafka-客户端配置)、[Worker 说明](crates/worker/README.md#kafka-客户端配置)和[协议说明](crates/protocol/README.md#kafka-消息编解码)。 已使用早先 Kafka 配置的，将后端 `[kafka].events_group_id` 或 Worker `[kafka].tasks_group_id` 改名为 `group_id`，保留原值。使用已有配置时，将示例中的 `[kafka]` 节合并到实际 `--config` 指定的文件，保留数据库及审查等已有配置；`[worker_membership]` 可省略并使用默认值。
 
+已有部署文件须删除 `scheduler.poll_interval_ms`、`grpc.submit_timeout_ms/get_timeout_ms/ack_timeout_ms`、Worker 的 `results.acknowledged_queue_length` 和 Kafka 的 `commit_timeout_ms`。
+
 ### 多 Worker
 
-为每个 Worker 分别配置监听地址和本机独占的 `sandbox.box_id`，再将地址加入后端：
+为每个 Worker 分别配置监听地址和本机独占的 `sandbox.box_id`，所有 Worker 共用 Kafka 任务组，再将状态地址加入后端：
 
 ```toml
 [scheduler]
 pending_max_count = 128
 workers = ["http://127.0.0.1:50051", "http://127.0.0.1:50052"]
-poll_interval_ms = 100
 retry_interval_ms = 1_000
 ```
 
@@ -203,7 +209,7 @@ retry_interval_ms = 1_000
 
 两个 Rust 服务将英文日志输出到 stderr，`logging.level` 控制级别。可以通过提交 ID 关联后端分派、结果保存和 Worker 执行日志。
 
-停止时先向后端发送 Ctrl-C 或 SIGTERM，等待在途判题保存与 ACK 完成后，再停止 Worker。后端重启会装入尚未分派的提交，将旧在途判题和审查标记为中断；已保存的终态继续可查。
+停止时先向后端发送 Ctrl-C 或 SIGTERM，后端在消息预算内收尾已登记的本地操作和当前消息，不等待远程判题；Worker 按沙箱及消息预算停止。后端重启只重交 queued，恢复 dispatching/running 等待，旧 PENDING 审查标记中断。消费者在阻塞线程通过 RAII 析构，应用等待超时后底层析构仍可能继续；已保存的终态继续可查。
 
 前端部署时构建 `web/dist/`，由静态服务器提供页面并将同源 `/api/` 代理到后端。远程浏览器使用 HTTPS，以支持创建提交所需的 `crypto.randomUUID()`。部署示例见[前端说明](web/README.md#构建与静态部署)。
 

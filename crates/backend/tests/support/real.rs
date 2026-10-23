@@ -1,4 +1,4 @@
-//! Shared real HTTP, gRPC and Isolate assembly for final acceptance.
+//! Shared HTTP, Kafka, status RPC and Isolate assembly for acceptance.
 
 use std::{net::SocketAddr, time::Duration};
 
@@ -6,14 +6,14 @@ use acorn_backend::{
     health::Health, http, llm_review::ReviewService, scheduler::Scheduler,
     submissions::CreationService,
 };
-use acorn_protocol::worker::v1::judge_worker_client::JudgeWorkerClient;
 use acorn_worker::{config::Config as WorkerConfig, rpc::WorkerService};
 use serde_json::{Value, json};
-use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
-use tonic::{
-    codegen::tokio_stream::wrappers::TcpListenerStream,
-    transport::{Channel, Server},
+use tokio::{
+    net::TcpListener,
+    sync::{oneshot, watch},
+    task::JoinHandle,
 };
+use tonic::{codegen::tokio_stream::wrappers::TcpListenerStream, transport::Server};
 use uuid::Uuid;
 
 use super::{Fixture, network_call};
@@ -30,8 +30,10 @@ pub fn box_id(variable: &str) -> u32 {
 pub struct RealWorker {
     /// Endpoint used by both the Scheduler and direct protocol observations.
     pub address: String,
-    /// Service handle for common shutdown and execution cleanup.
-    service: WorkerService,
+    /// Stop signal for the Kafka service that owns execution cleanup.
+    kafka_stop: watch::Sender<bool>,
+    /// Observe execution and message cleanup before stopping status transport.
+    kafka_task: JoinHandle<anyhow::Result<()>>,
     /// Stop serving after execution cleanup.
     stop: oneshot::Sender<()>,
     /// Observe transport errors during teardown.
@@ -39,14 +41,21 @@ pub struct RealWorker {
 }
 
 impl RealWorker {
-    /// Bind a real transport and keep result buffers small enough to expose missing ACKs.
-    async fn start(box_id: u32) -> Self {
+    /// Bind status transport and keep the Kafka result queue bounded to one terminal.
+    async fn start(box_id: u32, broker: &super::broker::Broker) -> Self {
         let mut config =
             WorkerConfig::parse(include_str!("../../../../config/worker.example.toml")).unwrap();
         config.sandbox.box_id = box_id;
         config.results.max_unacknowledged_results = 1;
-        config.results.acknowledged_queue_length = 1;
+        config.kafka = broker.config.clone();
+        config.kafka.group_id = broker.task_group.clone();
+        let producer = acorn_worker::kafka::producer_config(&config.kafka)
+            .create()
+            .unwrap();
         let service = WorkerService::new(config);
+        let kafka = acorn_worker::kafka::KafkaWorker::new(service.clone(), producer).unwrap();
+        let (kafka_stop, stopping) = watch::channel(false);
+        let kafka_task = tokio::spawn(kafka.run(stopping));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = format!("http://{}", listener.local_addr().unwrap());
         let (stop, stopped) = oneshot::channel();
@@ -59,22 +68,17 @@ impl RealWorker {
         );
         Self {
             address,
-            service,
+            kafka_stop,
+            kafka_task,
             stop,
             task,
         }
     }
 
-    /// Query the same public protocol as an external Scheduler.
-    pub async fn client(&self) -> JudgeWorkerClient<Channel> {
-        JudgeWorkerClient::connect(self.address.clone())
-            .await
-            .unwrap()
-    }
-
     /// Finish execution before stopping the actual transport.
     async fn close(self) {
-        self.service.shutdown().await.unwrap();
+        self.kafka_stop.send_replace(true);
+        self.kafka_task.await.unwrap().unwrap();
         self.stop.send(()).unwrap();
         self.task.await.unwrap().unwrap();
     }
@@ -84,10 +88,12 @@ impl RealWorker {
 pub struct RealHarness {
     /// Database initialized through the formal SQL scripts.
     pub fixture: Fixture,
-    /// Scheduler state used to wait until persistence and the bounded ACK have completed.
+    /// Scheduler state used to wait until persistence and the bounded event handoff have completed.
     pub scheduler: Scheduler,
     /// Independent Workers, each owning its explicitly selected Isolate box.
-    pub workers: Vec<RealWorker>,
+    workers: Vec<RealWorker>,
+    /// Owned topic pair and initial offsets for both services.
+    broker: super::broker::Broker,
     /// Actual HTTP listener address.
     address: SocketAddr,
     /// Creation operations owned independently of HTTP connections.
@@ -112,10 +118,10 @@ impl RealHarness {
     /// Assemble production services, keeping periodic retry outside the acceptance wait.
     pub async fn start(box_ids: &[u32]) -> Self {
         let mut fixture = Fixture::new().await;
-        fixture.config.scheduler.retry_interval_ms = 60_000;
+        let broker = super::broker::Broker::start(&mut fixture).await;
         let mut workers = Vec::new();
         for &box_id in box_ids {
-            workers.push(RealWorker::start(box_id).await);
+            workers.push(RealWorker::start(box_id, &broker).await);
         }
         fixture.config.scheduler.workers = workers.iter().map(|w| w.address.clone()).collect();
         let (review, review_task) =
@@ -123,7 +129,7 @@ impl RealHarness {
         let (scheduler, scheduler_task) = Scheduler::start(
             &fixture.config,
             fixture.database.clone(),
-            Vec::new(),
+            Default::default(),
             review.clone(),
         )
         .unwrap();
@@ -153,6 +159,7 @@ impl RealHarness {
             fixture,
             scheduler,
             workers,
+            broker,
             address,
             creation,
             scheduler_task,
@@ -179,7 +186,7 @@ impl RealHarness {
         body["submission_id"].as_str().unwrap().to_owned()
     }
 
-    /// Check the HTTP-persisted verdict after the Scheduler finishes its single ACK attempt.
+    /// Check the HTTP-persisted verdict after the Scheduler finishes its single event handoff attempt.
     pub async fn terminal(&self, id: &str, verdict: &str) -> Value {
         let body = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
@@ -212,7 +219,7 @@ impl RealHarness {
         body
     }
 
-    /// Drain creation, persistence and ACK before stopping transports and the database.
+    /// Drain creation, persistence and event handoff before stopping transports and the database.
     pub async fn close(self) {
         self.creation.stop();
         self.scheduler.pause();
@@ -228,6 +235,7 @@ impl RealHarness {
         for worker in self.workers {
             worker.close().await;
         }
+        self.broker.close().await;
         self.fixture.close().await;
     }
 }

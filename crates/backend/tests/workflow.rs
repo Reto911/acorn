@@ -3,7 +3,11 @@
 mod cases;
 mod support;
 
-use std::{sync::atomic::Ordering, time::Duration};
+/// Shared controlled Isolate manager; trusted fixture execution is not isolation evidence.
+#[path = "../../worker/tests/support/mod.rs"]
+pub mod worker_fixture;
+
+use std::sync::atomic::Ordering;
 
 use acorn_backend::{
     config::HealthConfig,
@@ -13,10 +17,7 @@ use acorn_backend::{
     llm_review::ReviewService,
     scheduler::AdmissionError,
     scheduler::{Scheduler, SchedulerState},
-    submissions::{
-        CreateSubmission, CreationService, SubmissionState, TerminalDetails, TerminalOutcome,
-        Verdict,
-    },
+    submissions::{CreateSubmission, CreationService, SubmissionState, TerminalOutcome, Verdict},
 };
 use acorn_protocol::worker::v1::{
     GetWorkerStatusReply, JudgeResult, Verdict as RpcVerdict, WorkerExecutionState,
@@ -27,9 +28,7 @@ use axum::{
 };
 use serde_json::{Value, json};
 use sqlx::Connection;
-use support::{
-    BackendProcess, Fixture, Harness, Mode, RpcServer, call, create, network_call, wait_for,
-};
+use support::{BackendProcess, Fixture, Harness, RpcServer, call, create, network_call, wait_for};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -45,8 +44,7 @@ async fn health_response(app: &axum::Router) -> Value {
 /// Basic public query shapes exclude private tests and support retained old versions.
 #[tokio::test]
 async fn published_queries_and_history_shapes() {
-    let harness = Harness::start(&[Mode::Finish], 8).await;
-    assert!(harness.fixture.directory.path().exists());
+    let harness = Harness::start(1, 8).await;
     let (status, _, list) = call(&harness.app, "GET", "/api/v1/problems", None, None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(list["limit"], 20);
@@ -89,10 +87,10 @@ async fn published_queries_and_history_shapes() {
     harness.close().await;
 }
 
-/// All major terminal HTTP forms preserve binary data, real zero and missing statistics.
+/// Terminal event HTTP forms preserve binary data, real zero and missing statistics.
 #[tokio::test]
-async fn terminal_details_and_single_ack() {
-    let harness = Harness::start(&[Mode::AckFailure], 8).await;
+async fn terminal_event_details() {
+    let harness = Harness::start(1, 8).await;
     for (source, verdict) in [("ac", "AC"), ("ce", "CE"), ("wa", "WA")] {
         let id = create(&harness.app, "c", source).await;
         harness.terminal(&id).await;
@@ -124,134 +122,13 @@ async fn terminal_details_and_single_ack() {
             }
         }
     }
-    assert_eq!(harness.servers[0].mock.acks.load(Ordering::SeqCst), 3);
     harness.close().await;
-}
-
-/// Refusal retains the task's one permit and immediately selects another endpoint.
-#[tokio::test]
-async fn busy_immediately_redispatches_and_merges_handoffs() {
-    let harness = Harness::start(&[Mode::Busy, Mode::Finish], 1).await;
-    let created = harness
-        .fixture
-        .database
-        .create_submission(CreateSubmission {
-            problem_id: 1,
-            language_id: "python".into(),
-            source: b"ac".to_vec(),
-            request_key: Uuid::new_v4(),
-        })
-        .await
-        .unwrap();
-    let task = created.task.unwrap();
-    let id = task.request.job_id.clone();
-    let permit = harness.scheduler.reserve().unwrap();
-    assert!(harness.scheduler.enqueue(task.clone(), permit).unwrap());
-    assert!(matches!(
-        harness.scheduler.reserve(),
-        Err(AdmissionError::QueueFull)
-    ));
-    let terminal = harness.terminal(&id).await;
-    assert_eq!(terminal.info.verdict, Some(Verdict::AC));
-    assert_eq!(harness.servers[0].mock.submits.load(Ordering::SeqCst), 1);
-    assert_eq!(harness.servers[1].mock.submits.load(Ordering::SeqCst), 1);
-    let permit = harness.scheduler.reserve().unwrap();
-    harness.scheduler.enqueue(task, permit).unwrap();
-    wait_for(|| !harness.scheduler.contains(&id)).await;
-    assert_eq!(harness.servers[1].mock.submits.load(Ordering::SeqCst), 1);
-    harness.close().await;
-}
-
-/// Two occupied endpoints continue polling independently and release admission capacity.
-#[tokio::test]
-async fn two_workers_track_different_submissions_concurrently() {
-    let harness = Harness::start(&[Mode::Running, Mode::Running], 2).await;
-    let first = harness.submit("c", "ac").await;
-    let second = harness.submit("python", "ac").await;
-    wait_for(|| {
-        harness
-            .servers
-            .iter()
-            .all(|server| server.mock.gets.load(Ordering::SeqCst) > 0)
-    })
-    .await;
-    for id in [&first, &second] {
-        assert_eq!(
-            harness
-                .fixture
-                .database
-                .submission(id)
-                .await
-                .unwrap()
-                .unwrap()
-                .info
-                .state,
-            SubmissionState::Running
-        );
-    }
-    let permit = harness.scheduler.reserve().unwrap();
-    drop(permit);
-    for server in &harness.servers {
-        server.mock.released.store(true, Ordering::SeqCst);
-    }
-    harness.terminal(&first).await;
-    harness.terminal(&second).await;
-    assert_eq!(
-        harness
-            .servers
-            .iter()
-            .map(|server| server.mock.submits.load(Ordering::SeqCst))
-            .sum::<usize>(),
-        2
-    );
-    harness.close().await;
-}
-
-/// Admission ambiguity queries once; a known record continues without a second submit.
-#[tokio::test]
-async fn ambiguous_submit_queries_once_and_never_resubmits() {
-    for mode in [
-        Mode::AmbiguousFound,
-        Mode::AmbiguousMissing,
-        Mode::PollMissing,
-        Mode::Malformed,
-        Mode::Invalid,
-    ] {
-        let harness = Harness::start(&[mode, Mode::Finish], 4).await;
-        let id = harness.submit("python", "ac").await;
-        let terminal = harness.terminal(&id).await;
-        let mock = &harness.servers[0].mock;
-        assert_eq!(mock.submits.load(Ordering::SeqCst), 1);
-        assert_eq!(harness.servers[1].mock.submits.load(Ordering::SeqCst), 0);
-        assert_eq!(
-            mock.gets.load(Ordering::SeqCst),
-            usize::from(mode != Mode::Invalid)
-        );
-        if mode == Mode::AmbiguousFound {
-            assert_eq!(terminal.info.verdict, Some(Verdict::AC));
-            assert_eq!(mock.acks.load(Ordering::SeqCst), 1);
-        } else {
-            assert_eq!(terminal.info.state, SubmissionState::Failed);
-            assert_eq!(mock.acks.load(Ordering::SeqCst), 0);
-            let expected = match mode {
-                Mode::Malformed => "InvalidWorkerResponse",
-                Mode::Invalid => "InvalidJob",
-                _ => "WorkerJobNotFound",
-            };
-            let Some(TerminalDetails::Failure(details)) = terminal.terminal_details else {
-                panic!("Expected persisted execution failure");
-            };
-            assert_eq!(details.code, expected);
-            assert!(terminal.info.verdict.is_none());
-        }
-        harness.close().await;
-    }
 }
 
 /// A pending submit owns capacity until explicit admission, without delaying local handoff.
 #[tokio::test]
-async fn awaiting_admission_counts_toward_capacity() {
-    let harness = Harness::start(&[Mode::AwaitAdmission], 1).await;
+async fn awaiting_running_event_counts_toward_capacity() {
+    let harness = Harness::start(1, 1).await;
     assert_eq!(
         local_snapshot(&harness.creation, &harness.scheduler).submission_admission,
         SubmissionAdmission::Open
@@ -268,8 +145,7 @@ async fn awaiting_admission_counts_toward_capacity() {
         json!({"state":"running", "pending_used":1, "pending_capacity":1})
     );
     drop(permit);
-    let id = harness.submit("python", "ac").await;
-    wait_for(|| harness.servers[0].mock.submits.load(Ordering::SeqCst) == 1).await;
+    let id = create(&harness.app, "python", "ac").await;
     assert!(matches!(
         harness.scheduler.reserve(),
         Err(AdmissionError::QueueFull)
@@ -282,10 +158,6 @@ async fn awaiting_admission_counts_toward_capacity() {
         health_response(&harness.app).await["scheduler"]["pending_used"],
         1
     );
-    harness.servers[0]
-        .mock
-        .released
-        .store(true, Ordering::SeqCst);
     harness.terminal(&id).await;
     assert!(harness.scheduler.reserve().is_ok());
     assert_eq!(harness.scheduler.snapshot().pending_used, 0);
@@ -302,18 +174,7 @@ async fn awaiting_admission_counts_toward_capacity() {
     );
     harness.scheduler.pause();
     assert_eq!(harness.scheduler.snapshot().state, SchedulerState::Stopping);
-    let creation = harness.creation.clone();
-    let scheduler = harness.scheduler.clone();
-    let app = harness.app.clone();
     harness.close().await;
-    assert_eq!(scheduler.snapshot().state, SchedulerState::Stopped);
-    assert_eq!(
-        local_snapshot(&creation, &scheduler).submission_admission,
-        SubmissionAdmission::Unavailable
-    );
-    let body = health_response(&app).await;
-    assert_eq!(body["submission_admission"], "unavailable");
-    assert_eq!(body["scheduler"]["state"], "stopped");
 }
 
 /// Fast checks update independently, snapshots are passive, and stop cancels a pending round.
@@ -323,7 +184,7 @@ async fn health_round_updates_independently_and_stops_pending_checks() {
         interval_ms: 60_000,
         timeout_ms: 60_000,
     };
-    let mut harness = Harness::start_with_health(&[Mode::Finish, Mode::Finish], 2, config).await;
+    let mut harness = Harness::start_with_health(2, 2, config).await;
     *harness.servers[0].mock.status_reply.lock().unwrap() = None;
     let health = harness.health.clone();
     let initial = health.snapshot();
@@ -373,9 +234,6 @@ async fn health_round_updates_independently_and_stops_pending_checks() {
     }
     for server in &harness.servers {
         assert_eq!(server.mock.status_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(server.mock.submits.load(Ordering::SeqCst), 0);
-        assert_eq!(server.mock.gets.load(Ordering::SeqCst), 0);
-        assert_eq!(server.mock.acks.load(Ordering::SeqCst), 0);
     }
     harness.stop_health().await;
     assert_eq!(health.snapshot(), snapshot);
@@ -389,7 +247,7 @@ async fn health_status_failures_and_recovery_keep_admission_open() {
         interval_ms: 20,
         timeout_ms: 1_000,
     };
-    let mut harness = Harness::start_with_health(&[Mode::Finish], 2, config).await;
+    let mut harness = Harness::start_with_health(1, 2, config).await;
     let health = harness.health.clone();
     wait_for(|| health.snapshot().workers[0].probe.state == ProbeState::Ok).await;
     let valid = GetWorkerStatusReply {
@@ -466,9 +324,6 @@ async fn health_status_failures_and_recovery_keep_admission_open() {
             json!({"stopping":true, "execution_state":"blocked", "unacknowledged_results":2, "unacknowledged_capacity":2})
         );
     }
-    assert_eq!(harness.servers[0].mock.submits.load(Ordering::SeqCst), 0);
-    assert_eq!(harness.servers[0].mock.gets.load(Ordering::SeqCst), 0);
-    assert_eq!(harness.servers[0].mock.acks.load(Ordering::SeqCst), 0);
     harness.stop_health().await;
     harness.close().await;
 }
@@ -480,7 +335,7 @@ async fn health_worker_timeout_and_stop_between_rounds() {
         interval_ms: 60_000,
         timeout_ms: 1_000,
     };
-    let mut harness = Harness::start_with_health(&[Mode::Finish], 2, config).await;
+    let mut harness = Harness::start_with_health(1, 2, config).await;
     *harness.servers[0].mock.status_reply.lock().unwrap() = None;
     let health = harness.health.clone();
     wait_for(|| harness.servers[0].mock.status_calls.load(Ordering::SeqCst) == 1).await;
@@ -517,17 +372,11 @@ async fn health_database_read_failure_and_timeout_recover() {
         .await
         .unwrap();
     fixture.database.probe_read().await.unwrap();
-    let server = RpcServer::start(Mode::Finish, fixture.database.clone()).await;
+    let server = RpcServer::start().await;
     fixture.config.scheduler.workers = vec![server.address.clone()];
     let (review, review_task) =
         ReviewService::start(&fixture.config.llm_review, fixture.database.clone()).unwrap();
-    let (scheduler, scheduler_task) = Scheduler::start(
-        &fixture.config,
-        fixture.database.clone(),
-        Vec::new(),
-        review.clone(),
-    )
-    .unwrap();
+    let scheduler = Scheduler::restore(&fixture.config, Default::default()).unwrap();
     for (timeout_ms, expected) in [
         (3_000, ProbeErrorCode::DatabaseReadFailed),
         (10, ProbeErrorCode::ProbeTimeout),
@@ -581,11 +430,8 @@ async fn health_database_read_failure_and_timeout_recover() {
         task.await.unwrap().unwrap();
     }
     scheduler.shutdown();
-    scheduler_task.await.unwrap().unwrap();
     review.stop();
     review_task.await.unwrap().unwrap();
-    assert_eq!(server.mock.submits.load(Ordering::SeqCst), 0);
-    assert_eq!(server.mock.acks.load(Ordering::SeqCst), 0);
     server.close().await;
     connection.close().await.unwrap();
     fixture.close().await;
@@ -594,7 +440,7 @@ async fn health_database_read_failure_and_timeout_recover() {
 /// Full queues reject new records but known queued and terminal keys remain idempotent.
 #[tokio::test]
 async fn queue_full_and_idempotency_preserve_identity_and_version() {
-    let harness = Harness::start(&[Mode::Busy], 1).await;
+    let harness = Harness::start(1, 1).await;
     let key = Uuid::new_v4();
     let body = json!({"problem_id": 1, "language_id": "c", "source": "int main(void) {}\n"});
     let (status, _, first) = call(
@@ -689,7 +535,7 @@ async fn queue_full_and_idempotency_preserve_identity_and_version() {
 /// A queued record missing from memory re-enters with its original version after publication.
 #[tokio::test]
 async fn queued_rehandoff_keeps_original_version() {
-    let harness = Harness::start(&[Mode::Finish], 4).await;
+    let harness = Harness::start(1, 4).await;
     let key = Uuid::new_v4();
     let orphan = harness
         .fixture
@@ -722,7 +568,7 @@ async fn queued_rehandoff_keeps_original_version() {
 /// Simultaneous same-key creates merge into one persisted and locally queued submission.
 #[tokio::test]
 async fn concurrent_creation_merges_and_rollback_releases_permits() {
-    let harness = Harness::start(&[Mode::Busy], 16).await;
+    let harness = Harness::start(1, 16).await;
     let key = Uuid::new_v4();
     let mut requests = tokio::task::JoinSet::new();
     for _ in 0..8 {
@@ -772,7 +618,7 @@ async fn concurrent_creation_merges_and_rollback_releases_permits() {
 /// Aborting an HTTP waiter during a locked creation does not cancel commit or handoff.
 #[tokio::test]
 async fn disconnected_create_finishes_transaction_and_handoff() {
-    let harness = Harness::start(&[Mode::Finish], 1).await;
+    let harness = Harness::start(1, 1).await;
     let mut lock = harness.fixture.connection().await;
     let mut gate = lock.begin().await.unwrap();
     sqlx::query("SELECT id FROM users WHERE id = 1 FOR UPDATE")
@@ -820,8 +666,8 @@ async fn disconnected_create_finishes_transaction_and_handoff() {
 
 /// Known ended records remain accessible and cannot be overwritten by a late result.
 #[tokio::test]
-async fn terminal_replay_bypasses_capacity_and_late_result_is_acked() {
-    let harness = Harness::start(&[Mode::Running], 1).await;
+async fn terminal_replay_bypasses_capacity_and_preserves_first_result() {
+    let harness = Harness::start(1, 1).await;
     let key = Uuid::new_v4();
     let body = json!({"problem_id":1,"language_id":"python","source":"ac"});
     let (_, _, response) = call(
@@ -833,7 +679,11 @@ async fn terminal_replay_bypasses_capacity_and_late_result_is_acked() {
     )
     .await;
     let id = response["submission_id"].as_str().unwrap();
-    wait_for(|| harness.servers[0].mock.gets.load(Ordering::SeqCst) > 0).await;
+    harness
+        .scheduler
+        .mark_running(&harness.fixture.database, id)
+        .await
+        .unwrap();
     let failure = acorn_protocol::worker::v1::JobFailure {
         code: "WorkerUnavailable".into(),
         diagnostic: "Previously saved failure".into(),
@@ -858,13 +708,8 @@ async fn terminal_replay_bypasses_capacity_and_late_result_is_acked() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(repeated["submission_id"], id);
-    harness.servers[0]
-        .mock
-        .released
-        .store(true, Ordering::SeqCst);
     let saved = harness.terminal(id).await;
     assert_eq!(saved.info.state, SubmissionState::Failed);
-    assert_eq!(harness.servers[0].mock.acks.load(Ordering::SeqCst), 1);
     let ac = TerminalOutcome::judged(
         &JudgeResult {
             verdict: RpcVerdict::Accepted as i32,
@@ -889,7 +734,7 @@ async fn terminal_replay_bypasses_capacity_and_late_result_is_acked() {
 /// Routing, extraction and business errors all use stable English JSON envelopes.
 #[tokio::test]
 async fn http_errors_and_body_limits() {
-    let harness = Harness::start(&[Mode::Finish], 4).await;
+    let harness = Harness::start(1, 4).await;
     for (method, path, status, code) in [
         ("GET", "/missing", StatusCode::NOT_FOUND, "RouteNotFound"),
         (
@@ -1050,113 +895,6 @@ async fn http_errors_and_body_limits() {
     harness.close().await;
 }
 
-/// Required writes fail the dispatcher and never ACK an uncommitted result.
-#[tokio::test]
-async fn database_failure_ends_tracking_without_ack() {
-    let harness = Harness::start(&[Mode::Running], 2).await;
-    let id = harness.submit("python", "ac").await;
-    wait_for(|| harness.servers[0].mock.gets.load(Ordering::SeqCst) > 0).await;
-    harness.fixture.database.close().await;
-    harness.servers[0]
-        .mock
-        .released
-        .store(true, Ordering::SeqCst);
-    wait_for(|| !harness.scheduler.contains(&id)).await;
-    assert_eq!(harness.servers[0].mock.acks.load(Ordering::SeqCst), 0);
-    assert!(matches!(
-        harness.scheduler.reserve(),
-        Err(AdmissionError::Stopping)
-    ));
-    // The dispatcher failure is deliberately observed separately from normal cleanup.
-    harness.close_failed().await;
-}
-
-/// Startup loads fixed-version tasks in order, accounts for permits and never contacts old work.
-#[tokio::test]
-async fn process_startup_loads_queue_and_interrupts_in_flight() {
-    let mut fixture = Fixture::new().await;
-    fixture.config.scheduler.pending_max_count = 2;
-    fixture.config.scheduler.poll_interval_ms = 10;
-    let dispatching = fixture.queued("c").await;
-    let running = fixture.queued("python").await;
-    let finished = fixture.queued("c").await;
-    for id in [&dispatching, &running, &finished] {
-        assert!(fixture.database.mark_dispatching(id).await.unwrap());
-    }
-    assert!(fixture.database.mark_running(&running).await.unwrap());
-    let terminal = TerminalOutcome::judged(
-        &JudgeResult {
-            verdict: RpcVerdict::Accepted as i32,
-            ..Default::default()
-        },
-        4,
-        &fixture.config.results,
-    )
-    .unwrap();
-    fixture
-        .database
-        .save_terminal(&finished, &terminal, None)
-        .await
-        .unwrap();
-    let previous_terminal = fixture.database.submission(&finished).await.unwrap();
-    let first = fixture.queued("c").await;
-    let second = fixture.queued("python").await;
-    let expected = fixture
-        .database
-        .queued_tasks()
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|task| task.request.job_id)
-        .collect::<Vec<_>>();
-    fixture.publish_next().await;
-    let server = RpcServer::start(Mode::AwaitAdmission, fixture.database.clone()).await;
-    fixture.config.scheduler.workers = vec![server.address.clone()];
-    let mut backend = BackendProcess::spawn(&fixture);
-    let address = backend.listening().await;
-    wait_for(|| server.mock.submits.load(Ordering::SeqCst) == 1).await;
-    let (status, body) = network_call(
-        address,
-        "POST",
-        "/api/v1/submissions",
-        Some(json!({"problem_id":1,"language_id":"c","source":"ac"})),
-        Some(Uuid::new_v4()),
-    )
-    .await;
-    assert_eq!(status, 503);
-    assert_eq!(body["error"]["code"], "QueueFull");
-    for id in [&dispatching, &running] {
-        let stored = fixture.database.submission(id).await.unwrap().unwrap();
-        assert_eq!(stored.info.state, SubmissionState::Failed);
-        let Some(TerminalDetails::Failure(failure)) = stored.terminal_details else {
-            panic!("Expected startup interruption");
-        };
-        assert_eq!(failure.code, "SchedulerInterrupted");
-    }
-    assert_eq!(
-        fixture.database.submission(&finished).await.unwrap(),
-        previous_terminal
-    );
-    server.mock.released.store(true, Ordering::SeqCst);
-    wait_for(|| server.mock.acks.load(Ordering::SeqCst) == 2).await;
-    assert_eq!(*server.mock.submission_order.lock().unwrap(), expected);
-    {
-        let submitted = server.mock.submitted.lock().unwrap();
-        assert_eq!(submitted.len(), 2);
-        for (id, cpu_time_ms) in [(&first, 1000), (&second, 2000)] {
-            assert_eq!(
-                submitted[id].run_limits.as_ref().unwrap().cpu_time_ms,
-                cpu_time_ms
-            );
-        }
-    }
-    backend.terminate();
-    let (status, logs) = backend.finish().await;
-    assert_eq!(status.code(), Some(0), "{logs}");
-    server.close().await;
-    fixture.close().await;
-}
-
 /// Excess queued work aborts startup before HTTP or any Worker RPC can begin.
 #[tokio::test]
 async fn process_rejects_startup_queue_overflow() {
@@ -1164,22 +902,23 @@ async fn process_rejects_startup_queue_overflow() {
     fixture.queued("c").await;
     fixture.queued("python").await;
     fixture.config.scheduler.pending_max_count = 1;
-    let server = RpcServer::start(Mode::Finish, fixture.database.clone()).await;
+    let server = RpcServer::start().await;
     fixture.config.scheduler.workers = vec![server.address.clone()];
     let (status, logs) = BackendProcess::spawn(&fixture).finish().await;
     assert_eq!(status.code(), Some(1), "{logs}");
     assert!(logs.contains("increase the configured limit"), "{logs}");
     assert!(!logs.contains("Backend HTTP listening"));
-    assert_eq!(server.mock.submits.load(Ordering::SeqCst), 0);
     server.close().await;
     fixture.close().await;
 }
 
 /// Ordinary query and preflight lock failures return 500 and recover after the external unlock.
 #[tokio::test]
+#[ignore = "requires isolated MySQL and ACORN_TEST_KAFKA_SERVERS"]
 async fn process_read_failures_keep_serving() {
     let mut fixture = Fixture::new().await;
     fixture.config.database.lock_wait_timeout_secs = 1;
+    let broker = support::broker::Broker::start(&mut fixture).await;
     let mut backend = BackendProcess::spawn(&fixture);
     let address = backend.listening().await;
     let mut connection = fixture.connection().await;
@@ -1215,22 +954,24 @@ async fn process_read_failures_keep_serving() {
     assert_eq!(status.code(), Some(0), "{logs}");
     assert!(logs.contains("Read problem list"));
     assert!(logs.contains("Read creation key"));
+    broker.close().await;
     connection.close().await.unwrap();
     fixture.close().await;
 }
 
 /// Failed creation writes exit promptly even while an unrelated Worker remains running.
 #[tokio::test]
+#[ignore = "requires isolated MySQL and ACORN_TEST_KAFKA_SERVERS"]
 async fn process_creation_failure_exits_without_draining_workers() {
     use tokio::io::AsyncWriteExt;
     let mut fixture = Fixture::new().await;
     fixture.config.database.lock_wait_timeout_secs = 1;
     let running = fixture.queued("python").await;
-    let server = RpcServer::start(Mode::Running, fixture.database.clone()).await;
-    fixture.config.scheduler.workers = vec![server.address.clone()];
+    fixture.database.mark_running(&running).await.unwrap();
+    let broker = support::broker::Broker::start(&mut fixture).await;
     let mut backend = BackendProcess::spawn(&fixture);
     let address = backend.listening().await;
-    wait_for(|| server.mock.gets.load(Ordering::SeqCst) > 0).await;
+
     let mut connection = fixture.connection().await;
     let mut gate = connection.begin().await.unwrap();
     sqlx::query("SELECT id FROM users WHERE id = 1 FOR UPDATE")
@@ -1250,7 +991,6 @@ async fn process_creation_failure_exits_without_draining_workers() {
     assert!(logs.contains("Create submission transaction"), "{logs}");
     assert!(logs.contains("1205"), "{logs}");
     assert!(logs.contains("Backend fault"), "{logs}");
-    assert_eq!(server.mock.acks.load(Ordering::SeqCst), 0);
     gate.rollback().await.unwrap();
     assert!(
         fixture
@@ -1270,149 +1010,7 @@ async fn process_creation_failure_exits_without_draining_workers() {
     assert!(stored.info.terminal_at_ms.is_none());
     connection.close().await.unwrap();
     drop(stream);
-    server.close().await;
-    fixture.close().await;
-}
-
-/// Normal shutdown saves in-flight work, keeps queries available and resumes queued work on restart.
-#[tokio::test]
-async fn process_shutdown_drains_running_and_restart_loads_queued() {
-    let mut fixture = Fixture::new().await;
-    fixture.config.scheduler.poll_interval_ms = 10;
-    fixture.config.health.timeout_ms = 60_000;
-    fixture.queued("c").await;
-    fixture.queued("python").await;
-    let expected = fixture
-        .database
-        .queued_tasks()
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|task| task.request.job_id)
-        .collect::<Vec<_>>();
-    let server = RpcServer::start(Mode::Running, fixture.database.clone()).await;
-    *server.mock.status_reply.lock().unwrap() = None;
-    fixture.config.scheduler.workers = vec![server.address.clone()];
-    let mut backend = BackendProcess::spawn(&fixture);
-    let address = backend.listening().await;
-    wait_for(|| server.mock.gets.load(Ordering::SeqCst) > 0).await;
-    wait_for(|| server.mock.status_calls.load(Ordering::SeqCst) == 1).await;
-    backend.terminate();
-    backend
-        .until_log("Backend stopping admission and dispatch")
-        .await;
-    let (status, body) = network_call(
-        address,
-        "POST",
-        "/api/v1/submissions",
-        Some(json!({"problem_id":1,"language_id":"c","source":"ac"})),
-        Some(Uuid::new_v4()),
-    )
-    .await;
-    assert_eq!(status, 503);
-    assert_eq!(body["error"]["code"], "BackendStopping");
-    assert_eq!(
-        network_call(address, "GET", "/api/v1/problems", None, None)
-            .await
-            .0,
-        200
-    );
-    let (status, health) = network_call(address, "GET", "/api/v1/health", None, None).await;
-    assert_eq!(status, 200);
-    assert_eq!(health["submission_admission"], "stopping");
-    assert_eq!(health["scheduler"]["state"], "stopping");
-    assert_eq!(health["workers"][0]["state"], "unknown");
-    server.mock.released.store(true, Ordering::SeqCst);
-    let (status, logs) = backend.finish().await;
-    assert_eq!(status.code(), Some(0), "{logs}");
-    assert!(
-        logs.find("Health collector stopped").unwrap() < logs.find("Backend stopped").unwrap(),
-        "{logs}"
-    );
-    assert_eq!(server.mock.submits.load(Ordering::SeqCst), 1);
-    assert_eq!(server.mock.acks.load(Ordering::SeqCst), 1);
-    let previous_terminal = fixture.database.submission(&expected[0]).await.unwrap();
-    assert_eq!(
-        previous_terminal.as_ref().unwrap().info.verdict,
-        Some(Verdict::AC)
-    );
-    assert_eq!(
-        fixture
-            .database
-            .submission(&expected[1])
-            .await
-            .unwrap()
-            .unwrap()
-            .info
-            .state,
-        SubmissionState::Queued
-    );
-    server.close().await;
-    let restarted_server = RpcServer::start(Mode::Finish, fixture.database.clone()).await;
-    fixture.config.scheduler.workers = vec![restarted_server.address.clone()];
-    let mut restarted = BackendProcess::spawn(&fixture);
-    restarted.listening().await;
-    wait_for(|| restarted_server.mock.acks.load(Ordering::SeqCst) == 1).await;
-    assert_eq!(
-        *restarted_server.mock.submission_order.lock().unwrap(),
-        [expected[1].clone()]
-    );
-    assert_eq!(
-        fixture.database.submission(&expected[0]).await.unwrap(),
-        previous_terminal
-    );
-    restarted.terminate();
-    let (status, logs) = restarted.finish().await;
-    assert_eq!(status.code(), Some(0), "{logs}");
-    restarted_server.close().await;
-    fixture.close().await;
-}
-
-/// A terminal-write fault overrides an ongoing normal shutdown without ACK or waiting other work.
-#[tokio::test]
-async fn process_fault_during_shutdown_does_not_wait_other_worker() {
-    let mut fixture = Fixture::new().await;
-    fixture.config.scheduler.poll_interval_ms = 10;
-    fixture.config.health.timeout_ms = 60_000;
-    fixture.queued("c").await;
-    fixture.queued("python").await;
-    let first = RpcServer::start(Mode::Running, fixture.database.clone()).await;
-    let second = RpcServer::start(Mode::Running, fixture.database.clone()).await;
-    *first.mock.status_reply.lock().unwrap() = None;
-    *second.mock.status_reply.lock().unwrap() = None;
-    fixture.config.scheduler.workers = vec![first.address.clone(), second.address.clone()];
-    let mut backend = BackendProcess::spawn(&fixture);
-    backend.listening().await;
-    wait_for(|| {
-        first.mock.gets.load(Ordering::SeqCst) > 0
-            && second.mock.gets.load(Ordering::SeqCst) > 0
-            && first.mock.status_calls.load(Ordering::SeqCst) == 1
-            && second.mock.status_calls.load(Ordering::SeqCst) == 1
-    })
-    .await;
-    let mut connection = fixture.connection().await;
-    sqlx::raw_sql("CREATE TRIGGER reject_terminal BEFORE UPDATE ON submissions FOR EACH ROW BEGIN IF NEW.state = 'finished' THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Controlled terminal write failure'; END IF; END")
-        .execute(&mut connection).await.unwrap();
-    backend.terminate();
-    backend
-        .until_log("Backend stopping admission and dispatch")
-        .await;
-    first.mock.released.store(true, Ordering::SeqCst);
-    let (status, logs) = backend.finish().await;
-    assert_eq!(status.code(), Some(1), "{logs}");
-    assert!(logs.contains("Controlled terminal write failure"), "{logs}");
-    assert!(logs.contains("Health collector stopped"), "{logs}");
-    assert_eq!(first.mock.acks.load(Ordering::SeqCst), 0);
-    assert_eq!(second.mock.acks.load(Ordering::SeqCst), 0);
-    for server in [&first, &second] {
-        let ids = server.mock.submission_order.lock().unwrap().clone();
-        let stored = fixture.database.submission(&ids[0]).await.unwrap().unwrap();
-        assert_eq!(stored.info.state, SubmissionState::Running);
-        assert!(stored.info.terminal_at_ms.is_none());
-    }
-    connection.close().await.unwrap();
-    first.close().await;
-    second.close().await;
+    broker.close().await;
     fixture.close().await;
 }
 
@@ -1423,7 +1021,7 @@ async fn stopping_preserves_creation_started_before_preflight() {
         future::{Future, poll_fn},
         task::Poll,
     };
-    let harness = Harness::start(&[Mode::Finish], 1).await;
+    let harness = Harness::start(1, 1).await;
     let creation = harness.creation.clone();
     let creating = creation.create(CreateSubmission {
         problem_id: 1,
@@ -1454,21 +1052,17 @@ async fn stopping_preserves_creation_started_before_preflight() {
             .state,
         SubmissionState::Queued
     );
-    assert_eq!(harness.servers[0].mock.submits.load(Ordering::SeqCst), 0);
     harness.close().await;
 }
 
-/// Shared source samples through real HTTP, gRPC and Isolate, including ACK retention.
+/// Source samples through real HTTP, Kafka and Isolate, observed through persisted results.
 #[tokio::test]
 #[ignore = "Requires host Isolate privileges, cgroups, quotas and ACORN_ISOLATE_BOX_ID"]
 async fn real_http_worker_acceptance() {
-    use acorn_protocol::worker::v1::{GetJobRequest, get_job_reply::Terminal};
     use base64::Engine;
     use support::real::{RealHarness, box_id};
 
     let harness = RealHarness::start(&[box_id("ACORN_ISOLATE_BOX_ID")]).await;
-    let mut client = harness.workers[0].client().await;
-    let mut first_id = None;
     for (language, source, verdict, completed) in [
         (
             "c",
@@ -1502,18 +1096,7 @@ async fn real_http_worker_acceptance() {
         ),
     ] {
         let id = harness.submit(language, source).await;
-        if first_id.is_none() {
-            first_id = Some(id.clone());
-        }
         let body = harness.terminal(&id, verdict).await;
-        let job = client
-            .get_job(GetJobRequest { job_id: id.clone() })
-            .await
-            .unwrap()
-            .into_inner();
-        assert_eq!(job.completed_cases, completed);
-        assert_eq!(job.total_cases, 104);
-        assert!(matches!(job.terminal, Some(Terminal::Result(_))));
         match verdict {
             "CE" => {
                 let diagnostic = body["terminal_details"]["compile_diagnostic_base64"]
@@ -1546,164 +1129,5 @@ async fn real_http_worker_acceptance() {
             "Real sample: submission={id} language={language} verdict={verdict} completed={completed}"
         );
     }
-    let removed = client
-        .get_job(GetJobRequest {
-            job_id: first_id.unwrap(),
-        })
-        .await
-        .unwrap_err();
-    assert_eq!(removed.code(), tonic::Code::NotFound);
-    harness.close().await;
-}
-
-/// Two real Isolate boxes execute independently and explicitly busy admission redispatches.
-#[tokio::test]
-#[ignore = "Requires two dedicated boxes in ACORN_ISOLATE_BOX_ID and ACORN_ISOLATE_BOX_ID_2"]
-async fn real_two_workers_acceptance() {
-    use acorn_protocol::worker::v1::{
-        AcknowledgeResultRequest, GetJobRequest, JobPhase, JobState, RunLimits, SubmitJobRequest,
-        TestCase,
-    };
-    use support::real::{RealHarness, box_id};
-
-    let boxes = [
-        box_id("ACORN_ISOLATE_BOX_ID"),
-        box_id("ACORN_ISOLATE_BOX_ID_2"),
-    ];
-    assert_ne!(boxes[0], boxes[1], "Workers must own different boxes");
-    let harness = RealHarness::start(&boxes).await;
-    let mut a = harness.workers[0].client().await;
-    let mut b = harness.workers[1].client().await;
-    let source = include_str!("../../../examples/submissions/time-limit.c");
-    let first = harness.submit("c", source).await;
-    let second = harness.submit("c", source).await;
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let left = a
-                .get_job(GetJobRequest {
-                    job_id: first.clone(),
-                })
-                .await;
-            let right = b
-                .get_job(GetJobRequest {
-                    job_id: second.clone(),
-                })
-                .await;
-            if let (Ok(left), Ok(right)) = (left, right) {
-                let (left, right) = (left.into_inner(), right.into_inner());
-                assert_eq!(
-                    left.state,
-                    JobState::Running as i32,
-                    "First Job finished before overlap"
-                );
-                assert_eq!(
-                    right.state,
-                    JobState::Running as i32,
-                    "Second Job finished before overlap"
-                );
-                if left.phase == JobPhase::RunningCase as i32
-                    && right.phase == JobPhase::RunningCase as i32
-                {
-                    assert_eq!(left.completed_cases, 0);
-                    assert_eq!(right.completed_cases, 0);
-                    break;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
-    harness.terminal(&first, "TLE").await;
-    harness.terminal(&second, "TLE").await;
-    eprintln!(
-        "Real overlap: submissions={first},{second} boxes={},{}",
-        boxes[0], boxes[1]
-    );
-
-    // The dispatcher has selected both nodes once, so its next candidate is A again.
-    let occupant = SubmitJobRequest {
-        job_id: Uuid::new_v4().to_string(),
-        language_id: "c".into(),
-        source: source.as_bytes().to_vec(),
-        cases: vec![TestCase {
-            input: Vec::new(),
-            expected_output: Vec::new(),
-        }],
-        run_limits: Some(RunLimits {
-            cpu_time_ms: 5_000,
-            wall_time_ms: 10_000,
-            memory_kib: 262_144,
-        }),
-    };
-    a.submit_job(occupant.clone()).await.unwrap();
-    let mut probe = occupant.clone();
-    probe.job_id = Uuid::new_v4().to_string();
-    let busy = a.submit_job(probe).await.unwrap_err();
-    assert_eq!(busy.code(), tonic::Code::ResourceExhausted);
-    assert_eq!(busy.message(), "WorkerBusy");
-    let moved = harness
-        .submit(
-            "c",
-            include_str!("../../../examples/submissions/a-plus-b.c"),
-        )
-        .await;
-    harness.terminal(&moved, "AC").await;
-    assert_eq!(
-        a.get_job(GetJobRequest {
-            job_id: moved.clone()
-        })
-        .await
-        .unwrap_err()
-        .code(),
-        tonic::Code::NotFound
-    );
-    assert_eq!(
-        b.get_job(GetJobRequest {
-            job_id: moved.clone()
-        })
-        .await
-        .unwrap()
-        .into_inner()
-        .state,
-        JobState::Finished as i32
-    );
-    assert_eq!(
-        a.get_job(GetJobRequest {
-            job_id: occupant.job_id.clone()
-        })
-        .await
-        .unwrap()
-        .into_inner()
-        .state,
-        JobState::Running as i32
-    );
-    eprintln!(
-        "Real busy redispatch: submission={moved} worker={} occupant={}",
-        harness.workers[1].address, occupant.job_id
-    );
-    tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            let job = a
-                .get_job(GetJobRequest {
-                    job_id: occupant.job_id.clone(),
-                })
-                .await
-                .unwrap()
-                .into_inner();
-            if job.state != JobState::Running as i32 {
-                assert_eq!(job.state, JobState::Finished as i32, "{job:?}");
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .unwrap();
-    a.acknowledge_result(AcknowledgeResultRequest {
-        job_id: occupant.job_id,
-    })
-    .await
-    .unwrap();
     harness.close().await;
 }

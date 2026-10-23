@@ -287,7 +287,7 @@ impl ReviewService {
         Ok(Some(PreparedReview { attempt, permit }))
     }
 
-    /// Transfer a committed attempt; automatic callers first finish ACK and Scheduler node release.
+    /// Transfer a committed attempt after the automatic event offset enqueue attempt.
     pub(crate) async fn handoff(
         &self,
         id: String,

@@ -492,3 +492,83 @@ async fn real_kafka_result_backpressure_and_total_shutdown_budget() -> Result<()
     );
     cleaned
 }
+
+/// The executable consumes Kafka tasks, serves status and uses the common stop path on SIGTERM.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires ACORN_TEST_KAFKA_SERVERS and isolated topic/group administration"]
+async fn real_kafka_executable_handles_sigterm() -> Result<()> {
+    use acorn_protocol::worker::v1::judge_worker_client::JudgeWorkerClient;
+    let fixture = Fixture::new("normal");
+    let broker = Broker::new(
+        fixture.config.clone(),
+        fixture
+            .directory
+            .path()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap(),
+    )
+    .await?;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let address = listener.local_addr()?;
+    drop(listener);
+    let mut config: toml::Value =
+        toml::from_str(include_str!("../../../config/worker.example.toml"))?;
+    config["server"]["listen"] = address.to_string().into();
+    config["sandbox"]["executable"] = fixture.config.sandbox.executable.to_str().unwrap().into();
+    config["kafka"]["bootstrap_servers"] = toml::Value::Array(
+        broker
+            .config
+            .kafka
+            .bootstrap_servers
+            .iter()
+            .cloned()
+            .map(Into::into)
+            .collect(),
+    );
+    config["kafka"]["tasks_topic"] = broker.config.kafka.tasks_topic.clone().into();
+    config["kafka"]["events_topic"] = broker.config.kafka.events_topic.clone().into();
+    config["kafka"]["group_id"] = broker.config.kafka.group_id.clone().into();
+    let path = fixture.directory.path().join("worker.toml");
+    fs::write(&path, toml::to_string(&config)?)?;
+    let child = tokio::process::Command::new(env!("CARGO_BIN_EXE_acorn-worker"))
+        .arg("--config")
+        .arg(path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let result: Result<()> = async {
+        let mut client = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Ok(client) = JudgeWorkerClient::connect(format!("http://{address}")).await { return client; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await?;
+        let ready = fixture.directory.path().join("ready");
+        let source = format!("import pathlib,time\npathlib.Path({:?}).write_text('ready')\ntime.sleep(30)", ready.to_str().unwrap());
+        broker.task(job("signal", "python", &source, &[(b"", b"42")])).await?;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !ready.exists() { tokio::time::sleep(Duration::from_millis(10)).await; }
+        }).await?;
+        let status = client.get_worker_status(GetWorkerStatusRequest {}).await?.into_inner();
+        ensure!(status.execution_state == WorkerExecutionState::Running as i32, "Status RPC lost active execution");
+        nix::sys::signal::kill(nix::unistd::Pid::from_raw(child.id().unwrap() as i32), nix::sys::signal::Signal::SIGTERM)?;
+        let terminal = broker.event("signal", true).await?;
+        ensure!(matches!(terminal.terminal, Some(Terminal::Failure(failure)) if failure.code == "WorkerShutdown"), "SIGTERM did not use the execution stop path");
+        Ok(())
+    }.await;
+    let output = tokio::time::timeout(Duration::from_secs(15), child.wait_with_output()).await??;
+    let logs = String::from_utf8_lossy(&output.stderr);
+    ensure!(
+        output.status.success() && logs.contains("Worker stopped"),
+        "Executable failed: {logs}; scenario: {result:?}"
+    );
+    ensure!(
+        fixture.operations().matches("--cleanup").count() == 1,
+        "Execution was not cleaned exactly once"
+    );
+    broker.close().await?;
+    result
+}

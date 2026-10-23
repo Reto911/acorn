@@ -4,7 +4,7 @@
 
 ## 1. 当前状态
 
-当前设计为 v20；K01–K04 的 13 项任务按 v18 完成，其余 9 项尚未实施。后端已提供任务发布、事件消费、异步位点提交及自动审查交接入口；Worker 已提供 Kafka 单槽消费、结果 FIFO、原分区归属及有限消息收尾服务，完成受控管理器和一条真实 Isolate 的 Kafka 检查，实际范围见[第 9 节](#9-k04-worker-消费与结果队列)。当前正式服务入口仍通过 gRPC 判题；下一步 K05 统一接入正式生命周期并移除旧业务 RPC，随后按 K06–K07 推进观测和整体交付。进度见[任务清单](#4-任务清单)，审核决定见[审核记录](../d01-review/10-kafka-judging-review.md#2-已确认决定与草案修正)。
+当前设计为 v20；K01–K05 的 16 项任务完成，其余 6 项由 K06–K07 推进。两端正式入口使用 Kafka 判题，后端恢复 queued、dispatching/running 等待及许可，监督任务发布、事件消费和有限消息收尾；Worker 同时运行 Kafka 服务和只读状态 RPC。旧业务 RPC、节点轮询、查询与 ACK 缓存及废弃配置已移除，实际改动及检查见[第 11 节](#11-k05-生命周期与旧流程移除)。成员观测、接纳限制、Kafka 健康和完整部署验收尚待后续任务。进度见[任务清单](#4-任务清单)，审核决定见[审核记录](../d01-review/10-kafka-judging-review.md#2-已确认决定与草案修正)。
 
 Safe 接口修复的 S01–S06 已完成，两端均异步提交位点；Worker 保留 StreamConsumer，通过 SDK RAII 释放消费者。共享原生确认模块及 commit_timeout_ms 已移除，S06 已补齐动态／静态构建和静态 Worker 定向验证，safe 修复全部收口。按[修复步骤](../10-kafka-judging-design.md#12-safe-接口修复计划)在[第 10 节](#10-safe-接口修复跟踪)单独跟踪，不改变原 K01–K07 任务编号或历史完成记录。
 
@@ -64,9 +64,9 @@ Safe 接口修复的 S01–S06 已完成，两端均异步提交位点；Worker 
 
 任务定义见[设计 K05](../10-kafka-judging-design.md#k05-生命周期与旧流程移除)。
 
-- [ ] K05.1 接入后端启动恢复、后台监督和有限停机。
-- [ ] K05.2 移除旧业务 RPC、路由轮询和结果 ACK 缓存，重新生成协议并迁移调用方。
-- [ ] K05.3 同步 Worker、数据库、后端及自动审查设计的受影响合同。
+- [x] K05.1 接入后端启动恢复、后台监督和有限停机。
+- [x] K05.2 移除旧业务 RPC、路由轮询和结果 ACK 缓存，重新生成协议并迁移调用方。
+- [x] K05.3 同步 Worker、数据库、后端及自动审查设计的受影响合同。
 
 ### 4.6 K06 在线观测与健康页面
 
@@ -288,7 +288,7 @@ K04 沿用 v18“取得本次提交结果”的合同，复用后端已有的有
 
 ### 8.4 定向验收安排
 
-优先复用 [Worker 夹具](../../crates/worker/tests/support/mod.rs)、[RPC 测试](../../crates/worker/tests/rpc.rs)、[执行器测试](../../crates/worker/tests/executor.rs)和[沙箱生命周期测试](../../crates/worker/tests/sandbox_lifecycle.rs)。Kafka 资源创建、初始位点和实际已提交位点观测沿用 [K03 真实链路测试](../../crates/backend/tests/cases/kafka_workflow.rs)的做法，仅建立本批所需夹具。
+优先复用 [Worker 夹具](../../crates/worker/tests/support/mod.rs)、原 RPC 测试（已移除，现有入口及结果交接覆盖见[Kafka 测试](../../crates/worker/tests/kafka.rs)）、[执行器测试](../../crates/worker/tests/executor.rs)和[沙箱生命周期测试](../../crates/worker/tests/sandbox_lifecycle.rs)。Kafka 资源创建、初始位点和实际已提交位点观测沿用 [K03 真实链路测试](../../crates/backend/tests/cases/kafka_workflow.rs)的做法，仅建立本批所需夹具。
 
 | 检查范围           | 最小检查及依据                                                                                                                                                                            |
 | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -491,3 +491,77 @@ cargo tree --workspace --locked --no-default-features --features acorn-backend/k
 S01–S06 已全部勾选，原 K01–K07 清单及历史检查记录保留。未扩大到完整 workspace 测试、真实 Isolate、静态后端 Kafka 全链路或 broker 故障下 SDK 析构最长耗时；消费驱动保持 StreamConsumer，原改型性能对比已按 R39 撤回。正式入口切换、旧业务 RPC 移除及整体端到端验收仍由 K05–K07 实施，RAII 析构不可取消的边界保持不变。
 
 相关 10 份文档的本地链接／锚点、代码块、TOML 示例和任务编号检查通过；本次执行记录的 Prettier、既有标题与 K 清单保留检查及 `git diff --check` 通过。本步仅更新执行记录。
+
+## 11. K05 生命周期与旧流程移除
+
+### 11.1 实现内容
+
+后端正式入口改用 Database::judging_recovery 和 Scheduler::start：queued 恢复完整固定版本任务并重交，dispatching 恢复 ID 及许可，running 只恢复等待 ID。移除 interrupt_in_flight、queued_tasks 和旧拒绝重排入口；启动不再批量写 SchedulerInterrupted，旧 PENDING 审查仍按原规则中断。
+
+Scheduler 监督已有 Publisher 和 EventConsumer。停止新接纳及发布后，等待已登记创建交接，再用一个 kafka.shutdown_timeout_ms 预算收尾已开始的消息处理和消费者释放；后台错误进入正式故障收尾，保留原始错误，不等待远程判题。事件消费者正常返回和预算取消时均将 SDK 析构放到阻塞线程；RAII 等待超时不取消底层析构。
+
+Worker 正式入口监督 KafkaWorker 和状态 RPC，执行停止仅由 Kafka 服务调用共同入口。BLOCKED 保留状态和结果生产，退出任务组；正常 SIGTERM 先停止执行，再按既有总消息预算交接结果及释放消费者。
+
+worker.proto 只保留 GetWorkerStatus RPC，SubmitJobRequest、GetJobReply 及状态消息字段和编号保持不变，由 Cargo 的既有 build.rs 重新生成协议。删除旧节点选择、轮询跟踪、Worker 查询适配和 ACK FIFO；保留单槽、快照通知、原归属去重及 BLOCKED 执行占用。运行入口只返回快照接收端，不再构造业务 RPC 接纳响应。
+
+删除 scheduler.poll_interval_ms、grpc 的三个业务调用超时及 results.acknowledged_queue_length，保留发布 retry_interval_ms、结果容量和只读状态消息上限。任务及结果的编码预算只关联 Kafka，状态 RPC 不再承担源码和判题结果的载荷要求。
+
+第 01、02、03、08 篇、协议及模块使用说明、中英文根 README 已同步新合同。文档索引只更新组件用途；历史记录保留原检查结果，失效源码链接指向现有事件处理实现。没有写入新的开工计划。
+
+### 11.2 实际检查
+
+以下格式、编译与构建检查通过：
+
+```sh
+cargo fmt --all -- --check
+cargo check --workspace --all-targets --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo build --workspace --locked --no-default-features --features acorn-backend/kafka-static,acorn-worker/kafka-static
+cargo build --workspace --locked
+```
+
+两种构建均覆盖正式后端及 Worker。readelf 核对静态模式均无 librdkafka 共享依赖，默认动态模式均依赖 librdkafka.so.1；正式入口现在实际引用 Kafka 客户端。检查结束保留默认动态构建。
+
+| 检查范围              | 实际结果                                                                                                                 |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| 后端库及配置          | 11 项库测试、9 项配置测试通过；状态与结果对应关系测试从旧客户端移至事件校验模块                                          |
+| 数据库及常规 workflow | 13 项数据库测试、27 项 HTTP／容量／健康／审查测试通过；旧排队读取断言修正后复验                                          |
+| Worker 常规测试       | 21 项通过、7 项按环境要求默认忽略；旧业务 RPC 专属用例删除，输入边界迁入运行入口，执行及沙箱覆盖继续复用                 |
+| 正式后端进程          | process_ 的 7 项定向检查通过，覆盖两端二进制闭环、混合状态重启与离线结果、消费故障退出、审查停机及既有创建／只读故障边界 |
+| 审查完成故障          | review_api_failure_and_critical_completion_failure 通过：普通 API 错误结束本次审查，关键完成写入失败令后端退出           |
+| 正式 Worker 进程      | real_kafka_executable_handles_sigterm 通过：Kafka 接纳、实际状态 RPC、SIGTERM 终态与共同清理                             |
+| Worker Kafka 服务     | 既有容量／归属／停机、BLOCKED 替代接管、结果积压／总预算三项通过；最后简化接纳短锁后，容量及归属用例定向复验通过         |
+
+真实 Kafka／MySQL 检查使用独立 topic、消费组和测试库，进程闭环由现有受控 Isolate 管理器执行 Python 两数求和的 104 个用例并经 HTTP 查到 AC。该检查证明正式入口的交接和生命周期，不证明真实隔离。
+
+主要测试命令如下；环境另提供 MYSQL_PASSWORD、ACORN_TEST_DATABASE_CONFIG、ACORN_TEST_KAFKA_SERVERS，以及指向本工作区 Worker 二进制的 ACORN_TEST_WORKER_EXECUTABLE：
+
+```sh
+cargo test -p acorn-backend --locked --test database --test workflow
+cargo test -p acorn-worker --locked
+cargo test -p acorn-backend --locked --test workflow process_ -- --ignored --test-threads=1
+cargo test -p acorn-backend --locked --test workflow review_api_failure_and_critical_completion_failure -- --ignored
+cargo test -p acorn-worker --locked --test kafka real_kafka_executable_handles_sigterm -- --ignored
+cargo test -p acorn-worker --locked --test kafka real_kafka_ -- --ignored --skip real_kafka_isolate_execution --skip real_kafka_executable_handles_sigterm --test-threads=1
+cargo test -p acorn-worker --locked --test kafka real_kafka_worker_capacity_and_shutdown -- --ignored
+```
+
+手写 Rust 无 unsafe、原生 Kafka 绑定、旧业务 RPC 调用和废弃配置字段；保留数据消息与原定义逐项比较一致。变更 Markdown 的格式、本地链接／锚点、稳定编号、协议示例及 TOML 代码块检查通过，git diff --check 通过。
+
+### 11.3 检查中发现并修正的问题
+
+初次数据库检查在沙箱内因 Operation not permitted 未建立连接；在可访问本机服务的执行环境复验。原有恢复测试还保留只读取 queued、不合并 dispatching 容量的断言，切换统一恢复入口后失败，删除该过期断言并复验通过。
+
+新增生命周期检查最初在测试观察者仍持有借用消息时等待消费者析构，导致该轮挂起并被终止；观察消息改为 detach 后再释放消费者，后续重启及故障检查通过。该问题位于测试资源收尾，生产事件循环在处理结束后才释放消费者。
+
+审查停机用例最初未区分发布写入与终态写入的行锁等待；修正同步点后又观察到第三条审查在停止前准备时按实际容量保存 ReviewQueueFull。用例改为先确认任务发布结束，并为停止前已开始的终态处理提供足够审查预留，随后验证同一终态写入及本地交接在停机中保存 ReviewInterrupted。失败轮次未记为通过；最终定向复验通过。
+
+按[精简性复审](../d01-review/10-kafka-judging-review.md#5-k05-精简性复审)，删除 Kafka 启动失败时专门停止并等待空闲审查服务的分支，直接返回启动错误；Scheduler 只在消息收尾超时后取消并回收剩余任务。测试夹具删除旧 RPC 冷却使用的重试覆盖，以及未启动 Kafka 服务时无效的关闭信号。
+
+调整后 fmt、workspace check 和必需 Clippy 复验通过；复用既有 workflow 的 27 项常规测试及 process_ 的 7 项进程检查，全部通过，未增加测试。复验覆盖正常停机、混合状态重启与离线结果、消费故障退出、审查收尾及正式二进制闭环；未扩展到真实 Isolate 或静态链接复跑。
+
+### 11.4 完成状态与后续边界
+
+K05.1–K05.3 完成。KV05 的启动恢复、消息收尾、独立 Worker 和监督退出部分已作上述检查；未声称完成 KV05 的全部健康及接纳条款。K06 继续实现成员观测、零成员／unknown 接纳限制、Kafka 健康及页面；K07 完成目标部署、真实 C/Python 主要判题路线和双 Worker 并发验收。
+
+本批未重跑真实 Isolate 隔离及完整双 Worker 验收，未运行完整 workspace 测试或 broker 故障下 SDK 析构最长耗时检查；RAII 析构不可取消及异步位点可能滞后的边界保持不变。失败或中断轮次未完成夹具清理，残留的独立测试资源按既有开发端处置约定处理，不对既有资源批量清理。

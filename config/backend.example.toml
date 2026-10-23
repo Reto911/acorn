@@ -19,13 +19,9 @@ user_id = 1
 [scheduler]
 pending_max_count = 128
 workers = ["http://127.0.0.1:50051"]
-poll_interval_ms = 100
 retry_interval_ms = 1_000
 
 [grpc]
-submit_timeout_ms = 1_000
-get_timeout_ms = 1_000
-ack_timeout_ms = 1_000
 max_request_bytes = 16_777_216
 max_response_bytes = 1_048_576
 

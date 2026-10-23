@@ -1,20 +1,11 @@
-//! In-memory admission, immutable terminal records and acknowledged-result FIFO.
+//! Execution occupancy and bounded notifications retained until Kafka handoff.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
 use acorn_protocol::worker::v1::{GetJobReply, JobState};
 use tokio::{sync::watch, task::JoinHandle};
-use tonic::Status;
 
 use crate::sandbox::StopReason;
-
-/// Running progress or immutable terminal content with its ACK membership.
-pub(crate) struct JobRecord {
-    /// Bounded query response; never contains source or test data.
-    pub updates: watch::Sender<GetJobReply>,
-    /// Whether this terminal record has entered the acknowledged FIFO.
-    pub acknowledged: bool,
-}
 
 /// Execution occupancy persists independently of result retention.
 pub(crate) struct Execution {
@@ -32,9 +23,7 @@ pub(crate) struct Execution {
 #[derive(Default)]
 pub(crate) struct Jobs {
     /// Running and retained terminal records keyed only by opaque Job ID.
-    pub records: HashMap<String, JobRecord>,
-    /// Ordered first acknowledgements; repeated ACK never changes this queue.
-    acknowledged: VecDeque<String>,
+    pub records: HashMap<String, watch::Sender<GetJobReply>>,
     /// Single occupied execution position, including an unconfirmed stop.
     pub execution: Option<Execution>,
     /// New IDs are rejected once shutdown begins; existing records remain usable.
@@ -42,34 +31,11 @@ pub(crate) struct Jobs {
 }
 
 impl Jobs {
-    /// Count terminal results awaiting explicit confirmation, without duplicate counters.
+    /// Count terminals still retained for Kafka handoff.
     pub fn unacknowledged_count(&self) -> usize {
         self.records
             .values()
-            .filter(|record| {
-                record.updates.borrow().state != JobState::Running as i32 && !record.acknowledged
-            })
+            .filter(|record| record.borrow().state != JobState::Running as i32)
             .count()
-    }
-
-    /// ACK a terminal record once and evict only the oldest acknowledged results.
-    pub fn acknowledge(&mut self, job_id: &str, capacity: usize) -> Result<(), Status> {
-        let record = self
-            .records
-            .get_mut(job_id)
-            .ok_or_else(|| Status::not_found("JobNotFound"))?;
-        if record.updates.borrow().state == JobState::Running as i32 {
-            return Err(Status::failed_precondition("ResultNotReady"));
-        }
-        if record.acknowledged {
-            return Ok(());
-        }
-        record.acknowledged = true;
-        self.acknowledged.push_back(job_id.to_owned());
-        if self.acknowledged.len() > capacity {
-            let oldest = self.acknowledged.pop_front().expect("nonempty ACK queue");
-            self.records.remove(&oldest);
-        }
-        Ok(())
     }
 }

@@ -14,13 +14,13 @@
 
 ## 2. 状态的含义与保证范围
 
-| 对象 | 观测来源 | 能说明什么 | 保证范围 |
-| --- | --- | --- | --- |
-| HTTP | 健康 GET 处理器 | 此次请求得到后端响应 | 读取本地状态和缓存，不等待数据库或 Worker 探测 |
-| 数据库 | 现有连接池中的一次实际表读取 | 在检查预算内完成读取 | 不保证后续写入成功或全库无损坏 |
-| 新提交接纳 | 创建服务停止标记、Scheduler 状态和信号量 | 生成快照时是否停止新建、是否还有待接纳名额 | 实际 POST 仍执行原有校验和名额预留 |
-| Scheduler | 已有 `stopping`、`closed` 标记 | 本地调度任务尚未结束，或正在停止 | 不增加调度进度心跳或卡死判定 |
-| Worker | 新增状态 RPC | 此次通信成功，以及远端报告的执行占用、停机和结果区状态 | 不保证下一次提交必然接纳或实际沙箱执行成功 |
+| 对象       | 观测来源                                 | 能说明什么                                             | 保证范围                                       |
+| ---------- | ---------------------------------------- | ------------------------------------------------------ | ---------------------------------------------- |
+| HTTP       | 健康 GET 处理器                          | 此次请求得到后端响应                                   | 读取本地状态和缓存，不等待数据库或 Worker 探测 |
+| 数据库     | 现有连接池中的一次实际表读取             | 在检查预算内完成读取                                   | 不保证后续写入成功或全库无损坏                 |
+| 新提交接纳 | 创建服务停止标记、Scheduler 状态和信号量 | 生成快照时是否停止新建、是否还有待接纳名额             | 实际 POST 仍执行原有校验和名额预留             |
+| Scheduler  | 已有 `stopping`、`closed` 标记           | 本地调度任务尚未结束，或正在停止                       | 不增加调度进度心跳或卡死判定                   |
+| Worker     | 新增状态 RPC                             | 此次通信成功，以及远端报告的执行占用、停机和结果区状态 | 不保证下一次提交必然接纳或实际沙箱执行成功     |
 
 队列满和 Worker 忙属于容量状态。所有 Worker 探测失败时，后端仍按原规则接纳排队任务，直到容量用尽；健康页面不改变这一行为。Scheduler 的“可尝试”缓存不作为在线或空闲证明。
 
@@ -52,10 +52,10 @@ enum WorkerExecutionState {
 
 `execution_state` 的定义如下：
 
-| 状态 | 来源 |
-| --- | --- |
-| `IDLE` | `Jobs.execution` 为空 |
-| `RUNNING` | 执行位置存在，尚未因停止未确认而保留 |
+| 状态      | 来源                                     |
+| --------- | ---------------------------------------- |
+| `IDLE`    | `Jobs.execution` 为空                    |
+| `RUNNING` | 执行位置存在，尚未因停止未确认而保留     |
 | `BLOCKED` | Job 收尾后无法确认停止，执行位置继续保留 |
 
 `stopping` 直接读取 `Jobs.stopping`。未确认结果数量复用 `Jobs::unacknowledged_count()`，容量读取现有 `results.max_unacknowledged_results`；查询不改变计数或结果保留。
@@ -70,7 +70,7 @@ enum WorkerExecutionState {
 
 设置该字段和发布终态在同一次 `jobs` 加锁期间完成，使状态查询取得一致的结果与占用信息。
 
-该字段随执行位置保留，不依赖可被 ACK 淘汰的 Job 记录。原有停止、结果保存和执行位置释放规则保持不变，不另建恢复状态机。
+该字段随执行位置保留，不依赖已交接释放的终态记录。原有停止、结果保存和执行位置释放规则保持不变，不另建恢复状态机。
 
 RPC 在现有 `jobs` 短同步锁内取得快照，不获取执行器的异步锁，不等待当前 Job。忙时也必须能够查询。
 
@@ -82,12 +82,12 @@ RPC 在现有 `jobs` 短同步锁内取得快照，不获取执行器的异步�
 
 创建服务提供读取其停止标记的方法。Scheduler 提供本地快照，包含生命周期和待接纳名额；快照复用现有短锁及信号量，不另存容量计数。
 
-| HTTP 字段 | 定义 |
-| --- | --- |
-| `scheduler.state` | `closed` 为真时为 `stopped`；否则 `stopping` 为真时为 `stopping`；其余为 `running` |
-| `scheduler.pending_capacity` | `scheduler.pending_max_count` |
-| `scheduler.pending_used` | 容量减去 `Semaphore::available_permits()`，包含创建预留、排队和等待接纳确认的任务 |
-| `submission_admission` | Scheduler 已结束时为 `unavailable`；否则创建服务或 Scheduler 已停止新接纳时为 `stopping`；否则无剩余许可时为 `full`；其余为 `open` |
+| HTTP 字段                    | 定义                                                                                                                               |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `scheduler.state`            | `closed` 为真时为 `stopped`；否则 `stopping` 为真时为 `stopping`；其余为 `running`                                                 |
+| `scheduler.pending_capacity` | `scheduler.pending_max_count`                                                                                                      |
+| `scheduler.pending_used`     | 容量减去 `Semaphore::available_permits()`，包含创建预留、排队和等待接纳确认的任务                                                  |
+| `submission_admission`       | Scheduler 已结束时为 `unavailable`；否则创建服务或 Scheduler 已停止新接纳时为 `stopping`；否则无剩余许可时为 `full`；其余为 `open` |
 
 本地状态在每次健康 HTTP 请求中读取。不同组件的读取不是跨组件事务，快照不预留容量，也不承诺随后 POST 的结果。已有同键提交的返回规则仍以创建接口为准，不能从 `full` 推导所有 POST 都失败。
 
@@ -143,28 +143,28 @@ timeout_ms = 1_000
 3. 正常停机时，后端先停止新提交和新分派，等待已开始的业务操作；这段时间 HTTP 查询仍可用，健康探测也可继续。HTTP 服务结束后，入口通知探测任务停止，等待其结束后再关闭共享数据库。
 4. 后端因已有业务故障退出时，同时通知探测任务停止。停止信号可以中断它正在等待的查询或轮次间隔，避免退出时还继续发起健康查询。
 
-这里停止的是健康采集任务，不是 Worker 的判题任务；不发送取消 Job、释放执行位置或 ACK 的操作。
+这里停止的是健康采集任务，不是 Worker 的判题任务；不发送取消 Job、释放执行位置或消息交接的操作。
 
 ### 4.4 缓存状态和错误码
 
 数据库和每个 Worker 独立记录观测，HTTP 字段采用相同含义：
 
-| `state` | `checked_at_ms` | `error_code` | Worker `status` |
-| --- | --- | --- | --- |
-| `unknown` | `null` | `null` | `null` |
-| `ok` | 最近完成时间 | `null` | 有效快照 |
-| `failed` | 最近完成时间 | 下表错误码 | `null` |
-| `stale` | 最近完成时间 | `null` | `null` |
+| `state`   | `checked_at_ms` | `error_code` | Worker `status` |
+| --------- | --------------- | ------------ | --------------- |
+| `unknown` | `null`          | `null`       | `null`          |
+| `ok`      | 最近完成时间    | `null`       | 有效快照        |
+| `failed`  | 最近完成时间    | 下表错误码   | `null`          |
+| `stale`   | 最近完成时间    | `null`       | `null`          |
 
 尚无结果时为 `unknown`。每次探测失败立即覆盖旧成功结果，不能继续显示旧的空闲状态。最近结果的单调时间年龄达到或超过过期阈值时，对外投影为 `stale`，不再输出旧 Worker 状态；内部仍只保留最近一条结果。数据库的 `ok` 表示读取成功。
 
-| 错误码 | 来源 |
-| --- | --- |
-| `ProbeTimeout` | 数据库或 Worker 调用超出本次预算 |
-| `DatabaseReadFailed` | 数据库实际返回读取错误 |
-| `WorkerRpcFailed` | Worker RPC 返回其他通信或服务错误 |
-| `WorkerStatusUnsupported` | Worker 返回 `UNIMPLEMENTED` |
-| `InvalidWorkerStatus` | 回复违反第 3.2 节的协议条件 |
+| 错误码                    | 来源                              |
+| ------------------------- | --------------------------------- |
+| `ProbeTimeout`            | 数据库或 Worker 调用超出本次预算  |
+| `DatabaseReadFailed`      | 数据库实际返回读取错误            |
+| `WorkerRpcFailed`         | Worker RPC 返回其他通信或服务错误 |
+| `WorkerStatusUnsupported` | Worker 返回 `UNIMPLEMENTED`       |
+| `InvalidWorkerStatus`     | 回复违反第 3.2 节的协议条件       |
 
 `failed` 表示本次检查没有取得有效状态，不断言 Worker 进程已死亡。旧 Worker 不支持新 RPC 时明确显示接口不支持，不尝试用假 Job 或其他调用补齐状态。原始数据库和 RPC 错误保留在英文服务端日志中，HTTP 只返回稳定错误码；正常探测日志使用 debug。
 
@@ -239,12 +239,12 @@ Worker 按配置顺序返回，标识为 `worker-1`、`worker-2` 等；配置顺
 
 F08 按以下顺序划分任务，依赖核心 GUI 的接口与查询能力。每步只运行受影响的检查和测试，阶段结果写入[实施记录](d02-execution/06-frontend-development-execution.md#5-实施记录)。
 
-| 步骤 | 修改位置与操作 | 完成条件 |
-| --- | --- | --- |
-| H01 Worker 状态 | 在[协议源文件](../proto/acorn/worker/v1/worker.proto)追加第 3 节协议；在[Jobs](../crates/worker/src/jobs.rs)增加执行位置标记；在[RPC](../crates/worker/src/rpc.rs)实现查询并接入现有终态发布。同步[Worker 设计](01-worker-design.md#3-rpc-契约) | 生成客户端可查询空闲、忙、阻塞、停机和结果区数量；查询不改变业务状态 |
-| H02 观测数据与采集 | 在[后端配置](../crates/backend/src/config.rs)增加有缺省值的 `health` 配置并更新[示例](../config/backend.example.toml)；在[创建服务](../crates/backend/src/submissions/creation.rs)和[Scheduler](../crates/backend/src/scheduler/mod.rs)增加只读本地快照；在[数据库](../crates/backend/src/database/mod.rs)增加读取探测；在[Worker 客户端](../crates/backend/src/scheduler/worker_client.rs)增加状态调用。新增 `crates/backend/src/health.rs` 并从[库入口](../crates/backend/src/lib.rs)导出 | 单轮有界探测可更新各项缓存，查询不影响任务分派、名额和 ACK |
-| H03 HTTP 与生命周期 | 在[HTTP 路由及 DTO](../crates/backend/src/http/mod.rs)增加第 5 节接口；在[程序入口](../crates/backend/src/main.rs)组装、观察和结束共享探测任务；同步[后端设计](03-backend-design.md)的接口、配置和模块职责 | HTTP 读取本地状态和缓存；数据库普通读取失败或 Worker 无响应时仍能返回组件快照；停机按第 4.3 节收尾 |
-| H04 GUI 与说明 | 在[前端 API](../web/src/api/index.ts)及 DTO 增加接口；新增[健康页面](../web/src/pages/HealthPage.vue)，更新[路由](../web/src/router.ts)和[导航](../web/src/App.vue)；复用 `useQuery` 接入每 10 秒自动获取，复用 `ElAlert` 增加独立过期警告区。同步前端设计、F08、根说明及前端说明 | 实际页面直接展示指标，自动获取、手动刷新、请求错误和观测过期警告可用；离页清理查询；文档准确记录已执行范围 |
+| 步骤                | 修改位置与操作                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | 完成条件                                                                                                   |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| H01 Worker 状态     | 在[协议源文件](../proto/acorn/worker/v1/worker.proto)追加第 3 节协议；在[Jobs](../crates/worker/src/jobs.rs)增加执行位置标记；在[RPC](../crates/worker/src/rpc.rs)实现查询并接入现有终态发布。同步[Worker 设计](01-worker-design.md#3-rpc-契约)                                                                                                                                                                                                                                             | 生成客户端可查询空闲、忙、阻塞、停机和结果区数量；查询不改变业务状态                                       |
+| H02 观测数据与采集  | 在[后端配置](../crates/backend/src/config.rs)增加有缺省值的 `health` 配置并更新[示例](../config/backend.example.toml)；在[创建服务](../crates/backend/src/submissions/creation.rs)和[Scheduler](../crates/backend/src/scheduler/mod.rs)增加只读本地快照；在[数据库](../crates/backend/src/database/mod.rs)增加读取探测；在[Worker 客户端](../crates/backend/src/scheduler/worker_client.rs)增加状态调用。新增 `crates/backend/src/health.rs` 并从[库入口](../crates/backend/src/lib.rs)导出 | 单轮有界探测可更新各项缓存，查询不影响任务分派、名额和消息交接                                             |
+| H03 HTTP 与生命周期 | 在[HTTP 路由及 DTO](../crates/backend/src/http/mod.rs)增加第 5 节接口；在[程序入口](../crates/backend/src/main.rs)组装、观察和结束共享探测任务；同步[后端设计](03-backend-design.md)的接口、配置和模块职责                                                                                                                                                                                                                                                                                  | HTTP 读取本地状态和缓存；数据库普通读取失败或 Worker 无响应时仍能返回组件快照；停机按第 4.3 节收尾         |
+| H04 GUI 与说明      | 在[前端 API](../web/src/api/index.ts)及 DTO 增加接口；新增[健康页面](../web/src/pages/HealthPage.vue)，更新[路由](../web/src/router.ts)和[导航](../web/src/App.vue)；复用 `useQuery` 接入每 10 秒自动获取，复用 `ElAlert` 增加独立过期警告区。同步前端设计、F08、根说明及前端说明                                                                                                                                                                                                           | 实际页面直接展示指标，自动获取、手动刷新、请求错误和观测过期警告可用；离页清理查询；文档准确记录已执行范围 |
 
 H01 修改 Proto 后通过 Cargo 构建生成代码，不手工编辑 `OUT_DIR`，所有实现 `JudgeWorker` 的现有受控服务需补齐新方法，默认返回确定的受控状态即可。H02 复用现有客户端 channel；H03 更新现有组装调用和测试夹具，不保留第二套无健康功能的组装路径。
 
@@ -254,7 +254,7 @@ H01–H03 按实际变更执行已建立的命令：
 cargo fmt --all -- --check
 cargo check --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test -p acorn-worker --locked --test rpc
+ACORN_TEST_KAFKA_SERVERS=localhost:9092 cargo test -p acorn-worker --locked --test kafka real_kafka_executable_handles_sigterm -- --ignored
 cargo test -p acorn-backend --locked --test workflow
 ```
 
@@ -266,17 +266,17 @@ H04 在 `web/` 执行已有 `pnpm format:check`、`pnpm lint`、`pnpm typecheck`
 
 复用现有 RPC、MySQL、HTTP 和前端查询夹具，只为下列新增契约补断言，不建立健康测试框架或故障矩阵。
 
-| 标识 | 必须验证的行为 | 最小验证方式 |
-| --- | --- | --- |
-| HC-01 | Worker 查询在忙时可返回；停止未确认且结果淘汰后仍为 `blocked`；结果区数量及停机标记正确；查询不改变保留 | 扩展现有忙拒绝、结果区满、停止未确认和停机 RPC 测试，在既有节点插入状态查询；沿用事件同步，不断言毫秒级性能 |
-| HC-02 | `unknown → ok → failed → ok` 反映最近探测；年龄达到阈值时输出 `stale` 且不输出旧 Worker 状态；不支持 RPC 和无效状态有明确错误码 | 在同一受控后端夹具切换返回或关闭／恢复监听；时间过期在模块测试直接传入指定单调时间，不实际等待 12 秒。枚举和数量校验用一组表驱动用例覆盖三项条件 |
-| HC-03 | `pending_used` 包含已预留但尚未入队的名额；满时为 `full`；停止接纳时为 `stopping`；Worker 失败不关闭本地接纳；多个健康 GET 不触发新探测 | 在现有容量和正常停机 workflow 测试中补 HTTP 断言；固定已完成缓存并比较 GET 前后的探测调用次数，不另跑并发压测 |
-| HC-04 | 数据库普通读取失败或等待超时时只降低观测；健康接口仍能读取本地缓存 | 扩展现有普通读取锁等待用例，查询健康接口并保留原有进程继续运行断言；严重错误分类复用现有覆盖 |
+| 标识  | 必须验证的行为                                                                                                                                                                         | 最小验证方式                                                                                                                                                                        |
+| ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| HC-01 | Worker 查询在忙时可返回；停止未确认且结果淘汰后仍为 `blocked`；结果区数量及停机标记正确；查询不改变保留                                                                                | 扩展现有忙拒绝、结果区满、停止未确认和停机 RPC 测试，在既有节点插入状态查询；沿用事件同步，不断言毫秒级性能                                                                         |
+| HC-02 | `unknown → ok → failed → ok` 反映最近探测；年龄达到阈值时输出 `stale` 且不输出旧 Worker 状态；不支持 RPC 和无效状态有明确错误码                                                        | 在同一受控后端夹具切换返回或关闭／恢复监听；时间过期在模块测试直接传入指定单调时间，不实际等待 12 秒。枚举和数量校验用一组表驱动用例覆盖三项条件                                    |
+| HC-03 | `pending_used` 包含已预留但尚未入队的名额；满时为 `full`；停止接纳时为 `stopping`；Worker 失败不关闭本地接纳；多个健康 GET 不触发新探测                                                | 在现有容量和正常停机 workflow 测试中补 HTTP 断言；固定已完成缓存并比较 GET 前后的探测调用次数，不另跑并发压测                                                                       |
+| HC-04 | 数据库普通读取失败或等待超时时只降低观测；健康接口仍能读取本地缓存                                                                                                                     | 扩展现有普通读取锁等待用例，查询健康接口并保留原有进程继续运行断言；严重错误分类复用现有覆盖                                                                                        |
 | HC-05 | GUI 区分组件失败、容量状态和 HTTP 请求失败；独立警告区列出过期对象并在刷新恢复后清除；每 10 秒自动获取，忙时跳过，失败保留旧快照且下轮继续；手动刷新可用；离页清理定时器并忽略迟到结果 | 复用 F02 查询生命周期及健康状态映射测试；用一个桌面浏览器及受控响应检查自动获取、失败后的下轮恢复、忙时跳过、手动刷新、离页清理和 `stale → ok` 警告恢复，不重复题目编辑／判题主路径 |
 
 完成后做一次实际连通检查：按已有说明启动同版 Worker 和后端，查询健康接口，打开健康页面；停止一个空闲 Worker，在下一次探测完成后手动刷新，确认该节点检查失败而 HTTP 仍响应，再启动该 Worker 并确认后续探测恢复。该检查不创建提交，不要求双 Worker、真实磁盘满、完整沙箱隔离或所有 verdict 验收。
 
-新 RPC 通过实际生成客户端和服务端验证，不另外编写只重复 Prost 编解码的往返测试。现有启动、调度、ACK、存储严重错误和取消行为继续使用已有覆盖，除非实施中发现与本次改动直接相关的问题，否则不扩展测试范围。
+新 RPC 通过实际生成客户端和服务端验证，不另外编写只重复 Prost 编解码的往返测试。现有启动、消息交接、存储严重错误和取消行为继续使用已有覆盖，除非实施中发现与本次改动直接相关的问题，否则不扩展测试范围。
 
 文档变更检查格式、稳定编号和本地链接。初次实际执行结果和未测范围见[健康页面实施记录](d02-execution/06-frontend-development-execution.md#511-f08h04健康页面与最终连通验收)，后续自动获取的实现与验证边界见[补充记录](d02-execution/06-frontend-development-execution.md#512-健康页面每十秒自动获取)。
 

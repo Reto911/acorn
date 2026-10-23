@@ -16,12 +16,12 @@
 
 API、Scheduler 与 llm_review 属于同一后端进程，见[后端设计](03-backend-design.md)。基础判题闭环使用部署预置并由配置指定的单一测试用户，不启用登录鉴权；题目也由本地预置。LLM 审查沿用该归属与访问范围。
 
-| 组件 | 数据职责 |
-| --- | --- |
-| API | 使用配置的测试用户，查询题目、创建提交并交接给 Scheduler，查询提交历史及最新审查；手动审查交给 llm_review |
-| Scheduler | 维护内存队列与 Worker 路由，持久化重要业务状态与机器终态；启动时读取排队任务；按固定题目版本判断自动门槛并原子保存审查初态后交接 |
+| 组件       | 数据职责                                                                                                                           |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| API        | 使用配置的测试用户，查询题目、创建提交并交接给 Scheduler，查询提交历史及最新审查；手动审查交给 llm_review                          |
+| Scheduler  | 维护内存队列与 Worker 路由，持久化重要业务状态与机器终态；启动时读取排队任务；按固定题目版本判断自动门槛并原子保存审查初态后交接   |
 | llm_review | 使用独立内存队列，读取固定源码、题面及 verdict，条件保存最近一次意见或失败；自动与手动接纳共用停止边界，手动短操作独立于 HTTP 连接 |
-| Worker | 通过 gRPC 接收任务、返回状态和结果，不访问数据库 |
+| Worker     | 通过 Kafka 接收任务及回传事件，gRPC 只读状态，不访问数据库                                                                         |
 
 一个 Submission 最多执行一次 Worker 判题，Submission ID 同时作为 Job ID。LLM 审查可以手动重跑，每次接纳使用新的 review_id，只保存最近一次，不重新执行 Worker。源码、题面、测试输入和期望输出保存在数据库；编译产物、沙箱工作文件和运行日志不入库。日志使用英文。
 
@@ -29,18 +29,18 @@ API、Scheduler 与 llm_review 属于同一后端进程，见[后端设计](03-b
 
 ## 2. 字段表示
 
-| 类型 | 表示 |
-| --- | --- |
-| 用户、题目 ID | 有符号 `BIGINT AUTO_INCREMENT PRIMARY KEY`；Rust、HTTP 和显式预置继续使用正值 i64，不承诺连续编号 |
-| Submission ID、幂等键、审查 ID | 规范 UUID 文本，使用 `VARCHAR(36)`；Submission ID 作为不透明的 Job ID 交给 Worker |
-| 版本身份 | 有符号 `BIGINT`，`(problem_id, version_no)` 联合主键，版本号在题目内从 1 递增 |
-| 时间戳 | 有符号 `BIGINT`，UTC Unix 毫秒，字段以 `_at_ms` 结尾 |
-| 限额与统计 | 有符号 `BIGINT`，明确使用 ms、KiB 或 bytes 等既有单位；未知统计保持缺失 |
-| 源码及测试数据 | `LONGBLOB`，保留编码、换行及空字节；大小使用 `OCTET_LENGTH()` |
-| 用户名 | `VARCHAR(255)`，完整唯一键，最多 255 字符 |
-| 展示名称、题目标题、题面、密码哈希 | `LONGTEXT`；密码哈希保留包含算法、参数、盐和哈希值的编码字符串 |
-| 状态与结论 | `VARCHAR(32)` 固定枚举，使用 `CHECK`；语言为 `VARCHAR(16)`，比较模式为 `VARCHAR(64)` |
-| 终态和审查详情 | 可空 `LONGTEXT`，附 JSON 对象检查；复用有界应用类型，不重复保存独立的状态或结论列 |
+| 类型                               | 表示                                                                                              |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------- |
+| 用户、题目 ID                      | 有符号 `BIGINT AUTO_INCREMENT PRIMARY KEY`；Rust、HTTP 和显式预置继续使用正值 i64，不承诺连续编号 |
+| Submission ID、幂等键、审查 ID     | 规范 UUID 文本，使用 `VARCHAR(36)`；Submission ID 作为不透明的 Job ID 交给 Worker                 |
+| 版本身份                           | 有符号 `BIGINT`，`(problem_id, version_no)` 联合主键，版本号在题目内从 1 递增                     |
+| 时间戳                             | 有符号 `BIGINT`，UTC Unix 毫秒，字段以 `_at_ms` 结尾                                              |
+| 限额与统计                         | 有符号 `BIGINT`，明确使用 ms、KiB 或 bytes 等既有单位；未知统计保持缺失                           |
+| 源码及测试数据                     | `LONGBLOB`，保留编码、换行及空字节；大小使用 `OCTET_LENGTH()`                                     |
+| 用户名                             | `VARCHAR(255)`，完整唯一键，最多 255 字符                                                         |
+| 展示名称、题目标题、题面、密码哈希 | `LONGTEXT`；密码哈希保留包含算法、参数、盐和哈希值的编码字符串                                    |
+| 状态与结论                         | `VARCHAR(32)` 固定枚举，使用 `CHECK`；语言为 `VARCHAR(16)`，比较模式为 `VARCHAR(64)`              |
+| 终态和审查详情                     | 可空 `LONGTEXT`，附 JSON 对象检查；复用有界应用类型，不重复保存独立的状态或结论列                 |
 
 除明确标注可空外，字段均为 `NOT NULL`。ID 不是内容摘要或鉴权凭据。数据库结构版本统一管理，不在每条业务记录中重复保存。
 
@@ -54,15 +54,15 @@ MySQL 不允许对自增列使用原有的正值 CHECK，显式用户／题目 I
 
 ### 3.1 users
 
-| 字段 | 用途与约束 |
-| --- | --- |
-| `id` | 自动分配的整数主键 |
+| 字段                  | 用途与约束                                            |
+| --------------------- | ----------------------------------------------------- |
+| `id`                  | 自动分配的整数主键                                    |
 | `username_normalized` | 最多 255 字符，精确比较的完整唯一用户名，用于账号查找 |
-| `display_name` | 展示名称 |
-| `password_hash` | Argon2id 密码哈希的完整编码字符串 |
-| `role` | `student` / `admin` |
-| `status` | `active` / `disabled`；停用保留历史归属 |
-| `created_at_ms` | 账号创建时间 |
+| `display_name`        | 展示名称                                              |
+| `password_hash`       | Argon2id 密码哈希的完整编码字符串                     |
+| `role`                | `student` / `admin`                                   |
+| `status`              | `active` / `disabled`；停用保留历史归属               |
+| `created_at_ms`       | 账号创建时间                                          |
 
 用户表与密码哈希字段保留，当前后端不提供账号创建或密码验证。启用账号功能时，使用成熟库生成带随机盐的 Argon2id 哈希并验证，不保存明文或可逆密文，也不单独维护盐列。参数从 API 配置读取；基线至少使用 19 MiB 内存、2 次迭代、并行度 1，见 [OWASP 密码存储建议](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)。哈希的算法和参数随编码保存。
 
@@ -70,11 +70,11 @@ MySQL 不允许对自增列使用原有的正值 CHECK，显式用户／题目 I
 
 ### 3.2 problems
 
-| 字段 | 用途与约束 |
-| --- | --- |
-| `id` | 自动分配的整数主键，同时作为展示与查询使用的题号 |
-| `current_version_no` | 可空，最新发布版本号；空表示尚未发布 |
-| `created_at_ms` | 题目创建时间 |
+| 字段                 | 用途与约束                                       |
+| -------------------- | ------------------------------------------------ |
+| `id`                 | 自动分配的整数主键，同时作为展示与查询使用的题号 |
+| `current_version_no` | 可空，最新发布版本号；空表示尚未发布             |
+| `created_at_ms`      | 题目创建时间                                     |
 
 `(id, current_version_no)` 通过联合外键关联 `problem_versions(problem_id, version_no)`，保证发布指针属于本题。题号没有独立编辑需求时直接使用 `id`。
 
@@ -82,15 +82,15 @@ MySQL 不允许对自增列使用原有的正值 CHECK，显式用户／题目 I
 
 ### 3.3 problem_versions
 
-| 字段 | 用途与约束 |
-| --- | --- |
-| `problem_id` | 外键关联 `problems(id)`，与 `version_no` 构成联合主键 |
-| `version_no` | 题目内从 1 递增的正整数 |
-| `title` | 版本标题 |
-| `statement` | 版本题面的 Markdown 源文；原文保存，浏览器按[前端设计](05-frontend-design.md#32-答题页面)禁用内嵌 HTML 渲染 |
-| `comparison_mode` | 比较规则保留字段，默认 `trim_trailing_ascii_whitespace` |
-| `review_mode` | 自动审查模式，`DISABLED` / `ENABLE-ANY` / `ENABLE-ALL`，默认 `DISABLED`；门槛见[第 08 篇第 4.1 节](08-llm-code-review-design.md#41-根据现有结果判断) |
-| `published_at_ms` | 发布时刻 |
+| 字段              | 用途与约束                                                                                                                                           |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `problem_id`      | 外键关联 `problems(id)`，与 `version_no` 构成联合主键                                                                                                |
+| `version_no`      | 题目内从 1 递增的正整数                                                                                                                              |
+| `title`           | 版本标题                                                                                                                                             |
+| `statement`       | 版本题面的 Markdown 源文；原文保存，浏览器按[前端设计](05-frontend-design.md#32-答题页面)禁用内嵌 HTML 渲染                                          |
+| `comparison_mode` | 比较规则保留字段，默认 `trim_trailing_ascii_whitespace`                                                                                              |
+| `review_mode`     | 自动审查模式，`DISABLED` / `ENABLE-ANY` / `ENABLE-ALL`，默认 `DISABLED`；门槛见[第 08 篇第 4.1 节](08-llm-code-review-design.md#41-根据现有结果判断) |
+| `published_at_ms` | 发布时刻                                                                                                                                             |
 
 版本、语言限额、全部测试用例和发布指针在同一事务中写入。发布分配下一个版本号并更新指针，不提供将最新指针切回旧版本的入口。首版不持久化可编辑草稿；已发布内容不可修改，修改题面、测试、限额、比较规则或自动审查模式时创建新版本。自动门槛使用提交固定版本的模式，不随最新发布指针变化。
 
@@ -100,13 +100,13 @@ MySQL 不允许对自增列使用原有的正值 CHECK，显式用户／题目 I
 
 ### 3.4 problem_version_languages
 
-| 字段 | 用途与约束 |
-| --- | --- |
-| `problem_id`、`version_no` | 联合外键关联题目版本 |
-| `language_id` | 首版为 `c` 或 `python` |
-| `cpu_time_ms` | 单用例 CPU 限额，正整数 |
-| `wall_time_ms` | 单用例墙钟限额，正整数 |
-| `memory_kib` | 单用例内存限额，正整数，单位 KiB |
+| 字段                       | 用途与约束                       |
+| -------------------------- | -------------------------------- |
+| `problem_id`、`version_no` | 联合外键关联题目版本             |
+| `language_id`              | 首版为 `c` 或 `python`           |
+| `cpu_time_ms`              | 单用例 CPU 限额，正整数          |
+| `wall_time_ms`             | 单用例墙钟限额，正整数           |
+| `memory_kib`               | 单用例内存限额，正整数，单位 KiB |
 
 联合主键为 `(problem_id, version_no, language_id)`。一行表示该版本允许此语言，并给出对应预算；C 与 Python 可以采用不同限额。所有 Worker 使用相同的语言约定，不在此记录 Worker 能力。
 
@@ -114,12 +114,12 @@ MySQL 不允许对自增列使用原有的正值 CHECK，显式用户／题目 I
 
 ### 3.5 test_cases
 
-| 字段 | 用途与约束 |
-| --- | --- |
-| `problem_id`、`version_no` | 联合外键关联题目版本 |
-| `case_index` | 从 1 开始的执行顺序，版本内连续且唯一 |
-| `input` | 输入 LONGBLOB，可以为空 |
-| `expected_output` | 期望输出 LONGBLOB，可以为空 |
+| 字段                       | 用途与约束                            |
+| -------------------------- | ------------------------------------- |
+| `problem_id`、`version_no` | 联合外键关联题目版本                  |
+| `case_index`               | 从 1 开始的执行顺序，版本内连续且唯一 |
+| `input`                    | 输入 LONGBLOB，可以为空               |
+| `expected_output`          | 期望输出 LONGBLOB，可以为空           |
 
 联合主键为 `(problem_id, version_no, case_index)`。读取时使用 `ORDER BY case_index`；组装 RPC 后由数组顺序表达相同顺序。失败用例通过 Submission 固定版本和返回的序号定位。
 
@@ -129,38 +129,38 @@ MySQL 不允许对自增列使用原有的正值 CHECK，显式用户／题目 I
 
 此表保存提交历史、源码、机器业务状态、唯一机器终态及最近一次 LLM 审查。运行队列与 Worker 路由常驻 Scheduler 内存，不在数据库中保存分派地址或确认状态。
 
-| 字段 | 用途与约束 |
-| --- | --- |
-| `id` | UUID 主键，同时作为 Job ID |
-| `user_id` | 外键关联 `users(id)`，确定历史归属 |
-| `problem_id`、`version_no` | 固定题目版本 |
-| `language_id` | 固定提交语言；与版本组成联合外键，关联 `problem_version_languages` 的完整主键 |
-| `source` | 非空、有界的原始源码 LONGBLOB |
-| `create_request_key` | 创建幂等键，`UNIQUE(user_id, create_request_key)` |
-| `state` | `queued` / `dispatching` / `running` / `finished` / `failed`，创建时为 `queued` |
-| `verdict` | 可空；`finished` 时为 `AC` / `WA` / `CE` / `RE` / `TLE` / `MLE` / `OLE` |
-| `terminal_details_json` | 可空；编译诊断、失败用例或执行失败详情，不含重复的 verdict |
-| `created_at_ms` | 创建时间，供历史排序和启动时装入队列使用 |
-| `terminal_at_ms` | 可空；业务终态写入时刻，不表示旧程序实际停止的时刻 |
-| `review_status` | `DISABLED` / `PENDING` / `DOUBTFUL` / `PASS` / `FAILED`，默认 `DISABLED` |
-| `review_id` | 可空 VARCHAR(36)，每次接纳新审查生成的 UUID，用于条件完成和重跑并发控制 |
-| `review_details_json` | 可空 LONGTEXT JSON 对象，序列化后最多 32768 UTF-8 字节，包含最近一次意见或诊断、全部元数据及错误；错误 message 为后端固定英文说明，最多 512 UTF-8 字节，完整合同见[第 08 篇第 5.2 节](08-llm-code-review-design.md#52-最近一次详情) |
+| 字段                       | 用途与约束                                                                                                                                                                                                                          |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`                       | UUID 主键，同时作为 Job ID                                                                                                                                                                                                          |
+| `user_id`                  | 外键关联 `users(id)`，确定历史归属                                                                                                                                                                                                  |
+| `problem_id`、`version_no` | 固定题目版本                                                                                                                                                                                                                        |
+| `language_id`              | 固定提交语言；与版本组成联合外键，关联 `problem_version_languages` 的完整主键                                                                                                                                                       |
+| `source`                   | 非空、有界的原始源码 LONGBLOB                                                                                                                                                                                                       |
+| `create_request_key`       | 创建幂等键，`UNIQUE(user_id, create_request_key)`                                                                                                                                                                                   |
+| `state`                    | `queued` / `dispatching` / `running` / `finished` / `failed`，创建时为 `queued`                                                                                                                                                     |
+| `verdict`                  | 可空；`finished` 时为 `AC` / `WA` / `CE` / `RE` / `TLE` / `MLE` / `OLE`                                                                                                                                                             |
+| `terminal_details_json`    | 可空；编译诊断、失败用例或执行失败详情，不含重复的 verdict                                                                                                                                                                          |
+| `created_at_ms`            | 创建时间，供历史排序和启动时装入队列使用                                                                                                                                                                                            |
+| `terminal_at_ms`           | 可空；业务终态写入时刻，不表示旧程序实际停止的时刻                                                                                                                                                                                  |
+| `review_status`            | `DISABLED` / `PENDING` / `DOUBTFUL` / `PASS` / `FAILED`，默认 `DISABLED`                                                                                                                                                            |
+| `review_id`                | 可空 VARCHAR(36)，每次接纳新审查生成的 UUID，用于条件完成和重跑并发控制                                                                                                                                                             |
+| `review_details_json`      | 可空 LONGTEXT JSON 对象，序列化后最多 32768 UTF-8 字节，包含最近一次意见或诊断、全部元数据及错误；错误 message 为后端固定英文说明，最多 512 UTF-8 字节，完整合同见[第 08 篇第 5.2 节](08-llm-code-review-design.md#52-最近一次详情) |
 
 `(problem_id, version_no, language_id)` 的外键同时保证版本存在和语言属于该版本，不需要再增加一份仅检查版本存在的重复外键。主键、用户、版本、语言、源码、创建幂等键和创建时间在创建后不变。
 
 机器业务终态不可覆盖；LLM 审查状态与意见独立更新，不改变 `state`、`verdict`、`terminal_details_json` 或 `terminal_at_ms`。`verdict` 与 `review_status` 支持直接筛选，详情无需为列表展示而解析。
 
-| 状态 | `verdict` | `terminal_details_json` | `terminal_at_ms` |
-| --- | --- | --- | --- |
-| `queued` / `dispatching` / `running` | `NULL` | `NULL` | `NULL` |
-| `finished`，AC | `AC` | `NULL` | 非空 |
-| `finished`，CE | `CE` | 编译诊断和截断标记 | 非空 |
-| `finished`，用例失败 | 对应用例结论 | 唯一 `failed_case` | 非空 |
-| `failed` | `NULL` | 失败 `code` 与有界 `diagnostic` | 非空 |
+| 状态                                 | `verdict`    | `terminal_details_json`         | `terminal_at_ms` |
+| ------------------------------------ | ------------ | ------------------------------- | ---------------- |
+| `queued` / `dispatching` / `running` | `NULL`       | `NULL`                          | `NULL`           |
+| `finished`，AC                       | `AC`         | `NULL`                          | 非空             |
+| `finished`，CE                       | `CE`         | 编译诊断和截断标记              | 非空             |
+| `finished`，用例失败                 | 对应用例结论 | 唯一 `failed_case`              | 非空             |
+| `failed`                             | `NULL`       | 失败 `code` 与有界 `diagnostic` | 非空             |
 
 AC、CE 没有失败用例；WA、RE、TLE、MLE、OLE 必须保存首个失败用例。详情不保存成功用例、未运行用例、输入或答案。资源统计拿不到时保持缺失；退出码和信号至多一种。AC 不推算整题资源统计。
 
-JSON 使用应用侧固定类型，字节字段编码为 Base64。保存前验证协议形状、失败用例序号和有界输出；Base64 后的 JSON 长度不能直接套用 gRPC 二进制消息上限。
+JSON 使用应用侧固定类型，字节字段编码为 Base64。保存前验证协议形状、失败用例序号和有界输出；Base64 后的 JSON 长度不能直接套用 Kafka 二进制消息上限。
 
 审查的 DISABLED 要求 ID、详情均为 NULL；其他状态只允许出现在机器 `state=finished` 的记录上，ID 与元数据非空。PENDING 包含排队和调用中；PASS/DOUBTFUL 保存有效意见；FAILED 保存错误且 result 为 NULL，可按第 08 篇保留受限诊断对象。完成使用 `WHERE id=? AND review_id=? AND review_status='PENDING'`，重跑替换旧意见，迟到结果不覆盖新一轮。不增加审查历史表，也不把审查内容混入机器终态 JSON。
 
@@ -170,7 +170,7 @@ JSON 使用应用侧固定类型，字节字段编码为 Base64。保存前验�
 
 ## 4. 创建与内存队列
 
-本节保留既有创建、队列和审查业务合同。MySQL 数据库类型、短事务、1062 竞争读取及审查行锁按[迁移设计第 5 节](09-mysql-migration-design.md#5-运行期提交和审查事务)实现和验收。队列、固定版本、条件终态和 ACK 合同保持不变。
+本节保留既有创建、队列和审查业务合同。MySQL 数据库类型、短事务、1062 竞争读取及审查行锁按[迁移设计第 5 节](09-mysql-migration-design.md#5-运行期提交和审查事务)实现和验收。队列、固定版本和条件终态保持有效，Kafka 交接及位点规则见[Kafka 设计](10-kafka-judging-design.md)。
 
 ### 4.1 创建幂等
 
@@ -190,22 +190,18 @@ API 使用配置中的测试用户归属，校验 UTF-8 源码编码后的大小
 
 事务提交后，API 通过进程内交接向 Scheduler 传递完整任务数据：Submission ID、固定版本引用、语言、源码、有序测试数据和运行限额。复用创建请求中的源码字节，Scheduler 不再为该新任务回数据库读取源码或题库。交接不等待 Worker 空闲或判题完成，预留名额及并发查重顺序见后端设计。
 
-Scheduler 使用内存队列保存待执行任务，以 Submission ID 合并重复投递。分派前仍以 `state='queued'` 为条件持久化状态变化；条件不满足时丢弃过期投递，防止已结束的旧提交被重新执行。阶段、已完成用例数和普通轮询结果不写数据库。
+Scheduler 使用内存队列保存待执行任务，以 Submission ID 合并重复投递。发送前确认记录仍允许发布，broker 确认后才条件更新 queued → dispatching。运行或终态可能先于投递确认到达，后续更新不得回退状态；阶段和逐例进度不写数据库。
 
 进程可能在数据库提交后、入队前退出，已经保存的记录保持 `queued`。客户端重发同键请求时，API 将尚为 `queued` 且未在内存中的原任务再次交接，不创建新提交；装配重传数据时使用该记录的固定版本。已有排队记录因内存队列满而不能交接时，返回带原 Submission ID 的可重试错误，不回退其他状态。不存在常驻数据库补扫；尚未交接的排队记录在后端下一次启动时装入队列。
 
 ### 4.3 分派与终态
 
-1. 从内存队列取任务，选择配置中的 Worker，将仍为 `queued` 的记录改为 `dispatching`，提交事务后在内存中记录目标地址并调用 `SubmitJob`。
-2. 接纳成功后条件更新为 `running`，查询同一 Worker、同一 Job ID。运行状态写入允许从 `queued` 或 `dispatching` 推进，以接受先于 Kafka 投递确认到达的运行事件；迟到的 `queued → dispatching` 更新不能回退已推进的状态。
-3. 明确收到忙、结果区满或停机且未接纳的响应时，退回 `queued`、清除该次内存路由并放回队首，暂缓该节点；有其他候选 Worker 时立即分派。节点可用状态缓存在内存，最终仍由 Worker 接纳响应确认。
-4. 确定性非法请求直接失败。提交超时或断连时，按 Worker 契约做一次有界查询；无法确认或明确不存在即保存失败，不向其他 Worker 重交旧 Job。
-5. 收到终态后，在同一事务中写入结论、详情、终态时间与业务状态，并按固定 review_mode 保存自动审查初态。条件要求原状态仍为 `queued`、`dispatching` 或 `running`；首次更新生效才交接审查，重复或迟到终态不新建审查。初态选择、名额预留及交接边界见[第 08 篇第 7.1 节](08-llm-code-review-design.md#71-自动交接)。
-6. 数据库提交成功并归还连接后立即执行 ACK 并释放 Scheduler 本地占用，再交接已保存的自动审查；不等待审查交接失败的状态写入或模型请求。保存失败时不 ACK，Worker 继续保留结果；ACK 失败记录英文日志，不回滚已保存的终态、不重新判题，仍继续审查交接。重复确认使用现有幂等 RPC，不持久化确认状态。
+1. 从内存队列取得完整任务，不持有数据库连接地发送到 Kafka；临时发送失败或结果不明保留任务及许可重试。
+2. broker 确认后以 queued 为条件写 dispatching。合法 RUNNING 允许 queued/dispatching → running；数据库提交后归还对应许可，后续合法运行快照不重复写库。
+3. 首个合法终态允许 queued/dispatching/running → finished/failed，在同一事务保存结论、详情、终态时间及固定版本策略下的自动审查初态；重复或迟到终态不覆盖结果、不新建审查。
+4. 提交事务并归还连接后，尝试异步入队本条事件 offset+1，再完成已保存审查的本地交接并清除 ID。入队同步失败仍先完成交接，再向监督方报告错误；保存失败不提交事件位点。
 
-数据库事务不跨越网络调用。退回队列只针对明确未接纳的任务，不重新执行已经开始的判题。重要状态和终态仍需写库，内存队列减少的是重复队列查询与任务读取。
-
-Worker 地址列表来自 Scheduler 启动配置；本次任务到 Worker 的映射只保存在内存中。不设置 Worker 数据表、分派表或 Submission 的路由字段。
+消息发布确认与位点请求入队是不同边界，生产路径不读回或逐条等待位点回执。重放沿用条件状态更新和首个有效终态，不自动重审。数据库事务不跨网络等待；不保存 Worker 路由字段、持久确认队列或 outbox。
 
 ### 4.4 手动审查接纳
 
@@ -215,18 +211,11 @@ Worker 地址列表来自 Scheduler 启动配置；本次任务到 Worker 的映
 
 ## 5. Scheduler 启动
 
-本节描述保留的 gRPC 启动流程。Kafka 的等待恢复合同见[第 10 篇第 5.4 节](10-kafka-judging-design.md#54-运行与终态的名额收尾)：`judging_recovery` 只装配 queued 的完整固定版本任务，dispatching/running 仅读取 ID；queued 与 dispatching 的总数超过待接纳上限时报错。恢复读取不改写业务状态，正式入口切换随生命周期任务进行。
+Scheduler 只有一个活动实例，随后端进程启动。`judging_recovery` 按 created_at_ms、id 装配 queued 的固定版本完整任务，仅读取 dispatching/running 的 ID；queued 与 dispatching 合计超出待接纳容量时报错，由部署端调整配置。
 
-Scheduler 首版只有一个活动实例，随后端进程一同启动。启动时：
+`Scheduler::restore` 为 queued、dispatching 分别恢复待接纳许可及去重记录；只将 queued 放入待发队列，dispatching 不重发；running 保留等待 ID 而不占待接纳名额。恢复读取不改写机器状态，不把后端重启当作 Worker 执行失败。消费组从 broker 已保存的事件位点继续，数据库已保存但位点落后的记录按幂等合同重读。
 
-1. 在短事务中将 `dispatching` 和 `running` 记录改为 `failed`，保存 `SchedulerInterrupted` 与终态时间，已有业务终态保持不变。
-2. 检查现有排队数量不超过配置上限；超限则报错退出，由部署端调整上限。按 `created_at_ms, id` 读取 `queued` 记录，关联其固定版本、限额和测试数据，装入内存队列。正常运行后不轮询数据库队列。
-
-不查询旧 Worker、不恢复执行、不重交旧 Job，也不补发旧任务的 ACK。Worker 可能仍继续执行，其本地限额负责约束；后续新任务的接纳由 Worker 判断，不能把业务失败当作执行位置已经释放。
-
-正常运行时 Scheduler 在保存终态后发送 ACK，但其中断可能留下 Worker 未确认的记录。首版接受这一边界，不建立持久确认队列，结果区满或残留记录由部署端处理。
-
-LLM 增量在启动时另外将遗留 PENDING 保存为 FAILED/ReviewInterrupted，保留原审查 ID 和请求元数据并补完成时间；不补投模型请求。此操作不改写已有机器终态，也不恢复 Worker 判题。
+启动时另外将遗留 PENDING 审查保存为 FAILED/ReviewInterrupted，保留原审查 ID 和请求元数据并补完成时间，不补投模型请求，不改变机器终态。完整启动及停机编排见[后端生命周期](03-backend-design.md#8-启动停机与故障)。
 
 ## 6. 外键、约束与索引
 
@@ -234,14 +223,14 @@ LLM 增量在启动时另外将遗留 PENDING 保存为 FAILED/ReviewInterrupted
 
 MySQL 结构保留下列六条完整外键，使用 `ON DELETE RESTRICT` / `ON UPDATE RESTRICT`，避免删除或更改仍被历史引用的身份：
 
-| 子表字段 | 父表字段 |
-| --- | --- |
-| `problem_versions(problem_id)` | `problems(id)` |
-| `problems(id, current_version_no)` | `problem_versions(problem_id, version_no)` |
-| `problem_version_languages(problem_id, version_no)` | `problem_versions(problem_id, version_no)` |
-| `test_cases(problem_id, version_no)` | `problem_versions(problem_id, version_no)` |
-| `submissions(user_id)` | `users(id)` |
-| `submissions(problem_id, version_no, language_id)` | `problem_version_languages(problem_id, version_no, language_id)` |
+| 子表字段                                            | 父表字段                                                         |
+| --------------------------------------------------- | ---------------------------------------------------------------- |
+| `problem_versions(problem_id)`                      | `problems(id)`                                                   |
+| `problems(id, current_version_no)`                  | `problem_versions(problem_id, version_no)`                       |
+| `problem_version_languages(problem_id, version_no)` | `problem_versions(problem_id, version_no)`                       |
+| `test_cases(problem_id, version_no)`                | `problem_versions(problem_id, version_no)`                       |
+| `submissions(user_id)`                              | `users(id)`                                                      |
+| `submissions(problem_id, version_no, language_id)`  | `problem_version_languages(problem_id, version_no, language_id)` |
 
 建表先创建不带发布指针外键的 problems，待 problem_versions 及其他业务表存在后通过 ALTER TABLE 添加该外键。预置及正常发布仍先插入 `current_version_no=NULL` 的题目，再写版本与子记录，最后更新指针，不关闭外键检查。版本、用例和限额在发布后不可变；历史提交不随发布指针更新。外键引用完整主键，见 [MySQL 外键说明](https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html)。
 
@@ -255,13 +244,13 @@ SQL 同时约束审查枚举、JSON 对象格式和基本空值关系；详情�
 
 初始查询索引：
 
-| 索引 | 目的 |
-| --- | --- |
-| 各主键与唯一键对应索引 | 身份、版本、创建幂等键及用例读取 |
-| `submissions(user_id, created_at_ms, id)` | 用户提交历史 |
-| `submissions(problem_id, version_no, language_id)` | 版本/语言关联和引用检查 |
-| `submissions(verdict, created_at_ms, id)` | 按判题结论直接检索 |
-| `submissions(state, created_at_ms, id)` | 按 queued 状态及顺序装入排队任务 |
+| 索引                                               | 目的                             |
+| -------------------------------------------------- | -------------------------------- |
+| 各主键与唯一键对应索引                             | 身份、版本、创建幂等键及用例读取 |
+| `submissions(user_id, created_at_ms, id)`          | 用户提交历史                     |
+| `submissions(problem_id, version_no, language_id)` | 版本/语言关联和引用检查          |
+| `submissions(verdict, created_at_ms, id)`          | 按判题结论直接检索               |
+| `submissions(state, created_at_ms, id)`            | 按 queued 状态及顺序装入排队任务 |
 
 联合主键已覆盖版本子表的关联前缀，无需重复建立同前缀索引。Scheduler 不按每次进度或心跳更新数据库。
 
@@ -269,6 +258,6 @@ SQL 同时约束审查枚举、JSON 对象格式和基本空值关系；详情�
 
 验证单库发布与提交引用、最新版本选择和历史版本固定、配置测试用户的归属、并发同键只创建一个提交、API 直接交接与重复交接合并、明确忙时退回内存队列、AC/CE/首个失败用例的结果存储，以及按 verdict 检索。当前不验证尚未启用的登录和密码功能。
 
-Scheduler 重启验证在途记录立即失败、排队记录装入内存且不向旧 Worker 查询或补发 ACK；运行中验证迟到结果不覆盖已保存失败。确认动作必须晚于业务终态提交；字节字段往返不损坏，未知统计保持缺失。
+Scheduler 重启验证 queued 装入内存、dispatching/running 恢复等待及正确许可；重读事件不覆盖首个有效终态。位点请求入队晚于业务提交，入队失败仍完成已保存审查交接；字节往返不损坏，未知统计保持缺失。
 
 数据与事务验收要求见[迁移验收 V01–V05](09-mysql-migration-design.md#111-验收清单)，实际执行及覆盖范围见[迁移实施记录](d02-execution/09-mysql-migration-execution.md)。历史 LLM 数据检查见[审查实施记录](d02-execution/08-llm-code-review-execution.md#121-l01数据契约与离线升级)。

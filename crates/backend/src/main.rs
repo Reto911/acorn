@@ -40,13 +40,13 @@ async fn run(cli: Cli) -> Result<()> {
 
 /// Supervise business services and health collection, draining owned work before shutdown.
 async fn serve(config: &Config, database: Database) -> Result<()> {
-    let interrupted = database.interrupt_in_flight().await?;
     let reviews_interrupted = database.interrupt_pending_reviews().await?;
-    let startup = database.queued_tasks().await?;
+    let startup = database.judging_recovery().await?;
     tracing::info!(
-        interrupted,
         reviews_interrupted,
-        queued = startup.len(),
+        queued = startup.queued.len(),
+        dispatching = startup.dispatching.len(),
+        running = startup.running.len(),
         "Backend startup tasks loaded"
     );
     let listener = TcpListener::bind(config.http.listen)
@@ -160,7 +160,14 @@ async fn serve(config: &Config, database: Database) -> Result<()> {
         }
         creation.wait_idle().await;
         if !scheduler_finished {
-            abort_task(&mut scheduler_task, "Scheduler").await;
+            scheduler.shutdown();
+            if let Err(error) = scheduler_task
+                .await
+                .context("Scheduler task failed")
+                .and_then(|result| result)
+            {
+                tracing::error!(%error, "Scheduler failed during fault shutdown");
+            }
         }
         if !http_finished {
             abort_task(&mut http_task, "HTTP").await;

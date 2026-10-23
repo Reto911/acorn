@@ -207,10 +207,10 @@ impl KafkaWorker {
                             }
                             match worker.admit(request) {
                                 Ok(admitted) => {
-                                    let initial = admitted.updates.borrow().clone();
+                                    let initial = admitted.borrow().clone();
                                     if initial.state == JobState::Running as i32 { latest = Some(initial); }
-                                    retained.insert(id, Retained { lease: origin.lease.clone(), updates: admitted.updates.clone() });
-                                    active = Some(Active { origin, updates: admitted.updates });
+                                    retained.insert(id, Retained { lease: origin.lease.clone(), updates: admitted.clone() });
+                                    active = Some(Active { origin, updates: admitted });
                                 }
                                 Err(error) if error.code() == tonic::Code::InvalidArgument => {
                                     results.push_back(Entry { reply: GetJobReply {

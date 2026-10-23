@@ -109,7 +109,7 @@ Worker 独立交付点已完成；下一步 P06 实现后端 TOML、日志、SQL
 
 ### 7.9 P07：已完成
 
-已实现 [`Scheduler`](../../crates/backend/src/scheduler/mod.rs)：短同步锁保护 FIFO 和按 Submission ID 去重的本地记录，信号量作为待接纳名额的唯一计数。许可随创建预留、排队和等待接纳的任务转移，明确接纳或本地结束后释放，忙时退回队首继续持有。节点缓存保存当前 Job、配置地址和再次尝试时刻，按轮转选择；各节点的 [`tracking`](../../crates/backend/src/scheduler/tracking.rs) 独立运行并回送完成事件，不因一个 Worker 的 RPC 等待阻塞其他节点。
+已实现 [`Scheduler`](../../crates/backend/src/scheduler/mod.rs)：短同步锁保护 FIFO 和按 Submission ID 去重的本地记录，信号量作为待接纳名额的唯一计数。许可随创建预留、排队和等待接纳的任务转移，明确接纳或本地结束后释放，忙时退回队首继续持有。节点缓存保存当前 Job、配置地址和再次尝试时刻，按轮转选择；各节点的 原 tracking（已移除，现由[事件处理器](../../crates/backend/src/scheduler/kafka/events.rs)接替） 独立运行并回送完成事件，不因一个 Worker 的 RPC 等待阻塞其他节点。
 
 [`worker_client`](../../crates/backend/src/scheduler/worker_client.rs) 复用地址对应的 Tonic channel，三个调用分别设置服务端可见 deadline 和本地 timeout，应用独立发送／接收消息上限。分派先条件提交 `queued → dispatching`；明确接纳后写 `running` 并归还待接纳名额，固定地址和 ID 查询。只对明确忙、结果区满或停机拒绝退回队首并立即选择其他候选节点；提交响应不明只查询一次，查不到或无法确认时保存失败，正常查询失败也不重交旧 Job。
 

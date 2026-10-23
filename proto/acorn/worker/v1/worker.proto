@@ -2,9 +2,6 @@ syntax = "proto3";
 package acorn.worker.v1;
 
 service JudgeWorker {
-  rpc SubmitJob(SubmitJobRequest) returns (SubmitJobReply);
-  rpc GetJob(GetJobRequest) returns (GetJobReply);
-  rpc AcknowledgeResult(AcknowledgeResultRequest) returns (AcknowledgeResultReply);
   rpc GetWorkerStatus(GetWorkerStatusRequest) returns (GetWorkerStatusReply);
 }
 
@@ -24,12 +21,6 @@ message RunLimits {
   uint64 wall_time_ms = 2;
   uint64 memory_kib = 3;
 }
-message SubmitJobReply {
-  string job_id = 1;
-  JobState state = 2;
-  bool duplicate = 3;
-}
-message GetJobRequest { string job_id = 1; }
 message GetJobReply {
   string job_id = 1;
   JobState state = 2;
@@ -41,8 +32,6 @@ message GetJobReply {
     JobFailure failure = 7;
   }
 }
-message AcknowledgeResultRequest { string job_id = 1; }
-message AcknowledgeResultReply {}
 
 message GetWorkerStatusRequest {}
 message GetWorkerStatusReply {

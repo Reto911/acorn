@@ -135,7 +135,7 @@ impl EventProcessor {
 /// Event consumer owns subscription and offset submission; it never joins the Worker task group.
 pub struct EventConsumer {
     /// SDK consumer with explicit offsets and auto-reset disabled.
-    consumer: StreamConsumer,
+    consumer: Option<StreamConsumer>,
     /// Shared state transition, review and commit enqueue flow.
     processor: EventProcessor,
 }
@@ -151,20 +151,34 @@ impl EventConsumer {
         let consumer: StreamConsumer = super::consumer_config(&config.kafka).create()?;
         consumer.subscribe(&[&config.kafka.events_topic])?;
         Ok(Self {
-            consumer,
+            consumer: Some(consumer),
             processor: EventProcessor::new(config, scheduler, database, review),
         })
     }
 
     /// Process one event at a time, finishing its persistence and handoff before observing stop.
-    pub async fn run(self, mut stop: watch::Receiver<bool>) -> Result<()> {
+    pub async fn run(mut self, mut stop: watch::Receiver<bool>) -> Result<()> {
+        let result = self.consume(&mut stop).await;
+        let consumer = self.consumer.take();
+        let released = tokio::task::spawn_blocking(move || drop(consumer))
+            .await
+            .context("KafkaEventConsumerDropFailed");
+        result.and(released)
+    }
+
+    /// Finish the current persistence and review handoff before observing a stop signal.
+    async fn consume(&self, stop: &mut watch::Receiver<bool>) -> Result<()> {
+        let consumer = self
+            .consumer
+            .as_ref()
+            .expect("Event consumer is owned while receiving");
         loop {
             if *stop.borrow() {
                 return Ok(());
             }
             let received = tokio::select! {
                 _ = stop.changed() => return Ok(()),
-                received = self.consumer.recv() => received,
+                received = consumer.recv() => received,
             };
             let message = match received {
                 Ok(message) => message,
@@ -203,7 +217,18 @@ impl EventConsumer {
             Offset::Offset(message.offset() + 1),
         )?;
         self.consumer
+            .as_ref()
+            .expect("Event consumer is owned while committing")
             .commit(&offsets, CommitMode::Async)
             .context("KafkaEventCommitEnqueueFailed")
+    }
+}
+
+impl Drop for EventConsumer {
+    /// Keep SDK destruction off executor threads if supervision cancels an unfinished receive.
+    fn drop(&mut self) {
+        if let Some(consumer) = self.consumer.take() {
+            tokio::task::spawn_blocking(move || drop(consumer));
+        }
     }
 }

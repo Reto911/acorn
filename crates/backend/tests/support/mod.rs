@@ -1,26 +1,25 @@
-//! Real MySQL and gRPC fixtures with controlled, deterministic Worker responses.
+//! MySQL, HTTP and status fixtures with explicit production event processing.
 
+pub mod broker;
 pub mod real;
 
 use std::{
-    collections::HashMap,
     net::SocketAddr,
     process::{ExitStatus, Stdio},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
 };
 
 use acorn_backend::{
     config::HealthConfig,
-    database::Database,
     health::Health,
     http,
     llm_review::ReviewService,
     scheduler::Scheduler,
-    submissions::{CreateSubmission, CreationService, Submission, SubmissionState},
+    submissions::{CreateSubmission, CreationService, Submission},
 };
 use acorn_protocol::worker::v1::{
     self as proto,
@@ -51,6 +50,21 @@ pub mod database;
 pub use database::Fixture;
 
 impl Fixture {
+    /// Build a child-process TOML value without serializing the password.
+    pub fn process_config(&self) -> toml::Value {
+        let mut config: toml::Value =
+            toml::from_str(include_str!("../../../../config/backend.example.toml")).unwrap();
+        let database = &self.config.database;
+        config["database"]["endpoint"] = database.endpoint.clone().into();
+        config["database"]["name"] = database.name.clone().into();
+        config["database"]["username"] = database.username.clone().into();
+        config["database"]["max_connections"] = i64::from(database.max_connections).into();
+        config["database"]["acquire_timeout_ms"] = (database.acquire_timeout_ms as i64).into();
+        config["database"]["lock_wait_timeout_secs"] =
+            i64::from(database.lock_wait_timeout_secs).into();
+        config
+    }
+
     /// Publish a second immutable version while retaining all original version data.
     pub async fn publish_next(&self) {
         let mut connection = self.connection().await;
@@ -82,6 +96,8 @@ impl Fixture {
 pub struct BackendProcess {
     /// Child is killed if a test fails before explicit cleanup.
     child: Child,
+    /// Keep the child deployment TOML alive until the process has ended.
+    _directory: tempfile::TempDir,
     /// Pipe drained during event waits and final process collection.
     lines: Lines<BufReader<ChildStderr>>,
     /// All collected startup, shutdown and error messages.
@@ -105,12 +121,25 @@ impl BackendProcess {
                 .map(Into::into)
                 .collect(),
         );
-        config["scheduler"]["poll_interval_ms"] =
-            (fixture.config.scheduler.poll_interval_ms as i64).into();
         config["scheduler"]["retry_interval_ms"] =
             (fixture.config.scheduler.retry_interval_ms as i64).into();
         config["health"]["interval_ms"] = (fixture.config.health.interval_ms as i64).into();
         config["health"]["timeout_ms"] = (fixture.config.health.timeout_ms as i64).into();
+        config["kafka"]["bootstrap_servers"] = toml::Value::Array(
+            fixture
+                .config
+                .kafka
+                .bootstrap_servers
+                .iter()
+                .cloned()
+                .map(Into::into)
+                .collect(),
+        );
+        config["kafka"]["tasks_topic"] = fixture.config.kafka.tasks_topic.clone().into();
+        config["kafka"]["events_topic"] = fixture.config.kafka.events_topic.clone().into();
+        config["kafka"]["group_id"] = fixture.config.kafka.group_id.clone().into();
+        config["kafka"]["shutdown_timeout_ms"] =
+            (fixture.config.kafka.shutdown_timeout_ms as i64).into();
         let review = &fixture.config.llm_review;
         config["llm_review"]["enabled"] = review.enabled.into();
         config["llm_review"]["endpoint"] = review.endpoint.clone().into();
@@ -120,10 +149,8 @@ impl BackendProcess {
         config["llm_review"]["timeout_ms"] = (review.timeout_ms as i64).into();
         config["llm_review"]["max_concurrent"] = i64::from(review.max_concurrent).into();
         config["llm_review"]["pending_max_count"] = i64::from(review.pending_max_count).into();
-        let path = fixture
-            .directory
-            .path()
-            .join(format!("backend-{}.toml", Uuid::new_v4()));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("backend.toml");
         std::fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
         let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_acorn-backend"))
             .arg("--config")
@@ -137,6 +164,7 @@ impl BackendProcess {
         let lines = BufReader::new(child.stderr.take().unwrap()).lines();
         Self {
             child,
+            _directory: directory,
             lines,
             captured: String::new(),
         }
@@ -197,174 +225,16 @@ impl BackendProcess {
     }
 }
 
-/// Explicit protocol behavior; failures require no unreliable network timing.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
-    /// Refuse admission without registering any task.
-    Busy,
-    /// Return valid terminals according to a trusted fixture source marker.
-    Finish,
-    /// Remain running until the test sets the release flag.
-    Running,
-    /// Register a Job but return unavailable from SubmitJob.
-    AmbiguousFound,
-    /// Return unavailable from SubmitJob and not found from GetJob.
-    AmbiguousMissing,
-    /// Accept, then report the Job missing during ordinary polling.
-    PollMissing,
-    /// Return a terminal with the wrong Job ID.
-    Malformed,
-    /// Return a terminal but fail the single ACK call.
-    AckFailure,
-    /// Wait on a release flag before responding to SubmitJob.
-    AwaitAdmission,
-    /// Reject task data with the documented deterministic error.
-    Invalid,
-}
-
-/// Controlled service retains observable calls for assertions.
+/// Controlled read-only status service; it never receives judging tasks.
 pub struct Mock {
-    /// The one scenario selected for this endpoint.
-    pub mode: Mode,
-    /// Original submissions observed at this endpoint.
-    pub submitted: Mutex<HashMap<String, proto::SubmitJobRequest>>,
-    /// Number of SubmitJob calls, including refusals.
-    pub submits: AtomicUsize,
-    /// Accepted Job IDs in observed submission order, for startup FIFO assertions.
-    pub submission_order: Mutex<Vec<String>>,
-    /// Number of GetJob calls, including failures.
-    pub gets: AtomicUsize,
-    /// Number of AcknowledgeResult calls, including failed ACKs.
-    pub acks: AtomicUsize,
-    /// Gate ACK completion to exercise the commit-to-handoff stop boundary.
-    pub ack_released: AtomicBool,
-    /// Number of status checks, distinct from Job queries and ACKs.
+    /// Number of status requests used to observe collection rounds.
     pub status_calls: AtomicUsize,
-    /// Controlled status outcome; None waits until the caller's deadline or cancellation.
+    /// Controlled response, or None to wait for the caller's deadline.
     pub status_reply: Mutex<Option<Result<proto::GetWorkerStatusReply, Status>>>,
-    /// Test-controlled completion or admission gate.
-    pub released: AtomicBool,
-    /// Real database used to assert commit happens before ACK.
-    database: Database,
 }
 
 #[tonic::async_trait]
 impl JudgeWorker for Mock {
-    /// Accept or explicitly refuse according to the chosen controlled behavior.
-    async fn submit_job(
-        &self,
-        request: RpcRequest<proto::SubmitJobRequest>,
-    ) -> Result<Response<proto::SubmitJobReply>, Status> {
-        self.submits.fetch_add(1, Ordering::SeqCst);
-        if self.mode == Mode::Busy {
-            return Err(Status::resource_exhausted("WorkerBusy"));
-        }
-        if self.mode == Mode::Invalid {
-            return Err(Status::invalid_argument("InvalidJob"));
-        }
-        let task = request.into_inner();
-        let id = task.job_id.clone();
-        self.submission_order.lock().unwrap().push(id.clone());
-        self.submitted.lock().unwrap().insert(id.clone(), task);
-        if matches!(self.mode, Mode::AmbiguousFound | Mode::AmbiguousMissing) {
-            return Err(Status::unavailable("Controlled ambiguous submit"));
-        }
-        if self.mode == Mode::AwaitAdmission {
-            wait_for(|| self.released.load(Ordering::SeqCst)).await;
-        }
-        Ok(Response::new(proto::SubmitJobReply {
-            job_id: id,
-            state: proto::JobState::Running as i32,
-            duplicate: false,
-        }))
-    }
-
-    /// Return controlled progress, missing records, or bounded binary terminal fields.
-    async fn get_job(
-        &self,
-        request: RpcRequest<proto::GetJobRequest>,
-    ) -> Result<Response<proto::GetJobReply>, Status> {
-        self.gets.fetch_add(1, Ordering::SeqCst);
-        if matches!(self.mode, Mode::AmbiguousMissing | Mode::PollMissing) {
-            return Err(Status::not_found("JobNotFound"));
-        }
-        let id = request.into_inner().job_id;
-        let task = self.submitted.lock().unwrap().get(&id).cloned().unwrap();
-        let total = task.cases.len() as u32;
-        if self.mode == Mode::Running && !self.released.load(Ordering::SeqCst) {
-            return Ok(Response::new(proto::GetJobReply {
-                job_id: id,
-                state: proto::JobState::Running as i32,
-                phase: proto::JobPhase::RunningCase as i32,
-                total_cases: total,
-                ..Default::default()
-            }));
-        }
-        let mut reply = proto::GetJobReply {
-            job_id: id,
-            state: proto::JobState::Finished as i32,
-            phase: proto::JobPhase::Done as i32,
-            total_cases: total,
-            completed_cases: total,
-            terminal: Some(proto::get_job_reply::Terminal::Result(proto::JudgeResult {
-                verdict: proto::Verdict::Accepted as i32,
-                ..Default::default()
-            })),
-        };
-        if task.source == b"ce" {
-            reply.completed_cases = 0;
-            reply.terminal = Some(proto::get_job_reply::Terminal::Result(proto::JudgeResult {
-                verdict: proto::Verdict::CompileError as i32,
-                compile_diagnostic: vec![0, 255, 10],
-                compile_diagnostic_truncated: true,
-                ..Default::default()
-            }));
-        } else if task.source == b"wa" {
-            reply.completed_cases = 1;
-            reply.terminal = Some(proto::get_job_reply::Terminal::Result(proto::JudgeResult {
-                verdict: proto::Verdict::WrongAnswer as i32,
-                failed_case: Some(proto::FailedCase {
-                    case_index: 1,
-                    stdout: vec![0, 255],
-                    resources: Some(proto::ResourceUsage {
-                        cpu_time_us: Some(0),
-                        ..Default::default()
-                    }),
-                    exit: Some(proto::failed_case::Exit::ExitCode(0)),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }));
-        }
-        if self.mode == Mode::Malformed {
-            reply.job_id = "wrong-id".into();
-        }
-        Ok(Response::new(reply))
-    }
-
-    /// Assert the real committed terminal is already visible before accepting ACK.
-    async fn acknowledge_result(
-        &self,
-        request: RpcRequest<proto::AcknowledgeResultRequest>,
-    ) -> Result<Response<proto::AcknowledgeResultReply>, Status> {
-        let submission = self
-            .database
-            .submission(&request.into_inner().job_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(matches!(
-            submission.info.state,
-            SubmissionState::Finished | SubmissionState::Failed
-        ));
-        self.acks.fetch_add(1, Ordering::SeqCst);
-        wait_for(|| self.ack_released.load(Ordering::SeqCst)).await;
-        if self.mode == Mode::AckFailure {
-            return Err(Status::unavailable("Controlled ACK failure"));
-        }
-        Ok(Response::new(proto::AcknowledgeResultReply {}))
-    }
-
     /// Return the selected health outcome without changing the controlled judging scenario.
     async fn get_worker_status(
         &self,
@@ -393,17 +263,10 @@ pub struct RpcServer {
 
 impl RpcServer {
     /// Bind a unique loopback endpoint before starting the transport task.
-    pub async fn start(mode: Mode, database: Database) -> Self {
+    pub async fn start() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = format!("http://{}", listener.local_addr().unwrap());
         let mock = Arc::new(Mock {
-            mode,
-            submitted: Mutex::new(HashMap::new()),
-            submits: AtomicUsize::new(0),
-            submission_order: Mutex::new(Vec::new()),
-            gets: AtomicUsize::new(0),
-            acks: AtomicUsize::new(0),
-            ack_released: AtomicBool::new(true),
             status_calls: AtomicUsize::new(0),
             status_reply: Mutex::new(Some(Ok(proto::GetWorkerStatusReply {
                 stopping: false,
@@ -411,8 +274,6 @@ impl RpcServer {
                 unacknowledged_results: 0,
                 unacknowledged_capacity: 128,
             }))),
-            released: AtomicBool::new(false),
-            database,
         });
         let (stop, stopped) = oneshot::channel();
         let task = tokio::spawn(
@@ -430,7 +291,7 @@ impl RpcServer {
         }
     }
 
-    /// Stop the server only after Scheduler tracking has drained.
+    /// Stop the status server after its health collector has drained.
     pub async fn close(self) {
         self.stop.send(()).unwrap();
         tokio::time::timeout(Duration::from_secs(5), self.task)
@@ -441,7 +302,7 @@ impl RpcServer {
     }
 }
 
-/// P07/P08 assembly with real transport, MySQL and replaceable Worker behavior.
+/// HTTP and MySQL assembly with controlled events and real status transport.
 pub struct Harness {
     /// Database files and configuration.
     pub fixture: Fixture,
@@ -457,8 +318,6 @@ pub struct Harness {
     pub app: Router,
     /// Independently controlled Worker endpoints.
     pub servers: Vec<RpcServer>,
-    /// Production dispatcher task, observed at cleanup.
-    task: JoinHandle<anyhow::Result<()>>,
     /// Collector observed once, including tests that stop it before full teardown.
     health_task: Option<JoinHandle<anyhow::Result<()>>>,
     /// Review cancellation and persistence must finish before closing the pool.
@@ -466,30 +325,28 @@ pub struct Harness {
 }
 
 impl Harness {
-    /// Assemble all services with slow retry so busy-refusal assertions stay deterministic.
-    pub async fn start(modes: &[Mode], capacity: u32) -> Self {
-        Self::start_with_health(modes, capacity, HealthConfig::default()).await
+    /// Assemble HTTP, storage, review and controlled status observations.
+    pub async fn start(workers: usize, capacity: u32) -> Self {
+        Self::start_with_health(workers, capacity, HealthConfig::default()).await
     }
 
     /// Assemble the same services with a test-selected collection cadence and budget.
     pub async fn start_with_health(
-        modes: &[Mode],
+        workers: usize,
         capacity: u32,
         health_config: HealthConfig,
     ) -> Self {
         let mut fixture = Fixture::new().await;
         fixture.config.health = health_config;
         fixture.config.scheduler.pending_max_count = capacity;
-        Self::start_fixture(fixture, modes).await
+        Self::start_fixture(fixture, workers).await
     }
 
     /// Assemble production services using a fixture with explicitly selected review settings.
-    pub async fn start_fixture(mut fixture: Fixture, modes: &[Mode]) -> Self {
-        fixture.config.scheduler.retry_interval_ms = 60_000;
-        fixture.config.scheduler.poll_interval_ms = 10;
+    pub async fn start_fixture(mut fixture: Fixture, workers: usize) -> Self {
         let mut servers = Vec::new();
-        for &mode in modes {
-            servers.push(RpcServer::start(mode, fixture.database.clone()).await);
+        for _ in 0..workers {
+            servers.push(RpcServer::start().await);
         }
         fixture.config.scheduler.workers = servers
             .iter()
@@ -497,13 +354,7 @@ impl Harness {
             .collect();
         let (review, review_task) =
             ReviewService::start(&fixture.config.llm_review, fixture.database.clone()).unwrap();
-        let (scheduler, task) = Scheduler::start(
-            &fixture.config,
-            fixture.database.clone(),
-            Vec::new(),
-            review.clone(),
-        )
-        .unwrap();
+        let scheduler = Scheduler::restore(&fixture.config, Default::default()).unwrap();
         let creation =
             CreationService::new(&fixture.config, fixture.database.clone(), scheduler.clone());
         let (health, health_task) =
@@ -524,13 +375,12 @@ impl Harness {
             review,
             app,
             servers,
-            task,
             health_task: Some(health_task),
             review_task,
         }
     }
 
-    /// Reserve capacity before creating and handing off a task without HTTP.
+    /// Create a fixture task and deliver its controlled terminal through EventProcessor.
     pub async fn submit(&self, language: &str, source: &str) -> String {
         let permit = self.scheduler.reserve().unwrap();
         let created = self
@@ -550,64 +400,44 @@ impl Harness {
                 .enqueue(created.task.unwrap(), permit)
                 .unwrap()
         );
+        self.terminal(&id).await;
         id
     }
 
-    /// Wait for persistence and then tracking cleanup, including the one bounded ACK.
+    /// Deliver a controlled terminal through the production event processor and return storage.
     pub async fn terminal(&self, id: &str) -> Submission {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let submission = self.fixture.database.submission(id).await.unwrap().unwrap();
-                if matches!(
-                    submission.info.state,
-                    SubmissionState::Finished | SubmissionState::Failed
-                ) && !self.scheduler.contains(id)
-                {
-                    return submission;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
+        let stored = self.fixture.database.submission(id).await.unwrap().unwrap();
+        let context = self
+            .fixture
+            .database
+            .judging_context(id)
+            .await
+            .unwrap()
+            .unwrap();
+        let reply = terminal_reply(id, &stored.source, context.total_cases);
+        let encoded = acorn_protocol::records::encode_event(
+            &reply,
+            self.fixture.config.kafka.max_event_record_bytes,
+        )
+        .unwrap();
+        acorn_backend::scheduler::kafka::EventProcessor::new(
+            &self.fixture.config,
+            self.scheduler.clone(),
+            self.fixture.database.clone(),
+            self.review.clone(),
+        )
+        .process(encoded.payload(), || Ok(()))
         .await
-        .unwrap()
+        .unwrap();
+        self.fixture.database.submission(id).await.unwrap().unwrap()
     }
 
-    /// Drain owned creation and tracking before closing transport and database.
+    /// Drain owned creation and review work before closing status transport and storage.
     pub async fn close(mut self) {
         self.creation.stop();
         self.scheduler.pause();
         self.review.stop();
         self.creation.wait_idle().await;
-        for server in &self.servers {
-            server.mock.released.store(true, Ordering::SeqCst);
-        }
-        self.scheduler.shutdown();
-        tokio::time::timeout(Duration::from_secs(5), &mut self.task)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        (&mut self.review_task).await.unwrap().unwrap();
-        self.stop_health().await;
-        for server in self.servers {
-            server.close().await;
-        }
-        self.fixture.close().await;
-    }
-
-    /// Observe an expected fatal dispatcher error rather than claiming normal shutdown.
-    pub async fn close_failed(mut self) {
-        self.creation.stop();
-        self.health.stop();
-        self.review.stop();
-        self.creation.wait_idle().await;
-        assert!(
-            tokio::time::timeout(Duration::from_secs(5), &mut self.task)
-                .await
-                .unwrap()
-                .unwrap()
-                .is_err()
-        );
         (&mut self.review_task).await.unwrap().unwrap();
         self.stop_health().await;
         for server in self.servers {
@@ -722,4 +552,45 @@ pub async fn network_call(
     })
     .await
     .unwrap()
+}
+
+/// Controlled terminal shapes for event and HTTP contract checks; no execution is simulated.
+pub fn terminal_reply(id: &str, source: &[u8], total: u32) -> proto::GetJobReply {
+    let mut reply = proto::GetJobReply {
+        job_id: id.into(),
+        state: proto::JobState::Finished as i32,
+        phase: proto::JobPhase::Done as i32,
+        total_cases: total,
+        completed_cases: total,
+        terminal: Some(proto::get_job_reply::Terminal::Result(proto::JudgeResult {
+            verdict: proto::Verdict::Accepted as i32,
+            ..Default::default()
+        })),
+    };
+    if source == b"ce" {
+        reply.completed_cases = 0;
+        reply.terminal = Some(proto::get_job_reply::Terminal::Result(proto::JudgeResult {
+            verdict: proto::Verdict::CompileError as i32,
+            compile_diagnostic: vec![0, 255, 10],
+            compile_diagnostic_truncated: true,
+            ..Default::default()
+        }));
+    } else if source == b"wa" {
+        reply.completed_cases = 1;
+        reply.terminal = Some(proto::get_job_reply::Terminal::Result(proto::JudgeResult {
+            verdict: proto::Verdict::WrongAnswer as i32,
+            failed_case: Some(proto::FailedCase {
+                case_index: 1,
+                stdout: vec![0, 255],
+                resources: Some(proto::ResourceUsage {
+                    cpu_time_us: Some(0),
+                    ..Default::default()
+                }),
+                exit: Some(proto::failed_case::Exit::ExitCode(0)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }));
+    }
+    reply
 }

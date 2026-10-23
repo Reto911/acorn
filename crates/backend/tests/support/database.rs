@@ -18,8 +18,6 @@ struct TestSettings {
 
 /// One independent MySQL database and the application handle that uses it.
 pub struct Fixture {
-    /// Temporary process configurations and other non-database test files.
-    pub directory: tempfile::TempDir,
     /// Deployment-aligned settings with this invocation's unique database name.
     pub config: Config,
     /// Actual bounded application connection pool.
@@ -74,11 +72,7 @@ impl Fixture {
         }
         connection.close().await.unwrap();
         let database = Database::open(&config).await.unwrap();
-        Self {
-            directory: tempfile::tempdir().unwrap(),
-            config,
-            database,
-        }
+        Self { config, database }
     }
 
     /// Open an independent control connection with the application session settings.
@@ -134,21 +128,6 @@ impl Fixture {
         })
         .await
         .expect("Concurrent MySQL test statements must reach the controlled row lock");
-    }
-
-    /// Build a child-process TOML value without serializing the password.
-    pub fn process_config(&self) -> toml::Value {
-        let mut config: toml::Value =
-            toml::from_str(include_str!("../../../../config/backend.example.toml")).unwrap();
-        let database = &self.config.database;
-        config["database"]["endpoint"] = database.endpoint.clone().into();
-        config["database"]["name"] = database.name.clone().into();
-        config["database"]["username"] = database.username.clone().into();
-        config["database"]["max_connections"] = i64::from(database.max_connections).into();
-        config["database"]["acquire_timeout_ms"] = (database.acquire_timeout_ms as i64).into();
-        config["database"]["lock_wait_timeout_secs"] =
-            i64::from(database.lock_wait_timeout_secs).into();
-        config
     }
 
     /// Close the application pool before deleting only this fixture's owned database.

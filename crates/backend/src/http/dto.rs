@@ -209,7 +209,7 @@ struct WorkerStatus {
     stopping: bool,
     /// Idle, running or blocked execution occupancy.
     execution_state: &'static str,
-    /// Terminal results awaiting explicit ACK.
+    /// Retained runtime terminals awaiting Kafka handoff.
     unacknowledged_results: u64,
     /// Positive configured result-retention ceiling.
     unacknowledged_capacity: u64,

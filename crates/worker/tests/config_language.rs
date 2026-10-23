@@ -37,7 +37,10 @@ fn example_builds_both_language_plans() {
 /// An insufficient result envelope and a nonpositive execution budget block startup.
 #[test]
 fn invalid_resource_settings_are_explicit_errors() {
-    let too_small = EXAMPLE.replace("max_response_bytes = 1_048_576", "max_response_bytes = 100");
+    let too_small = EXAMPLE.replace(
+        "max_event_record_bytes = 1_048_576",
+        "max_event_record_bytes = 100",
+    );
     assert!(
         Config::parse(&too_small)
             .unwrap_err()

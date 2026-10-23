@@ -79,7 +79,7 @@ pub struct WorkerStatus {
     pub stopping: bool,
     /// Occupancy of the remote execution position.
     pub execution_state: ExecutionState,
-    /// Terminal results still awaiting explicit ACK.
+    /// Retained runtime terminals still awaiting Kafka handoff.
     pub unacknowledged_results: u64,
     /// Positive configured ceiling for those results.
     pub unacknowledged_capacity: u64,
@@ -211,7 +211,7 @@ pub struct Health {
 }
 
 impl Health {
-    /// Start one collector from validated configuration and existing dispatcher channels.
+    /// Start one collector from validated configuration and existing status channels.
     pub fn start(
         config: &HealthConfig,
         database: Database,

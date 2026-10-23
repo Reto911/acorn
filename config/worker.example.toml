@@ -51,7 +51,6 @@ environment = { PATH = "/usr/bin:/bin", LANG = "C.UTF-8", HOME = "/box", TMPDIR 
 
 [results]
 max_unacknowledged_results = 128
-acknowledged_queue_length = 128
 
 [logging]
 level = "info"

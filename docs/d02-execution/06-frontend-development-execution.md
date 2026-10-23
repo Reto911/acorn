@@ -197,7 +197,7 @@ F01–F07 首版 GUI 交付完成。当前仍无登录、多用户隔离、历�
 
 [执行位置](../../crates/worker/src/jobs.rs) 新增 `stop_unconfirmed`，接纳时为 false，执行器返回且无法安全释放时与终态在同一次持锁更新中设为 true。状态从执行位置投影为 `IDLE`、`RUNNING` 或 `BLOCKED`，不依赖可能被 ACK 淘汰的结果记录。[后端受控服务](../../crates/backend/tests/support/mod.rs) 补齐新方法，返回固定有效状态，保持现有测试组装可编译；该受控状态不用于证明真实 Worker 的占用情况。
 
-扩展[既有 RPC 测试](../../crates/worker/tests/rpc.rs)，通过真实回环 gRPC 及生成客户端验证 HC-01：初始空闲查询不启动执行；执行中可查询 running；正常结束释放位置且未确认数量增加，ACK 后数量减少；结果区满时查询仍成功，重复查询不确认或淘汰结果；停止未确认时为 blocked，ACK 和结果淘汰后仍保持 blocked；停机后 stopping 为 true，状态与结果仍可查询。沿用已有事件同步和调用期限，没有增加毫秒级性能断言或新的测试框架。
+扩展原 既有 RPC 测试（已移除，现有入口及结果交接覆盖见[Kafka 测试](../../crates/worker/tests/kafka.rs)），通过真实回环 gRPC 及生成客户端验证 HC-01：初始空闲查询不启动执行；执行中可查询 running；正常结束释放位置且未确认数量增加，ACK 后数量减少；结果区满时查询仍成功，重复查询不确认或淘汰结果；停止未确认时为 blocked，ACK 和结果淘汰后仍保持 blocked；停机后 stopping 为 true，状态与结果仍可查询。沿用已有事件同步和调用期限，没有增加毫秒级性能断言或新的测试框架。
 
 已执行：
 

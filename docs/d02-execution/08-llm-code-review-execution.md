@@ -82,7 +82,7 @@ L02 已完成。[后端配置](../../crates/backend/src/config.rs)和[示例](..
 
 L03 已完成。[审查服务](../../crates/backend/src/llm_review/service.rs)使用独立 FIFO、待执行信号量和受配置限制的运行任务，复用单个 ReviewClient 和既有数据库。预留及排队任务持有待执行名额，转入执行时释放；活动提交去重，任务只保留身份和请求元数据。模型输入在执行时读取，数据库方法返回后已归还连接；请求期间不占 Scheduler 名额、Worker 本地占用或数据库连接。按 review_id 条件完成，保留最近一次意见，不新增扫描补投、重试、恢复框架或依赖。
 
-[自动策略](../../crates/backend/src/llm_review/policy.rs)复用 L01 已由共同任务装配入口携带的固定版本 review_mode，按已校验的机器终态判断 ANY、ALL 与 DISABLED；不修改 Worker 或 Proto。[判题跟踪](../../crates/backend/src/scheduler/tracking.rs)在终态保存前尝试预留独立审查名额，用既有条件 UPDATE 原子保存机器终态和审查初态。未生效或写入失败时释放名额，未保存的机器结果不 ACK；队列满、服务禁用或停止时直接保存相应审查失败。
+[自动策略](../../crates/backend/src/llm_review/policy.rs)复用 L01 已由共同任务装配入口携带的固定版本 review_mode，按已校验的机器终态判断 ANY、ALL 与 DISABLED；不修改 Worker 或 Proto。原判题跟踪（已移除，现由[事件处理器](../../crates/backend/src/scheduler/kafka/events.rs)接替）在终态保存前尝试预留独立审查名额，用既有条件 UPDATE 原子保存机器终态和审查初态。未生效或写入失败时释放名额，未保存的机器结果不 ACK；队列满、服务禁用或停止时直接保存相应审查失败。
 
 首次机器终态保存后先执行一次 ACK，将审查意图和预留名额作为跟踪完成事件返回。[调度循环](../../crates/backend/src/scheduler/mod.rs)释放节点、路由及本地在途身份后再交接；ACK 失败仍交接，重复终态不新建审查。交接遇到停止或关闭时，先释放审查名额，再按本次 ID 保存 ReviewInterrupted 或 ReviewUnavailable；该写入发生在 ACK 和节点释放之后。正常交接只修改本地队列，不等待模型。
 

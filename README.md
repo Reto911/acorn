@@ -15,19 +15,19 @@ Acorn is a programming judge for single-file C and Python 3 submissions, with a 
 
 ## Project Structure
 
-The backend serves the browser over HTTP JSON and dispatches jobs to Workers over gRPC. Workers execute code in Isolate, while the backend stores submissions and results in MySQL. LLM reviews run through a separate queue in the backend.
+The backend serves the browser over HTTP JSON and publishes jobs and consumes Worker events through Kafka; gRPC provides read-only Worker status. Workers execute code in Isolate, while the backend stores submissions and results in MySQL. LLM reviews run through a separate queue in the backend.
 
-| Directory                                    | Contents                                                                 |
-| -------------------------------------------- | ------------------------------------------------------------------------ |
-| [crates/backend](crates/backend/README.md)   | Rust backend, HTTP API, Scheduler, health collection, and LLM reviews    |
-| [crates/worker](crates/worker/README.md)     | C/Python judging executor, Isolate wrapper, and gRPC service             |
-| [crates/protocol](crates/protocol/README.md) | Protobuf messages and generated gRPC clients and servers                 |
-| [crates/kafka](crates/kafka/README.md)       | Shared Kafka defaults, validation, and client configuration policy       |
-| [web](web/README.md)                         | Browser interface built with Vue 3, TypeScript, Element Plus, and Monaco |
-| [sql](sql/README.md)                         | MySQL schema and the built-in A + B problem                              |
-| [config](config)                             | Example TOML configurations for the backend and Worker                   |
-| [examples](examples)                         | Development user seed SQL and sample submissions                         |
-| [docs](docs/README.md)                       | Architecture, interface contracts, and development records               |
+| Directory                                    | Contents                                                                     |
+| -------------------------------------------- | ---------------------------------------------------------------------------- |
+| [crates/backend](crates/backend/README.md)   | Rust backend, HTTP API, Scheduler, health collection, and LLM reviews        |
+| [crates/worker](crates/worker/README.md)     | C/Python judging executor, Isolate wrapper, Kafka consumption and status RPC |
+| [crates/protocol](crates/protocol/README.md) | Protobuf messages and generated gRPC clients and servers                     |
+| [crates/kafka](crates/kafka/README.md)       | Shared Kafka defaults, validation, and client configuration policy           |
+| [web](web/README.md)                         | Browser interface built with Vue 3, TypeScript, Element Plus, and Monaco     |
+| [sql](sql/README.md)                         | MySQL schema and the built-in A + B problem                                  |
+| [config](config)                             | Example TOML configurations for the backend and Worker                       |
+| [examples](examples)                         | Development user seed SQL and sample submissions                             |
+| [docs](docs/README.md)                       | Architecture, interface contracts, and development records                   |
 
 ## Installation
 
@@ -42,6 +42,7 @@ The backend serves the browser over HTTP JSON and dispatches jobs to Workers ove
 | librdkafka development package (at least 2.12.1) and pkg-config | Default dynamic build; provide the matching shared library at runtime |
 | MySQL 8.4 / InnoDB and the MySQL command-line client            | Initialize and manage the database                                    |
 | Node.js 24.x, at least 24.21.0; pnpm 12.11.2                    | Install, build, and run the frontend                                  |
+| Kafka broker reachable by the backend and Workers               | Task and event topics with initialized consumer group offsets         |
 | curl                                                            | Call the HTTP API from the command line                               |
 
 Have an administrator prepare Isolate, cgroups, user quotas, and execution permissions using the [Worker installation guide](crates/worker/README.md#安装与沙箱准备). The paths to GCC, Python, and Isolate are configured in the Worker TOML file.
@@ -101,6 +102,10 @@ mysql --host=127.0.0.1 --port=3306 --user=example_initializer --password --ssl-m
 This creates schema version 4, user 1, and the A + B problem with ID 1, C/Python resource limits, and 104 test cases. Reuse this database on subsequent starts. Initialize an empty database and stop at the first SQL error. The backend validates the schema version and configured user at startup. The initialization scripts use MySQL syntax; the application does not import old databases or upgrade them automatically.
 
 See the [SQL guide](sql/README.md) for script contents, account responsibilities, and handling partial initialization.
+
+### Prepare Kafka
+
+Configure a reachable broker, create the task and event topics, and initialize both consumer groups as specified in the [deployment contract](docs/10-kafka-judging-design.md#10-整体部署). Match the topics in both TOML files and use separate backend-event and Worker-task groups. All Workers share the task group. The services disable automatic topic creation and offset reset.
 
 ### Start the Services
 
@@ -177,15 +182,16 @@ Align request, message, and result budgets between the backend and all Workers. 
 
 Both backend and Worker configurations require `[kafka]` with bootstrap endpoints, both topics, and `group_id` for their own consumer group; budgets have defaults. The backend also provides independent `[worker_membership]` observation settings. See the [backend guide](crates/backend/README.md#kafka-客户端配置), [Worker guide](crates/worker/README.md#kafka-客户端配置), and [protocol guide](crates/protocol/README.md#kafka-消息编解码) for fields, client options, and message codecs. For configurations using the earlier Kafka field names, rename `[kafka].events_group_id` (backend) or `[kafka].tasks_group_id` (Worker) to `group_id`, preserving its value. For existing configurations, merge the example `[kafka]` section into the file passed to `--config`, preserving database, review, and other settings. `[worker_membership]` may be omitted to use its defaults.
 
+Existing deployment files must remove `scheduler.poll_interval_ms`, `grpc.submit_timeout_ms/get_timeout_ms/ack_timeout_ms`, Worker `results.acknowledged_queue_length`, and Kafka `commit_timeout_ms`.
+
 ### Multiple Workers
 
-Give each Worker its own listening address and a `sandbox.box_id` reserved on its host, then add the endpoints to the backend configuration:
+Give each Worker its own listening address and a `sandbox.box_id` reserved on its host, share the Kafka task group across Workers, then add their status endpoints to the backend configuration:
 
 ```toml
 [scheduler]
 pending_max_count = 128
 workers = ["http://127.0.0.1:50051", "http://127.0.0.1:50052"]
-poll_interval_ms = 100
 retry_interval_ms = 1_000
 ```
 
@@ -203,7 +209,7 @@ The System status (`系统状态`) page at [/health](http://localhost:5173/healt
 
 Both Rust services write English logs to stderr, with the level controlled by `logging.level`. Use submission IDs to correlate backend dispatch, result persistence, and Worker execution logs.
 
-To stop the system, send Ctrl-C or SIGTERM to the backend first. Wait for in-flight judging results to be saved and acknowledged before stopping the Workers. On restart, the backend loads undispatched submissions and marks old in-flight judging and review tasks as interrupted. Persisted terminal results remain available.
+To stop the system, send Ctrl-C or SIGTERM to the backend first. The backend drains registered local operations and current message work within its message budget; it does not wait for remote judging to finish. Workers stop through their sandbox and message shutdown budgets. On restart, only queued submissions are republished; dispatching/running submissions continue waiting for events. Old pending reviews are interrupted. Consumer RAII destruction runs on a blocking thread and may continue after the application wait times out. Persisted terminal results remain available.
 
 For frontend deployment, build `web/dist/`, serve it with a static server, and proxy same-origin `/api/` requests to the backend. Use HTTPS for remote browser access to support `crypto.randomUUID()` when creating submissions. See the [frontend deployment guide](web/README.md#构建与静态部署) for an example.
 

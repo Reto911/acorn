@@ -34,7 +34,7 @@ use crate::support::Fixture;
 
 /// Wait for one asynchronous state transition using the real shared MySQL pool.
 async fn state(database: &Database, id: &str, expected: SubmissionState) -> Result<()> {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if database.submission_state(id).await? == Some(expected) {
                 return Ok(());
@@ -165,7 +165,9 @@ async fn real_kafka_backend_publication_and_events() -> Result<()> {
         )?;
         services.spawn(publisher.run(stop.subscribe()));
         services.spawn(events.run(stop.subscribe()));
-        let message = tokio::time::timeout(Duration::from_secs(10), tasks.recv()).await??;
+        let message = tokio::time::timeout(Duration::from_secs(10), tasks.recv())
+            .await??
+            .detach();
         let task = records::decode_task(
             message.payload().context("Missing task payload")?,
             config.kafka.max_task_record_bytes,
@@ -277,4 +279,202 @@ async fn real_kafka_backend_publication_and_events() -> Result<()> {
     drained.context("Backend Kafka services did not stop")??;
     reviewed??;
     result
+}
+
+/// Actual startup restores waiting states, consumes offline results and supervises fatal events.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires ACORN_TEST_KAFKA_SERVERS and isolated MySQL"]
+async fn process_kafka_restart_and_supervised_failure() -> Result<()> {
+    use crate::support::{BackendProcess, broker::Broker, network_call, terminal_reply};
+    let mut fixture = Fixture::new().await;
+    fixture.config.scheduler.pending_max_count = 4;
+    let queued = fixture.queued("python").await;
+    let dispatching = fixture.queued("c").await;
+    let running = fixture.queued("python").await;
+    fixture.database.mark_dispatching(&dispatching).await?;
+    fixture.database.mark_running(&running).await?;
+    let broker = Broker::start(&mut fixture).await;
+    let tasks = broker.tasks();
+    let mut backend = BackendProcess::spawn(&fixture);
+    let address = backend.listening().await;
+    let message = tokio::time::timeout(Duration::from_secs(10), tasks.recv())
+        .await??
+        .detach();
+    let task = records::decode_task(
+        message.payload().context("Missing task")?,
+        broker.config.max_task_record_bytes,
+    )?;
+    ensure!(
+        task.job_id == queued,
+        "Startup republished an already delivered task"
+    );
+    state(&fixture.database, &queued, SubmissionState::Dispatching).await?;
+    let (_, health) = network_call(address, "GET", "/api/v1/health", None, None).await;
+    ensure!(
+        health["scheduler"]["pending_used"] == 2,
+        "Waiting permits were not restored: {health}"
+    );
+    ensure!(
+        fixture.database.submission_state(&running).await? == Some(SubmissionState::Running),
+        "Startup interrupted a running Worker"
+    );
+    let mut event = terminal_reply(&queued, b"ac", 104);
+    event.state = JobState::Running.into();
+    event.phase = JobPhase::Preparing.into();
+    event.completed_cases = 0;
+    event.terminal = None;
+    broker.event(&event).await;
+    state(&fixture.database, &queued, SubmissionState::Running).await?;
+    backend.terminate();
+    let (status, logs) = backend.finish().await;
+    ensure!(
+        status.success(),
+        "Normal shutdown waited for remote judging: {logs}"
+    );
+    let next = fixture.queued("python").await;
+    // Worker results remain independently deliverable while the backend is down.
+    broker.event(&terminal_reply(&running, b"ac", 104)).await;
+    let mut backend = BackendProcess::spawn(&fixture);
+    backend.listening().await;
+    let message = tokio::time::timeout(Duration::from_secs(10), tasks.recv())
+        .await??
+        .detach();
+    let task = records::decode_task(
+        message.payload().context("Missing restarted task")?,
+        broker.config.max_task_record_bytes,
+    )?;
+    ensure!(
+        task.job_id == next,
+        "Restart republished dispatching or running work"
+    );
+    state(&fixture.database, &running, SubmissionState::Finished).await?;
+    ensure!(
+        fixture.database.submission_state(&dispatching).await?
+            == Some(SubmissionState::Dispatching),
+        "Restart changed waiting state"
+    );
+    ensure!(
+        fixture.database.submission_state(&queued).await? == Some(SubmissionState::Running),
+        "Restart changed active state"
+    );
+    broker
+        .event(&terminal_reply(&Uuid::new_v4().to_string(), b"ac", 104))
+        .await;
+    let (status, logs) = backend.finish().await;
+    ensure!(
+        !status.success()
+            && logs.contains("KafkaUnknownSubmission")
+            && logs.contains("Backend fault"),
+        "Consumer failure was not supervised: {logs}"
+    );
+    tokio::task::spawn_blocking(move || drop(tasks)).await?;
+    broker.close().await;
+    fixture.close().await;
+    Ok(())
+}
+
+/// HTTP, both formal binaries, Kafka and MySQL complete one controlled judging workflow.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires isolated MySQL/Kafka and ACORN_TEST_WORKER_EXECUTABLE built for this checkout"]
+async fn process_http_kafka_worker() -> Result<()> {
+    use crate::support::{BackendProcess, broker::Broker, network_call};
+    use acorn_protocol::worker::v1::{
+        GetWorkerStatusRequest, WorkerExecutionState, judge_worker_client::JudgeWorkerClient,
+    };
+    let mut fixture = Fixture::new().await;
+    let broker = Broker::start(&mut fixture).await;
+    let manager = crate::worker_fixture::Fixture::new("normal");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let address = listener.local_addr()?;
+    drop(listener);
+    fixture.config.scheduler.workers = vec![format!("http://{address}")];
+    let mut config: toml::Value =
+        toml::from_str(include_str!("../../../../config/worker.example.toml"))?;
+    config["server"]["listen"] = address.to_string().into();
+    config["sandbox"]["executable"] = manager.config.sandbox.executable.to_str().unwrap().into();
+    config["kafka"]["bootstrap_servers"] = toml::Value::Array(
+        broker
+            .config
+            .bootstrap_servers
+            .iter()
+            .cloned()
+            .map(Into::into)
+            .collect(),
+    );
+    config["kafka"]["tasks_topic"] = broker.config.tasks_topic.clone().into();
+    config["kafka"]["events_topic"] = broker.config.events_topic.clone().into();
+    config["kafka"]["group_id"] = broker.task_group.clone().into();
+    let path = manager.directory.path().join("worker.toml");
+    std::fs::write(&path, toml::to_string(&config)?)?;
+    let log_path = manager.directory.path().join("worker.log");
+    let worker = tokio::process::Command::new(
+        std::env::var("ACORN_TEST_WORKER_EXECUTABLE")
+            .context("Set ACORN_TEST_WORKER_EXECUTABLE")?,
+    )
+    .arg("--config")
+    .arg(path)
+    .stdout(std::process::Stdio::null())
+    .stderr(std::fs::File::create(&log_path)?)
+    .kill_on_drop(true)
+    .spawn()?;
+    let mut status = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Ok(client) = JudgeWorkerClient::connect(format!("http://{address}")).await {
+                return client;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    let mut backend = BackendProcess::spawn(&fixture);
+    let http = backend.listening().await;
+    let (created, body) = network_call(http, "POST", "/api/v1/submissions", Some(serde_json::json!({
+        "problem_id":1,"language_id":"python","source":include_str!("../../../../examples/submissions/a-plus-b.py")
+    })), Some(Uuid::new_v4())).await;
+    ensure!(created == 202, "HTTP creation failed: {body}");
+    let id = body["submission_id"]
+        .as_str()
+        .context("Missing submission ID")?;
+    state(&fixture.database, id, SubmissionState::Finished).await?;
+    let (queried, body) = network_call(
+        http,
+        "GET",
+        &format!("/api/v1/submissions/{id}"),
+        None,
+        None,
+    )
+    .await;
+    ensure!(
+        queried == 200 && body["verdict"] == "AC",
+        "Judging pipeline failed: {body}"
+    );
+    backend.terminate();
+    let (exited, logs) = backend.finish().await;
+    ensure!(exited.success(), "Backend did not stop: {logs}");
+    ensure!(
+        status
+            .get_worker_status(GetWorkerStatusRequest {})
+            .await?
+            .into_inner()
+            .execution_state
+            == WorkerExecutionState::Idle as i32,
+        "Backend shutdown stopped or blocked the independent Worker"
+    );
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(worker.id().unwrap() as i32),
+        nix::sys::signal::Signal::SIGTERM,
+    )?;
+    let output = tokio::time::timeout(Duration::from_secs(15), worker.wait_with_output()).await??;
+    ensure!(
+        output.status.success(),
+        "Worker failed: {}",
+        std::fs::read_to_string(log_path)?
+    );
+    ensure!(
+        manager.operations().contains("--cleanup"),
+        "The execution cleanup path was not used"
+    );
+    broker.close().await;
+    fixture.close().await;
+    Ok(())
 }

@@ -78,3 +78,61 @@ pub(crate) fn validate(
     }?;
     Ok(Observation::Terminal(terminal))
 }
+
+#[cfg(test)]
+mod tests {
+    //! Existing progress and terminal correspondence checks at the event boundary.
+    use super::*;
+    use acorn_protocol::worker::v1::{
+        self as proto, GetJobReply, JobPhase, JobState, get_job_reply::Terminal,
+    };
+    /// Valid progress stays transient; mismatched phases and completed counts fail validation.
+    #[test]
+    fn progress_and_terminal_correspondence() {
+        let config =
+            crate::config::Config::parse(include_str!("../../../../config/backend.example.toml"))
+                .unwrap();
+        let mut reply = GetJobReply {
+            job_id: "job".into(),
+            state: JobState::Running as i32,
+            phase: JobPhase::RunningCase as i32,
+            total_cases: 2,
+            ..Default::default()
+        };
+        assert!(matches!(
+            validate(reply.clone(), "job", "python", 2, &config.results),
+            Ok(Observation::Running)
+        ));
+        for (phase, completed) in [
+            (JobPhase::Preparing, 0),
+            (JobPhase::Compiling, 0),
+            (JobPhase::RunningCase, 1),
+            (JobPhase::Checking, 2),
+        ] {
+            let mut snapshot = reply.clone();
+            snapshot.phase = phase.into();
+            snapshot.completed_cases = completed;
+            assert!(matches!(
+                validate(snapshot, "job", "c", 2, &config.results),
+                Ok(Observation::Running)
+            ));
+        }
+        reply.phase = JobPhase::Compiling as i32;
+        assert!(validate(reply.clone(), "job", "python", 2, &config.results).is_err());
+        reply.phase = JobPhase::Done as i32;
+        reply.state = JobState::Finished as i32;
+        reply.terminal = Some(Terminal::Result(proto::JudgeResult {
+            verdict: proto::Verdict::Accepted as i32,
+            ..Default::default()
+        }));
+        reply.completed_cases = 1;
+        assert!(validate(reply.clone(), "job", "c", 2, &config.results).is_err());
+        reply.completed_cases = 2;
+        assert!(matches!(
+            validate(reply.clone(), "job", "c", 2, &config.results),
+            Ok(Observation::Terminal(_))
+        ));
+        reply.state = JobState::Failed as i32;
+        assert!(validate(reply, "job", "c", 2, &config.results).is_err());
+    }
+}

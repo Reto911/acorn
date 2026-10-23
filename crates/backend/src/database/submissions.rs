@@ -1,6 +1,6 @@
 //! Atomic creation, fixed-version task assembly and conditional business-state writes.
 
-use acorn_protocol::worker::v1::{JobFailure, SubmitJobRequest, TestCase};
+use acorn_protocol::worker::v1::{SubmitJobRequest, TestCase};
 use sqlx::{AssertSqlSafe, MySql, MySqlConnection, Row, Transaction, mysql::MySqlRow};
 use uuid::Uuid;
 
@@ -187,20 +187,6 @@ impl Database {
         .await
     }
 
-    /// Read startup queued tasks in stable creation order, bounded by admission capacity.
-    pub async fn queued_tasks(&self) -> Result<Vec<JudgingTask>> {
-        self.observe("Load startup queue", false, async {
-            let mut connection = self.pool.acquire().await?;
-            startup_queued(
-                &mut connection,
-                &self.config,
-                self.config.scheduler.pending_max_count,
-            )
-            .await
-        })
-        .await
-    }
-
     /// Load Kafka startup work without reconstructing already delivered or admitted tasks.
     ///
     /// Startup runs before publishing and consuming; queued and dispatching together
@@ -233,12 +219,6 @@ impl Database {
             Ok(sqlx::query("UPDATE submissions SET state = 'running' WHERE id = ? AND state IN ('queued', 'dispatching')")
                 .bind(id).execute(&self.pool).await?.rows_affected() == 1)
         }).await
-    }
-
-    /// Return a clearly unadmitted task to queued without changing terminal records.
-    pub async fn requeue(&self, id: &str) -> Result<bool> {
-        self.transition(id, SubmissionState::Dispatching, SubmissionState::Queued)
-            .await
     }
 
     /// Commit all terminal columns atomically; false means the previous state disallowed it.
@@ -274,25 +254,7 @@ impl Database {
         .await
     }
 
-    /// Provide the later startup flow's single atomic interruption write, without contacting Workers.
-    pub async fn interrupt_in_flight(&self) -> Result<u64> {
-        self.observe("Interrupt old in-flight submissions", true, async {
-            let terminal = TerminalOutcome::failed(
-                &JobFailure {
-                    code: "SchedulerInterrupted".into(),
-                    diagnostic: "Backend restarted while submission was in flight".into(),
-                },
-                &self.config.results,
-            )?;
-            let details =
-                serde_json::to_string(&terminal.details).map_err(|error| Error::Data(error.into()))?;
-            Ok(sqlx::query("UPDATE submissions SET state = 'failed', verdict = NULL, terminal_details_json = ?, terminal_at_ms = ? WHERE state IN ('dispatching', 'running')")
-                .bind(details).bind(now_ms()?).execute(&self.pool).await?.rows_affected())
-        })
-        .await
-    }
-
-    /// Share single-source delivery and legacy refusal transitions in conditional writes.
+    /// Record a conditional delivery transition without reversing event progress.
     async fn transition(
         &self,
         id: &str,

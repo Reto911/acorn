@@ -1,19 +1,18 @@
-//! Bounded in-memory admission, FIFO dispatch and independent Worker tracking tasks.
+//! Bounded local admission and supervised Kafka publication and event consumption.
 
 pub mod kafka;
-mod tracking;
 mod validation;
 pub mod worker_client;
 
 use std::{
     collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use tokio::{
-    sync::{Notify, OwnedSemaphorePermit, Semaphore},
+    sync::{Notify, OwnedSemaphorePermit, Semaphore, watch},
     task::{JoinHandle, JoinSet},
-    time::Instant,
 };
 
 use crate::{
@@ -35,13 +34,13 @@ pub enum AdmissionError {
     Stopping,
 }
 
-/// Complete payload retained until delivery or explicit Worker admission.
+/// Complete payload retained until Kafka delivery or committed Worker progress.
 struct Pending {
-    /// Complete fixed-version task, retained while a Worker can refuse admission.
+    /// Fixed-version payload retained until its publication attempt.
     task: JudgingTask,
 }
 
-/// Short synchronous queue state; no lock is held across database or RPC waits.
+/// Short synchronous queue state; no lock is held across database or Kafka waits.
 #[derive(Default)]
 struct State {
     /// Waiting-admission tasks in FIFO order.
@@ -50,8 +49,6 @@ struct State {
     known: HashMap<String, Option<OwnedSemaphorePermit>>,
     /// Prevent new reservations and dispatch while allowing existing handoffs.
     stopping: bool,
-    /// Finish once all in-flight tracking tasks have ended.
-    finish: bool,
     /// The scheduler task has returned or failed and can no longer accept handoffs.
     closed: bool,
 }
@@ -64,16 +61,18 @@ struct Shared {
     capacity: Arc<Semaphore>,
     /// Fixed configured ceiling; live usage remains solely in the semaphore.
     pending_max_count: u32,
-    /// Cheap clones of the same clients used by dispatch, in configuration order.
+    /// Status-only clients in configuration order; observation never selects work.
     workers: Vec<WorkerClient>,
-    /// Wake the dispatcher for handoff, stop or completion.
+    /// Wake the publisher for handoff, stop or completion.
     changed: Notify,
+    /// Stop message intake after creation handoffs, independently of publication wakeups.
+    finish: watch::Sender<bool>,
 }
 
 /// Cloneable process-local interface used by the submission creation service.
 #[derive(Clone)]
 pub struct Scheduler {
-    /// Shared state also owned by the dispatch loop.
+    /// Shared state also owned by the Kafka lifecycle task.
     shared: Arc<Shared>,
 }
 
@@ -97,18 +96,6 @@ pub struct Snapshot {
     pub pending_used: u32,
     /// Configured waiting-admission ceiling.
     pub pending_capacity: u32,
-}
-
-/// Local availability cache for one configured endpoint.
-struct Node {
-    /// Stable routing address, never persisted to SQLite.
-    address: String,
-    /// Reused channel and RPC budgets for this address.
-    client: WorkerClient,
-    /// The selected Job ID while dispatch or tracking is in flight.
-    job: Option<String>,
-    /// Earliest time this address may receive a later task.
-    ready_at: Instant,
 }
 
 /// Marks the shared handle closed even when the dispatcher fails or panics.
@@ -135,7 +122,7 @@ impl Scheduler {
             .scheduler
             .workers
             .iter()
-            .map(|address| WorkerClient::new(address, &config.grpc, &config.results))
+            .map(|address| WorkerClient::new(address, &config.grpc))
             .collect::<anyhow::Result<Vec<_>>>()?;
         let scheduler = Self {
             shared: Arc::new(Shared {
@@ -144,6 +131,7 @@ impl Scheduler {
                 pending_max_count: config.scheduler.pending_max_count,
                 workers,
                 changed: Notify::new(),
+                finish: watch::channel(false).0,
             }),
         };
         for task in startup.queued {
@@ -172,38 +160,21 @@ impl Scheduler {
         Ok(scheduler)
     }
 
-    /// Load ordered startup tasks and their permits before starting the dispatcher.
+    /// Restore ownership and start the two supervised Kafka services before HTTP admission.
     pub fn start(
         config: &Config,
         database: Database,
-        startup: Vec<JudgingTask>,
+        startup: JudgingRecovery,
         review: ReviewService,
     ) -> anyhow::Result<(Self, JoinHandle<anyhow::Result<()>>)> {
-        let scheduler = Self::restore(
-            config,
-            JudgingRecovery {
-                queued: startup,
-                ..Default::default()
-            },
-        )?;
-        let nodes = config
-            .scheduler
-            .workers
-            .iter()
-            .zip(scheduler.worker_clients())
-            .map(|(address, client)| Node {
-                address: address.clone(),
-                client,
-                job: None,
-                ready_at: Instant::now(),
-            })
-            .collect();
+        let scheduler = Self::restore(config, startup)?;
+        let publisher = kafka::Publisher::new(config, scheduler.clone(), database.clone())?;
+        let consumer = kafka::EventConsumer::new(config, scheduler.clone(), database, review)?;
         let task = tokio::spawn(run(
             scheduler.clone(),
-            nodes,
-            Arc::new(config.clone()),
-            database,
-            review,
+            publisher,
+            consumer,
+            Duration::from_millis(config.kafka.shutdown_timeout_ms),
         ));
         Ok((scheduler, task))
     }
@@ -229,7 +200,7 @@ impl Scheduler {
         }
     }
 
-    /// Share dispatch channels with in-process observation without exposing routing state.
+    /// Share status channels with independent health observation.
     pub(crate) fn worker_clients(&self) -> Vec<WorkerClient> {
         self.shared.workers.clone()
     }
@@ -309,7 +280,7 @@ impl Scheduler {
     /// Atomically save machine terminal and review intent before releasing admission capacity.
     ///
     /// The caller hands off a prepared review only when this returns true, and
-    /// completes ID ownership when terminal tracking ends.
+    /// completes ID ownership when terminal handling ends.
     pub async fn save_terminal(
         &self,
         database: &Database,
@@ -324,7 +295,7 @@ impl Scheduler {
         Ok(changed)
     }
 
-    /// Share automatic intent preparation and atomic terminal persistence across transports.
+    /// Prepare automatic review intent and atomically persist the machine terminal.
     pub(crate) async fn persist_terminal(
         &self,
         database: &Database,
@@ -374,7 +345,7 @@ impl Scheduler {
         self.shared.changed.notify_one();
     }
 
-    /// End ID ownership after terminal handling or a stale legacy dispatch has finished.
+    /// End ID ownership after terminal processing and review handoff.
     pub fn complete(&self, id: &str) {
         self.shared
             .state
@@ -395,7 +366,7 @@ impl Scheduler {
         self.shared.changed.notify_one();
     }
 
-    /// Request exit after creation handoffs have completed and tracking has drained.
+    /// Stop receiving new events and drain started message work after creation handoffs.
     pub fn shutdown(&self) {
         let mut state = self
             .shared
@@ -403,103 +374,69 @@ impl Scheduler {
             .lock()
             .expect("Scheduler state lock poisoned");
         state.stopping = true;
-        state.finish = true;
         drop(state);
+        self.shared.finish.send_replace(true);
         self.shared.changed.notify_one();
     }
 }
 
-/// Dispatch without awaiting a particular Worker; completions feed the same queue loop.
+/// Supervise both transports and give all started message work one shared shutdown budget.
 async fn run(
     scheduler: Scheduler,
-    mut nodes: Vec<Node>,
-    config: Arc<Config>,
-    database: Database,
-    review: ReviewService,
+    publisher: kafka::Publisher,
+    consumer: kafka::EventConsumer,
+    budget: Duration,
 ) -> anyhow::Result<()> {
     let _close = CloseOnDrop(scheduler.shared.clone());
-    let mut active = JoinSet::new();
-    let mut next_node = 0;
-    loop {
-        loop {
-            let mut state = scheduler
-                .shared
-                .state
-                .lock()
-                .expect("Scheduler state lock poisoned");
-            if state.stopping || state.queue.is_empty() {
-                break;
-            }
-            let selected = (0..nodes.len())
-                .map(|offset| (next_node + offset) % nodes.len())
-                .find(|&index| {
-                    nodes[index].job.is_none() && nodes[index].ready_at <= Instant::now()
-                });
-            let Some(index) = selected else {
-                break;
-            };
-            let pending = state.queue.pop_front().expect("Nonempty queue");
-            let id = pending.task.request.job_id.clone();
-            nodes[index].job = Some(id.clone());
-            next_node = (index + 1) % nodes.len();
-            let client = nodes[index].client.clone();
-            let address = nodes[index].address.clone();
-            let database = database.clone();
-            let config = config.clone();
-            let review = review.clone();
-            let scheduler = scheduler.clone();
-            active.spawn(async move {
-                let result = tracking::track(
-                    pending, &client, &address, &database, &config, &review, &scheduler,
-                )
-                .await;
-                (index, id, result)
-            });
+    let (stop, stopping) = watch::channel(false);
+    let mut services = JoinSet::new();
+    services.spawn(async move { publisher.run(stopping).await });
+    services.spawn(consumer.run(stop.subscribe()));
+    let mut finish = scheduler.shared.finish.subscribe();
+    let result = loop {
+        if *finish.borrow() {
+            break Ok(());
         }
-        let wake_at = {
-            let state = scheduler
-                .shared
-                .state
-                .lock()
-                .expect("Scheduler state lock poisoned");
-            if state.finish && active.is_empty() {
-                return Ok(());
-            }
-            if state.stopping || state.queue.is_empty() {
-                None
-            } else {
-                nodes
-                    .iter()
-                    .filter(|node| node.job.is_none())
-                    .map(|node| node.ready_at)
-                    .min()
-            }
-        };
         tokio::select! {
-            _ = scheduler.shared.changed.notified() => {},
-            _ = async {
-                match wake_at {
-                    Some(when) => tokio::time::sleep_until(when).await,
-                    None => std::future::pending::<()>().await,
+            _ = finish.changed() => {},
+            result = services.join_next() => {
+                let completed = match result {
+                    Some(result) => result.map_err(anyhow::Error::from).and_then(|result| result),
+                    None => Err(anyhow::anyhow!("Kafka services stopped unexpectedly")),
+                };
+                if let Err(error) = completed { break Err(error); }
+                if !scheduler.shared.state.lock().expect("Scheduler state lock poisoned").stopping {
+                    break Err(anyhow::anyhow!("Kafka service stopped unexpectedly"));
                 }
-            } => {},
-            completed = active.join_next(), if !active.is_empty() => {
-                let (index, id, result) = completed.expect("Active tracking task")?;
-                let result = result?;
-                nodes[index].job = None;
-                nodes[index].ready_at = Instant::now() + if result.cooldown {
-                    std::time::Duration::from_millis(config.scheduler.retry_interval_ms)
-                } else { std::time::Duration::ZERO };
-                if let Some(pending) = result.deferred {
-                    let mut state = scheduler.shared.state.lock().expect("Scheduler state lock poisoned");
-                    state.queue.push_front(pending);
-                } else {
-                    scheduler.complete(&id);
-                }
-                if let Some(prepared) = result.review {
-                    review.handoff(id, prepared).await?;
-                }
-            },
+            }
         }
-    }
+    };
+    scheduler.pause();
+    stop.send_replace(true);
+    let drained = tokio::time::timeout(budget, async {
+        let mut failure = None;
+        while let Some(service) = services.join_next().await {
+            if let Err(error) = service
+                .map_err(anyhow::Error::from)
+                .and_then(|result| result)
+            {
+                tracing::error!(%error, "Kafka service failed during shutdown");
+                failure.get_or_insert(error);
+            }
+        }
+        failure.map_or(Ok(()), Err)
+    })
+    .await;
+    let drained = match drained {
+        Ok(result) => result,
+        Err(_) => {
+            services.abort_all();
+            // Observe cancellation before the lifecycle owner closes the database.
+            while services.join_next().await.is_some() {}
+            Err(anyhow::anyhow!(
+                "KafkaBackendShutdownTimedOut: message handoff or consumer release incomplete"
+            ))
+        }
+    };
+    result.and(drained)
 }

@@ -4,28 +4,28 @@
 
 ## 1. 已确认需求与范围
 
-| 项目 | 已确认约定 |
-| --- | --- |
-| 目标 | 审查针对测试用例的硬编码、猜测逻辑，以及其他规避题目要求或判题机制的可疑实现 |
-| 接口 | 使用 OpenAI Responses API 格式，优先接入 DeepSeek；后端配置 endpoint、API key、model 和思考强度 |
-| 输出格式 | 只采用 `json_schema`，不提供 `json_object` 配置或其他模式回退 |
-| 初始模型与预算 | `deepseek-flash`，`reasoning.effort="max"`，`max_output_tokens=10240` |
-| 并发与请求预算 | 单次 HTTP 120 秒，2 个运行并发、16 个待执行名额，请求和响应各 1 MiB |
-| 职责 | 后端功能，不属于 Worker；在机器判题完成后执行 |
-| 自动触发 | 题目版本配置 `DISABLED`、`ENABLE-ANY` 或 `ENABLE-ALL`，默认 `DISABLED` |
-| ANY 门槛 | 实际已经执行的用例至少一例通过；首例失败即不触发，不考虑未运行的后续用例 |
-| 审查状态 | Submission 保存 `DISABLED`、`PENDING`、`DOUBTFUL`、`PASS`、`FAILED`，默认 `DISABLED` |
-| 手动触发 | 仅允许机器判题 `finished` 的提交，包括 CE 和零用例通过；可以绕过题目开关和自动门槛，当前不检查管理员角色 |
-| 结果关系 | 只标记存疑并展示意见，不改变机器判题 `state`、`verdict` 或终态详情，也不自动处罚 |
-| 保留范围 | 只保存最近一次审查，可以扩展 submissions 列，不保存历次审查历史 |
-| 规则来源 | 首版只依据公开题面及通用反作弊规则，不增加题目私有专项规则字段 |
-| 模型输入 | 完整源码、语言、固定版本的公开标题和题面，以及机器 verdict；不发送已执行用例通过情况摘要 |
-| 注释与定位 | 不以说明性注释中的主张和指令作为审查依据；影响编译或解释的声明按实际语义分析。仅通过提示词约定，源码原样发送；行号从 1 开始，`line_start`、`line_end` 为闭区间 |
-| 停机与重启 | 启动时旧 PENDING 保存为 FAILED/ReviewInterrupted；停机即停止手动及自动接纳，需自动审查的新终态直接保存 FAILED/ReviewInterrupted，并取消未完成审查 |
-| 前端 | 单项提交结果页提供启动、重跑及结果查看；提交历史显示审查状态并支持筛选 |
-| 验证范围 | 针对具体合同做少量检查，不做兜底测试矩阵，不因模型单次不稳定而盲目修改程序和反复重测 |
-| 开发凭据 | 根目录 `.env` 仅供开发阶段临时真实调用使用，Git 排除；正式提交的程序、测试和构建脚本均不使用该文件；不增加 .env 或后端配置文件权限检查 |
-| SQL 交付 | 仓库保留 MySQL 版本 4 的完整建表 SQL，从空库初始化；应用不自动建表或升级 |
+| 项目           | 已确认约定                                                                                                                                                     |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 目标           | 审查针对测试用例的硬编码、猜测逻辑，以及其他规避题目要求或判题机制的可疑实现                                                                                   |
+| 接口           | 使用 OpenAI Responses API 格式，优先接入 DeepSeek；后端配置 endpoint、API key、model 和思考强度                                                                |
+| 输出格式       | 只采用 `json_schema`，不提供 `json_object` 配置或其他模式回退                                                                                                  |
+| 初始模型与预算 | `deepseek-flash`，`reasoning.effort="max"`，`max_output_tokens=10240`                                                                                          |
+| 并发与请求预算 | 单次 HTTP 120 秒，2 个运行并发、16 个待执行名额，请求和响应各 1 MiB                                                                                            |
+| 职责           | 后端功能，不属于 Worker；在机器判题完成后执行                                                                                                                  |
+| 自动触发       | 题目版本配置 `DISABLED`、`ENABLE-ANY` 或 `ENABLE-ALL`，默认 `DISABLED`                                                                                         |
+| ANY 门槛       | 实际已经执行的用例至少一例通过；首例失败即不触发，不考虑未运行的后续用例                                                                                       |
+| 审查状态       | Submission 保存 `DISABLED`、`PENDING`、`DOUBTFUL`、`PASS`、`FAILED`，默认 `DISABLED`                                                                           |
+| 手动触发       | 仅允许机器判题 `finished` 的提交，包括 CE 和零用例通过；可以绕过题目开关和自动门槛，当前不检查管理员角色                                                       |
+| 结果关系       | 只标记存疑并展示意见，不改变机器判题 `state`、`verdict` 或终态详情，也不自动处罚                                                                               |
+| 保留范围       | 只保存最近一次审查，可以扩展 submissions 列，不保存历次审查历史                                                                                                |
+| 规则来源       | 首版只依据公开题面及通用反作弊规则，不增加题目私有专项规则字段                                                                                                 |
+| 模型输入       | 完整源码、语言、固定版本的公开标题和题面，以及机器 verdict；不发送已执行用例通过情况摘要                                                                       |
+| 注释与定位     | 不以说明性注释中的主张和指令作为审查依据；影响编译或解释的声明按实际语义分析。仅通过提示词约定，源码原样发送；行号从 1 开始，`line_start`、`line_end` 为闭区间 |
+| 停机与重启     | 启动时旧 PENDING 保存为 FAILED/ReviewInterrupted；停机即停止手动及自动接纳，需自动审查的新终态直接保存 FAILED/ReviewInterrupted，并取消未完成审查              |
+| 前端           | 单项提交结果页提供启动、重跑及结果查看；提交历史显示审查状态并支持筛选                                                                                         |
+| 验证范围       | 针对具体合同做少量检查，不做兜底测试矩阵，不因模型单次不稳定而盲目修改程序和反复重测                                                                           |
+| 开发凭据       | 根目录 `.env` 仅供开发阶段临时真实调用使用，Git 排除；正式提交的程序、测试和构建脚本均不使用该文件；不增加 .env 或后端配置文件权限检查                         |
+| SQL 交付       | 仓库保留 MySQL 版本 4 的完整建表 SQL，从空库初始化；应用不自动建表或升级                                                                                       |
 
 `DOUBTFUL` 表示需要人工复核的具体疑点；`PASS` 表示本次检查没有发现符合规则的疑点。审查不裁定抄袭、AI 代写或作者身份，也不以代码风格、解法简短、合法特判或正常预计算本身作为作弊证据。
 
@@ -41,13 +41,13 @@ DeepSeek 的[创建响应接口](https://api-docs.deepseek.com/zh-cn/api/create-
 
 [JSON Output 指南](https://api-docs.deepseek.com/zh-cn/guides/json_mode/)的示例使用 Chat Completions，不能直接把其中的 `response_format`、`max_tokens` 和 `choices[0].message.content` 搬到 Responses 请求与解析代码中。[OpenAI Responses 迁移说明](https://developers.openai.com/api/docs/guides/migrate-to-responses)给出对应差异：Responses 使用 `text.format` 和类型化 `output` 数组。
 
-| 用途 | 本项目采用的 Responses 字段 |
-| --- | --- |
-| 模型及输入 | `model`、`instructions`、`input` |
-| 思考强度 | `reasoning.effort` |
-| Schema 模式 | `text.format = {"type":"json_schema","name":...,"schema":...}` |
-| 输出预算 | `max_output_tokens`，包括可见输出及推理 token |
-| 最终正文 | 从 `output` 中的 assistant message 提取 `content` 的 `output_text` |
+| 用途        | 本项目采用的 Responses 字段                                        |
+| ----------- | ------------------------------------------------------------------ |
+| 模型及输入  | `model`、`instructions`、`input`                                   |
+| 思考强度    | `reasoning.effort`                                                 |
+| Schema 模式 | `text.format = {"type":"json_schema","name":...,"schema":...}`     |
+| 输出预算    | `max_output_tokens`，包括可见输出及推理 token                      |
+| 最终正文    | 从 `output` 中的 assistant message 提取 `content` 的 `output_text` |
 
 已确认只使用 `json_schema`，采用两端文档共同列出的 `type`、`name`、`schema` 字段，并执行本地类型和业务校验；不增加 `output_mode` 配置。OpenAI 的[结构化输出说明](https://developers.openai.com/api/docs/guides/structured-outputs)区分了合法 JSON 与符合 Schema 两种保证；DeepSeek 上述接口参考页没有列出 `text.format.strict`，首版不把 `strict: true` 作为跨提供商的保证。不支持该格式时记录调用失败，不自动降级模式或改走 Chat Completions。
 
@@ -65,9 +65,10 @@ DeepSeek 接口文档列出 `none`、`low`、`high`、`max`；`minimal` 映射�
 
 ```mermaid
 flowchart LR
-    Worker[Worker 判题] -->|gRPC 终态| Scheduler
+    Worker[Worker 判题] -->|Kafka 事件| Scheduler
     Scheduler -->|原子保存判题结果和审查初态| DB[(MySQL)]
-    Scheduler -->|判题结果持久化后 ACK| Worker
+    Scheduler -->|发布任务、消费事件| Kafka[Kafka]
+    Kafka <--> Worker
     Scheduler -->|交接提交 ID 和审查 ID| Review[llm_review]
     UI[提交结果页] -->|手动启动或重跑| HTTP[HTTP API]
     HTTP --> Review
@@ -79,18 +80,18 @@ flowchart LR
 
 模块结构：
 
-| 模块 | 职责 |
-| --- | --- |
-| `llm_review` | 自动与手动接纳、活动任务去重、有界队列、独立并发和停止信号 |
+| 模块                 | 职责                                                                        |
+| -------------------- | --------------------------------------------------------------------------- |
+| `llm_review`         | 自动与手动接纳、活动任务去重、有界队列、独立并发和停止信号                  |
 | `llm_review::client` | 复用一个异步 HTTP 客户端，发送 Responses 请求、限制预算、提取正文和分类错误 |
-| `llm_review::policy` | 自动门槛、通用审查指令、输出结构与本地业务校验 |
-| `database` | 机器终态与自动审查初态的同事务写入，最新审查的条件更新及查询 |
-| `http` | 手动触发路由、提交详情与历史 DTO、错误响应 |
-| 程序入口 | 启动并监督审查任务，协调正常停机和故障退出 |
+| `llm_review::policy` | 自动门槛、通用审查指令、输出结构与本地业务校验                              |
+| `database`           | 机器终态与自动审查初态的同事务写入，最新审查的条件更新及查询                |
+| `http`               | 手动触发路由、提交详情与历史 DTO、错误响应                                  |
+| 程序入口             | 启动并监督审查任务，协调正常停机和故障退出                                  |
 
 HTTP 客户端使用已锁定的 [reqwest 0.13.5](https://docs.rs/reqwest/0.13.5/reqwest/) 异步客户端，复用连接；新增依赖只进入后端及 workspace 依赖配置。首版直接实现所需 Responses 子集，不建立多协议提供商框架。
 
-LLM 网络等待不进入 Worker、判题跟踪或数据库事务，不占用 Scheduler 的待接纳名额。Worker 终态已成功保存后，仍按现有契约及时 ACK；审查的排队、失败或超时不延后该 ACK，也不改变 Worker 节点释放规则。
+LLM 网络等待不进入 Worker、Kafka 事件持久化或数据库事务，不占用 Scheduler 待接纳名额。机器终态提交后及时尝试异步提交事件位点并完成本地审查交接，不等待模型调用。
 
 ## 4. 自动门槛与手动触发
 
@@ -98,16 +99,16 @@ LLM 网络等待不进入 Worker、判题跟踪或数据库事务，不占用 Sc
 
 现有 [Worker 执行契约](01-worker-design.md)串行运行用例，在首个失败时短路；`completed_cases` 包含失败用例，不能把它直接当作通过数。后端已校验终态形状，可以按下表判断，无需改变 Worker 或 Proto，也无需新增通过数持久化列。
 
-| 机器终态 | `ENABLE-ANY` | `ENABLE-ALL` |
-| --- | --- | --- |
-| `finished / AC` | 触发 | 触发 |
-| `finished / WA、RE、TLE、MLE、OLE`，失败序号为 k | k > 1 时触发，实际通过数为 k - 1 | 不触发 |
-| `finished / CE` | 不触发 | 不触发 |
-| `failed` | 不触发 | 不触发 |
+| 机器终态                                         | `ENABLE-ANY`                     | `ENABLE-ALL` |
+| ------------------------------------------------ | -------------------------------- | ------------ |
+| `finished / AC`                                  | 触发                             | 触发         |
+| `finished / WA、RE、TLE、MLE、OLE`，失败序号为 k | k > 1 时触发，实际通过数为 k - 1 | 不触发       |
+| `finished / CE`                                  | 不触发                           | 不触发       |
+| `failed`                                         | 不触发                           | 不触发       |
 
 `DISABLED` 始终不自动触发。例如首例 WA 不触发 ANY；第一例 AC、第二例 WA 则触发 ANY。即使后续未运行用例可能通过，也不改变此判断。自动策略取自提交固定引用的题目版本，题目发布新版不改变历史提交的策略。
 
-自动触发只发生在该次机器终态首次成功持久化时。重复终态、ACK 失败、页面 GET、创建提交的同键重传及后端重启均不再自动创建一次审查。
+自动触发只发生在该次机器终态首次成功持久化时。重复终态、位点入队失败、页面 GET、创建提交的同键重传及后端重启均不再自动创建一次审查。
 
 ### 4.2 手动及重跑
 
@@ -123,11 +124,11 @@ LLM 网络等待不进入 Worker、判题跟踪或数据库事务，不占用 Sc
 
 新增以下四列，不新增审查表或题目专项规则列：
 
-| 表与字段 | 类型、缺省与用途 |
-| --- | --- |
-| `problem_versions.review_mode` | 非空 TEXT，`DISABLED` / `ENABLE-ANY` / `ENABLE-ALL`，默认 `DISABLED` |
-| `submissions.review_status` | 非空 TEXT，`DISABLED` / `PENDING` / `DOUBTFUL` / `PASS` / `FAILED`，默认 `DISABLED` |
-| `submissions.review_id` | 可空 TEXT，每次接纳新审查生成新的 UUID；用于重跑并发控制和迟到结果保护 |
+| 表与字段                          | 类型、缺省与用途                                                                          |
+| --------------------------------- | ----------------------------------------------------------------------------------------- |
+| `problem_versions.review_mode`    | 非空 TEXT，`DISABLED` / `ENABLE-ANY` / `ENABLE-ALL`，默认 `DISABLED`                      |
+| `submissions.review_status`       | 非空 TEXT，`DISABLED` / `PENDING` / `DOUBTFUL` / `PASS` / `FAILED`，默认 `DISABLED`       |
+| `submissions.review_id`           | 可空 TEXT，每次接纳新审查生成新的 UUID；用于重跑并发控制和迟到结果保护                    |
 | `submissions.review_details_json` | 可空 JSON 对象，序列化后最多 32768 UTF-8 字节，保存最近一次审查意见、执行元数据或失败原因 |
 
 `review_id` 是具体的审查尝试标识。完成时使用 `WHERE id=? AND review_id=? AND review_status='PENDING'` 条件更新，防止旧请求覆盖另一轮审查。
@@ -138,17 +139,17 @@ LLM 网络等待不进入 Worker、判题跟踪或数据库事务，不占用 Sc
 
 此列存放一个 JSON 对象，由后端组装；模型只生成其中 `result` 对应的第 6 节意见。字段如下，固定键中尚无值的项目写 NULL：
 
-| 字段 | 内容 |
-| --- | --- |
-| `trigger` | `auto` 或 `manual` |
-| `requested_at_ms`、`completed_at_ms` | 本次接纳和结束时间，UTC Unix 毫秒；PENDING 的完成时间为 NULL |
-| `model`、`reasoning_effort` | 本次实际发送的模型名和思考强度，不重复保存相同的响应模型字段 |
-| `prompt_version` | 后端审查指令模板标识，例如 `review-policy-v1` |
-| `response_id` | 提供商实际返回的响应 ID，尚无、未返回或因详情总预算超限不保留时为 NULL |
-| `usage` | 实际返回的输入、输出及可选推理 token 数；缺失值保持 NULL，不估算用量 |
-| `result` | 通过响应、Schema 和业务校验的意见对象；PENDING 和 FAILED 为 NULL |
-| `error` | FAILED 的稳定 `code` 和后端固定英文 `message`，message 最多 512 UTF-8 字节，不直接使用提供商原始错误正文；其他状态为 NULL |
-| `raw_output_json` | FAILED 时可选保存的未验证模型正文 JSON 对象；成功时为 NULL，避免与 result 重复 |
+| 字段                                 | 内容                                                                                                                      |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
+| `trigger`                            | `auto` 或 `manual`                                                                                                        |
+| `requested_at_ms`、`completed_at_ms` | 本次接纳和结束时间，UTC Unix 毫秒；PENDING 的完成时间为 NULL                                                              |
+| `model`、`reasoning_effort`          | 本次实际发送的模型名和思考强度，不重复保存相同的响应模型字段                                                              |
+| `prompt_version`                     | 后端审查指令模板标识，例如 `review-policy-v1`                                                                             |
+| `response_id`                        | 提供商实际返回的响应 ID，尚无、未返回或因详情总预算超限不保留时为 NULL                                                    |
+| `usage`                              | 实际返回的输入、输出及可选推理 token 数；缺失值保持 NULL，不估算用量                                                      |
+| `result`                             | 通过响应、Schema 和业务校验的意见对象；PENDING 和 FAILED 为 NULL                                                          |
+| `error`                              | FAILED 的稳定 `code` 和后端固定英文 `message`，message 最多 512 UTF-8 字节，不直接使用提供商原始错误正文；其他状态为 NULL |
+| `raw_output_json`                    | FAILED 时可选保存的未验证模型正文 JSON 对象；成功时为 NULL，避免与 result 重复                                            |
 
 完整 review_details_json 最多 32768 字节（32 KiB），按序列化后的 UTF-8 字节计量，包含意见或诊断、错误及全部元数据，适用于 PENDING 和全部审查终态。此总预算与 error.message 的 512 字节上限为后端固定常量，不新增配置项；意见和诊断对象各自的 16384 字节上限仍独立执行。
 
@@ -184,12 +185,12 @@ LLM 网络等待不进入 Worker、判题跟踪或数据库事务，不占用 Sc
 
 首版仅有一种固定输出结构，不单独保存 `output_schema_version`，也不重复保存固定的输出模式。Schema 在代码中维护，`text.format.name` 使用固定名称 `acorn_code_review`。审查状态、ID 已有独立列，源码和题面已经固定保存，都不再复制进此 JSON。
 
-| 审查状态 | ID 与详情要求 |
-| --- | --- |
-| `DISABLED` | ID、详情均为 NULL，表示尚无审查；可能是未启用、未达到门槛或仍在判题 |
-| `PENDING` | ID 和元数据非空，包含排队与调用中；完成时间、意见和错误为空 |
-| `PASS` / `DOUBTFUL` | ID、完成时间及有效意见非空，错误为空 |
-| `FAILED` | ID、完成时间及错误非空，result 为 NULL；可有仅用于诊断的 raw_output_json |
+| 审查状态            | ID 与详情要求                                                            |
+| ------------------- | ------------------------------------------------------------------------ |
+| `DISABLED`          | ID、详情均为 NULL，表示尚无审查；可能是未启用、未达到门槛或仍在判题      |
+| `PENDING`           | ID 和元数据非空，包含排队与调用中；完成时间、意见和错误为空              |
+| `PASS` / `DOUBTFUL` | ID、完成时间及有效意见非空，错误为空                                     |
+| `FAILED`            | ID、完成时间及错误非空，result 为 NULL；可有仅用于诊断的 raw_output_json |
 
 非 `DISABLED` 审查状态只允许出现在 `state=finished` 的提交上。状态枚举、JSON 对象格式和基本空值关系由 SQL 约束，详情类型和内容预算由应用在写入边界校验。
 
@@ -261,23 +262,16 @@ LLM 网络等待不进入 Worker、判题跟踪或数据库事务，不占用 Sc
 
 ### 7.1 自动交接
 
-后端创建或启动装入 `JudgingTask` 时，从该提交引用的 `(problem_id, version_no)` 读取 review_mode，作为后端内存任务字段携带到判题跟踪，使 Scheduler 收到机器结果时即可判断门槛。它不加入发送给 Worker 的 `SubmitJobRequest`，也不发送给 LLM。发布新题目版本不会改变旧提交携带的模式。
+后端根据事件引用的 Submission ID 读取其固定 `(problem_id, version_no)` 的语言、用例数及 review_mode；发布新题目版本不改变旧提交策略。review_mode 不加入 Worker 请求，也不发送给模型。
 
-实际流程如下：
+1. 校验机器终态，按固定策略计算自动门槛并尝试预留独立审查名额，形成 PENDING 或明确的不可用／满／中断初态。
+2. 将机器终态和本次审查初态在同一短事务按未终态条件保存；未生效或写入失败释放本次预留，不交接审查。
+3. 数据库提交并归还连接后，归还仍持有的待接纳许可，使用 safe CommitMode::Async 尝试本条事件位点请求入队，不等待逐条 broker 回执。
+4. 无论同步入队成功或失败，完成已保存审查的本地 handoff，再清除 Scheduler ID；入队失败随后向监督方报告并结束当前消费服务。交接不等待模型调用。
 
-1. 收到 Worker 终态并通过现有结果校验，用固定 review_mode 和机器 verdict／首个失败序号在本地判断门槛。
-2. 不触发则计划 DISABLED。应触发且审查已停止接纳则计划 FAILED/ReviewInterrupted；其他情况下尝试立即预留一个独立审查队列名额。成功则计划 PENDING，队列满或服务未启用则计划对应 FAILED。
-3. 用一个短事务保存机器 `state`、`verdict`、终态详情和时间，同时保存审查初态。条件使用 `WHERE state IN ('queued','dispatching','running')`，允许合法终态先于投递确认或运行事件到达，避免覆盖已存在机器终态；写入 PENDING 或 FAILED 时同时生成新的审查 ID 和元数据。
-4. 若条件更新未生效，释放本次预留名额，不交接审查。若数据库发生错误，释放名额并按已有关键写入错误处理，不 ACK 未保存的机器结果。
-5. 首次保存成功并归还数据库连接后，立即执行已有 Worker ACK 及节点释放流程，不等待审查交接、交接失败的状态写入或模型调用。ACK 失败仅按既有合同记录日志，不回滚机器结果，也不跳过后续审查交接；重复机器终态的 ACK 行为仍按原契约。
-6. ACK 调用结束并释放 Scheduler 的本地在途记录、路由及节点占用后，把提交 ID、审查 ID 及预留名额交给 llm_review 的内存队列。这一步只做本地交接，不等待 LLM。
-7. 审查模块独立读取源码和固定题面、调用模型，再按本次审查 ID 条件保存意见；不会改写机器 verdict。
+本地交接遇到停止时释放名额，按当前 review_id 将 PENDING 保存为 FAILED/ReviewInterrupted；其他交接关闭错误保存 FAILED/ReviewUnavailable。关键写入错误仍由入口报告。这里处理数据库提交和内存交接之间的实际窗口，不建立恢复队列。
 
-如果第 6 步遇到停机，释放名额，将对应 PENDING 条件更新为 FAILED/ReviewInterrupted；其他交接关闭错误保存 FAILED/ReviewUnavailable。此时 ACK 调用及 Scheduler 本地占用释放已结束，审查收尾写入及其失败不作为 ACK 的前置条件；写入错误仍按既有关键数据库故障合同处理。这里处理的是数据库提交与内存交接之间的实际停止边界，不建立重试或恢复队列。
-
-这样不会留下“机器结果已落库但自动触发意图尚未落库”的窗口；审查排队失败也不会阻塞判题结束。该事务仍不跨越任何外部 API 调用。
-
-Kafka 事件处理与保留的 RPC 跟踪共用 Scheduler::persist_terminal，沿用同一审查准备和条件保存入口。事件消费者在机器终态与审查初态提交后，使用 safe 异步接口发起位点提交请求，随即完成本次审查的本地交接，不等逐条 broker 回执。请求入队同步失败也先完成交接，再报告消费错误；已入队请求后续失败不回滚机器或审查状态。重复终态沿用已有机器结果和审查 ID，不再次交接；旧 PENDING 仍按第 7.3 节中断，不因 Kafka 重放或 Worker 重复执行而自动重审。参见[Kafka 事件处理合同](10-kafka-judging-design.md#7-后端事件处理)。
+重复事件不覆盖首个机器终态，不准备第二次审查，也不因位点滞后、Worker 重复执行或后端重启自动重审。遗留 PENDING 按第 7.3 节中断。完整传输边界见[Kafka 事件处理](10-kafka-judging-design.md#7-后端事件处理)。
 
 ### 7.2 队列与执行
 
@@ -293,14 +287,14 @@ Kafka 事件处理与保留的 RPC 跟踪共用 Scheduler::persist_terminal，�
 
 ### 7.3 启动、停机与异常
 
-启动时将遗留 `PENDING` 统一保存为 `FAILED / ReviewInterrupted`，保留原审查 ID 和请求元数据，补完成时间；不自动重新调用模型。已有判题启动装入、中断及 Worker ACK 边界保持原契约。
+启动时将遗留 `PENDING` 统一保存为 `FAILED / ReviewInterrupted`，保留原审查 ID 和请求元数据，补完成时间；不自动重新调用模型。判题启动恢复 queued 和 dispatching/running 等待，不因后端重启中断 Worker。
 
 正常停机收到停止信号时立即停止手动和自动审查接纳，并取消本进程尚未完成的审查：
 
 1. 新的手动 POST 返回 `503 BackendStopping`，不覆盖旧审查记录。
 2. 已在队列或正在请求的审查，按本次 ID 将 PENDING 保存为 FAILED/ReviewInterrupted；已先完成并保存为 PASS、DOUBTFUL 或 FAILED 的不再覆盖。
 3. 停止前已登记的短接纳操作允许按第 8.1 节完成事务处理及收尾，但尚未交接的 PENDING 不启动请求，统一结束为 FAILED/ReviewInterrupted。
-4. 已经分派的 Worker 继续按现有正常停机规则完成判题保存和 ACK。停止信号之后到达、满足自动门槛的机器终态，直接在保存机器结果的同一事务中写 FAILED/ReviewInterrupted，不再入审查队列；不满足门槛的仍为 DISABLED。
+4. Worker 独立执行。已经开始处理的事件在共同消息预算内收尾；停止后准备且满足自动门槛的机器终态，直接在保存机器结果的同一事务中写 FAILED/ReviewInterrupted，不再入审查队列；不满足门槛的仍为 DISABLED。
 5. 等待已登记的短接纳操作、已开始的短写入、判题收尾和本地审查取消完成，再关闭 HTTP、结束健康采集并关闭数据库。停止之后不再启动新的外部模型调用。
 
 所有接纳及交接共用审查模块的同一停止边界；预留过名额但尚未交接的任务会释放名额。停止只取消本地 HTTP 等待，不保证提供商已经停止执行或计费。无需等待整批外部模型请求完成，也不扫描数据库自动修复。
@@ -315,15 +309,15 @@ Kafka 事件处理与保留的 RPC 跟踪共用 Scheduler::persist_terminal，�
 
 GET 详情和手动接纳响应共用同一 public review 对象，固定包含以下七个键；不存在意见、错误或完成时间时保留显式 null。DISABLED 的 GET 返回 review=null，历史摘要不携带 review 对象。
 
-| review 字段 | 内容 |
-| --- | --- |
-| `review_id` | 本次审查 UUID，下次手动请求用作 expected_review_id |
-| `trigger` | auto 或 manual |
-| `requested_at_ms` | 本次接纳的 UTC Unix 毫秒 |
-| `completed_at_ms` | 完成时间；PENDING 时为 null |
-| `model` | 本次配置的模型名 |
-| `result` | 第 6.2 节的有效意见；PENDING、FAILED 时为 null |
-| `error` | 固定 code、英文 message；未失败时为 null |
+| review 字段       | 内容                                               |
+| ----------------- | -------------------------------------------------- |
+| `review_id`       | 本次审查 UUID，下次手动请求用作 expected_review_id |
+| `trigger`         | auto 或 manual                                     |
+| `requested_at_ms` | 本次接纳的 UTC Unix 毫秒                           |
+| `completed_at_ms` | 完成时间；PENDING 时为 null                        |
+| `model`           | 本次配置的模型名                                   |
+| `result`          | 第 6.2 节的有效意见；PENDING、FAILED 时为 null     |
+| `error`           | 固定 code、英文 message；未失败时为 null           |
 
 reasoning_effort、response_id、usage、prompt_version 和 raw_output_json 均保留在后端详情，不复制进此 HTTP 对象。机器 state、verdict 和 terminal_details 仍独立返回。
 
@@ -335,15 +329,15 @@ reasoning_effort、response_id、usage、prompt_version 和 raw_output_json 均�
 }
 ```
 
-| 情况 | 行为 |
-| --- | --- |
-| 提交不存在 | `404 SubmissionNotFound` |
-| 机器判题不是 `finished` | `409 JudgingNotFinished` |
-| 服务未启用或正在停止 | `503 ReviewUnavailable` / `503 BackendStopping`，不覆盖原审查 |
-| 已有活动 `PENDING` | `200`，返回同一次审查，不重新调用模型 |
-| 最新 ID 与 `expected_review_id` 不同 | `409 ReviewChanged`，先查询最新快照 |
-| 未取得独立队列名额 | `503 ReviewQueueFull`，不覆盖原审查 |
-| 成功接纳一次新审查 | `202`，返回提交 ID、最新 `review_status` 与 `review`，Location 指向提交详情 |
+| 情况                                 | 行为                                                                        |
+| ------------------------------------ | --------------------------------------------------------------------------- |
+| 提交不存在                           | `404 SubmissionNotFound`                                                    |
+| 机器判题不是 `finished`              | `409 JudgingNotFinished`                                                    |
+| 服务未启用或正在停止                 | `503 ReviewUnavailable` / `503 BackendStopping`，不覆盖原审查               |
+| 已有活动 `PENDING`                   | `200`，返回同一次审查，不重新调用模型                                       |
+| 最新 ID 与 `expected_review_id` 不同 | `409 ReviewChanged`，先查询最新快照                                         |
+| 未取得独立队列名额                   | `503 ReviewQueueFull`，不覆盖原审查                                         |
+| 成功接纳一次新审查                   | `202`，返回提交 ID、最新 `review_status` 与 `review`，Location 指向提交详情 |
 
 预期 ID 的用途是避免旧操作覆盖后来结果。例如页面看到审查 A，请求重跑后创建 B；B 很快结束，延迟到达的同一页面请求仍携带 A，服务器发现当前已是 B 就返回 ReviewChanged，而不会再次付费创建 C。仅检查 PENDING 可以阻止同时审查，不能阻止这一类先后重跑；使用已有 review_id 即可处理，不增加长期请求幂等表。
 
@@ -400,30 +394,30 @@ endpoint 表示完整 POST URL，不自动补路径；OpenAI 可配置为 `https
 
 timeout 覆盖单次 HTTP 发送和完整响应读取，队列等待由 PENDING 表示。请求上限检查序列化后的实际字节；响应上限在读取期间执行，超过 max_response_bytes 即结束本次审查为 FAILED/ReviewInvalidOutput，不能读取完任意大正文才检查。返回中的推理内容可能占用 token 和响应字节，但不写入审查意见。落库详情和固定错误说明还须满足第 5.2 节的独立内容预算。
 
-| 稳定错误码 | 含义 |
-| --- | --- |
-| `ReviewUnavailable` | 服务未启用或无法接纳交接 |
-| `ReviewQueueFull` | 独立审查队列没有名额 |
-| `ReviewInputUnavailable` | 未取得所需源码或固定题面 |
-| `ReviewInputTooLarge` | 完整审查请求超过字节预算 |
-| `ReviewTimeout` | 外部请求及完整响应读取超时 |
-| `ReviewApiFailed` | 连接、鉴权、限流或其他 API 错误 |
-| `ReviewIncomplete` | 模型响应未完整完成，包括输出预算耗尽 |
-| `ReviewInvalidOutput` | 响应读取超限、缺少有效正文、拒绝、意外工具输出、意见校验失败或组装详情超出总预算 |
-| `ReviewInterrupted` | 后端停止或重启中断了该次审查 |
+| 稳定错误码               | 含义                                                                             |
+| ------------------------ | -------------------------------------------------------------------------------- |
+| `ReviewUnavailable`      | 服务未启用或无法接纳交接                                                         |
+| `ReviewQueueFull`        | 独立审查队列没有名额                                                             |
+| `ReviewInputUnavailable` | 未取得所需源码或固定题面                                                         |
+| `ReviewInputTooLarge`    | 完整审查请求超过字节预算                                                         |
+| `ReviewTimeout`          | 外部请求及完整响应读取超时                                                       |
+| `ReviewApiFailed`        | 连接、鉴权、限流或其他 API 错误                                                  |
+| `ReviewIncomplete`       | 模型响应未完整完成，包括输出预算耗尽                                             |
+| `ReviewInvalidOutput`    | 响应读取超限、缺少有效正文、拒绝、意外工具输出、意见校验失败或组装详情超出总预算 |
+| `ReviewInterrupted`      | 后端停止或重启中断了该次审查                                                     |
 
 英文日志记录提交 ID、审查 ID、触发来源、模型、耗时、HTTP 状态、稳定错误码及实际用量；不记录密钥、完整提示词、源码、完整模型响应、诊断 JSON 或思考链。列表直接读取并筛选状态列，详情从受限 JSON 映射到显式 DTO。
 
 ## 10. 实施顺序与有限验收
 
-| 步骤 | 主要变更 | 完成标志 |
-| --- | --- | --- |
-| L01 数据契约 | 固定字段、状态和输出类型；在完整初始 SQL 中维护审查列与约束 | 审查默认为 DISABLED；机器终态约束有效；最近一次审查可往返 |
-| L02 审查客户端与策略 | 后端配置、reqwest、Responses 请求、固定指令、输出校验及失败诊断 | 程序正确构造约定请求，并将有效意见或失败对象归入对应字段 |
-| L03 队列与程序生命周期 | 平行审查模块、自动门槛、同事务初态、ACK 交接、条件写入及启动停机 | 门槛准确；重复事件不重复调用；审查网络等待不阻塞 Worker 释放 |
-| L04 HTTP 手动与查询 | 新路由、预期 ID 校验、详情 DTO 和历史状态筛选 | 禁用题目或零通过仍可手动；非 finished 拒绝；旧请求不触发下一轮 |
-| L05 前端 | 结果区、启动与重跑按钮、联合轮询条件、历史状态列和筛选 | finished/PENDING 仍更新；状态筛选往返保留；无自动 POST |
-| L06 联调与说明 | 受控联调、一次最小真实 API 检查及实际记录 | 功能合同可复现，模型响应按实际观察记录，密钥不进入记录 |
+| 步骤                   | 主要变更                                                                   | 完成标志                                                       |
+| ---------------------- | -------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| L01 数据契约           | 固定字段、状态和输出类型；在完整初始 SQL 中维护审查列与约束                | 审查默认为 DISABLED；机器终态约束有效；最近一次审查可往返      |
+| L02 审查客户端与策略   | 后端配置、reqwest、Responses 请求、固定指令、输出校验及失败诊断            | 程序正确构造约定请求，并将有效意见或失败对象归入对应字段       |
+| L03 队列与程序生命周期 | 平行审查模块、自动门槛、同事务初态、事件位点及本地交接、条件写入及启动停机 | 门槛准确；重复事件不重复调用；审查网络等待不阻塞 Worker 释放   |
+| L04 HTTP 手动与查询    | 新路由、预期 ID 校验、详情 DTO 和历史状态筛选                              | 禁用题目或零通过仍可手动；非 finished 拒绝；旧请求不触发下一轮 |
+| L05 前端               | 结果区、启动与重跑按钮、联合轮询条件、历史状态列和筛选                     | finished/PENDING 仍更新；状态筛选往返保留；无自动 POST         |
+| L06 联调与说明         | 受控联调、一次最小真实 API 检查及实际记录                                  | 功能合同可复现，模型响应按实际观察记录，密钥不进入记录         |
 
 ### 10.1 L01：数据契约与初始化结构
 
@@ -451,10 +445,10 @@ L02 不要求真实模型每次给出相同结论。它检验程序是否按约�
 
 1. 组装独立 FIFO 队列、待执行名额和运行并发；共用 Tokio，不复用 Scheduler 容量，也不新增外部队列服务。任务只携带本次提交和审查身份。
 2. 从创建和启动装入两个现有任务装配入口携带固定 review_mode；按第 4.1 节判断，Worker 请求和 Proto 保持原样。
-3. 在现有判题终态分支加入第 7.1 节的预留和同事务初态，提交后先执行 ACK 并释放 Scheduler 本地占用，再交接审查；落实未生效、写入失败和停止时的名额释放。
+3. 在现有判题终态分支加入第 7.1 节的预留和同事务初态，提交后先执行 位点交接 并释放 Scheduler 本地占用，再交接审查；落实未生效、写入失败和停止时的名额释放。
 4. 运行任务读取已保存源码及固定题面后归还数据库连接，调用 L02，按本次 review_id 完成；只保留最近一次，不扫描补投。
 5. 程序入口启动和监督审查模块，启动中断旧 PENDING；停止信号立即关闭两类接纳、取消未完成调用，并将收尾时新出现的自动审查保存为 FAILED/ReviewInterrupted。
-6. 使用小表覆盖自动门槛；用事件核对机器终态提交后先完成 ACK，再交接审查，交接关闭时的 FAILED 写入也在 ACK 之后。用已有生命周期夹具检查 PENDING 中断及停机后新终态不入队，不重复完整判题或沙箱验收。
+6. 使用小表覆盖自动门槛；用事件核对机器终态提交后先完成 位点交接，再交接审查，交接关闭时的 FAILED 写入也在 位点交接 之后。用已有生命周期夹具检查 PENDING 中断及停机后新终态不入队，不重复完整判题或沙箱验收。
 
 ### 10.4 L04：手动接口与查询
 

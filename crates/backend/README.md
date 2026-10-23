@@ -4,23 +4,23 @@ acorn-backend 是 Acorn 的 HTTP 后端，使用 Axum、Tokio 和 SQLx。它管�
 
 ## 功能与模块
 
-| 模块                      | 职责                                                       |
-| ------------------------- | ---------------------------------------------------------- |
-| `http`                    | JSON API、分页筛选、请求限制和错误响应                     |
-| `problems`、`submissions` | 题目版本查询、幂等创建、提交详情和历史                     |
-| `scheduler`               | 有界内存队列、Worker 选择、gRPC 分派与轮询、保存结果后 ACK |
-| `database`                | MySQL 访问、短事务和条件状态更新                           |
-| `llm_review`              | 自动及手动审查、独立队列、模型调用和最新意见保存           |
-| `health`                  | 数据库与 Worker 共享采集、最近观测缓存                     |
-| `config`、`logging`       | TOML 配置和英文 stderr 日志                                |
+| 模块                      | 职责                                                     |
+| ------------------------- | -------------------------------------------------------- |
+| `http`                    | JSON API、分页筛选、请求限制和错误响应                   |
+| `problems`、`submissions` | 题目版本查询、幂等创建、提交详情和历史                   |
+| `scheduler`               | 有界待发队列及许可、Kafka 任务发布、事件持久化和审查交接 |
+| `database`                | MySQL 访问、短事务和条件状态更新                         |
+| `llm_review`              | 自动及手动审查、独立队列、模型调用和最新意见保存         |
+| `health`                  | 数据库与 Worker 共享采集、最近观测缓存                   |
+| `config`、`logging`       | TOML 配置和英文 stderr 日志                              |
 
 一个后端进程运行一个 Scheduler，可连接多个 Worker。每个提交固定创建时的题目版本，源码和测试数据随任务交给 Worker；提交 ID 同时作为 Worker Job ID。
 
-库接口 `scheduler::kafka::Publisher` 和 `EventConsumer` 分别提供任务发布与事件消费，`EventProcessor` 共用状态持久化和审查交接。调用方先用 `Database::judging_recovery`／`Scheduler::restore` 恢复本地所有权，再运行两项服务，提供停止信号并监督错误。Kafka 组位点需由部署初始化，运行规则见 [Kafka 设计](../../docs/10-kafka-judging-design.md)。下述可执行文件入口使用 gRPC 调度。
+库接口 `scheduler::kafka::Publisher` 和 `EventConsumer` 分别提供任务发布与事件消费，`EventProcessor` 共用状态持久化和审查交接。调用方先用 `Database::judging_recovery`／`Scheduler::restore` 恢复本地所有权，再运行两项服务，提供停止信号并监督错误。Kafka 组位点需由部署初始化，运行规则见 [Kafka 设计](../../docs/10-kafka-judging-design.md)。正式入口通过 Scheduler::start 恢复并监督两项 Kafka 服务。
 
 ## 启动
 
-先按 [初始化说明](../../docs/09-mysql-migration-design.md#7-sql-改写与全新初始化)初始化数据库并预置用户、题目，再按 [Worker 说明](../worker/README.md#启动)启动节点。在仓库根目录执行：
+先准备可互通的 Kafka、按[部署合同](../../docs/10-kafka-judging-design.md#10-整体部署)创建 topic 并初始化两端消费组位点，再按 [初始化说明](../../docs/09-mysql-migration-design.md#7-sql-改写与全新初始化)初始化数据库并预置用户、题目，再按 [Worker 说明](../worker/README.md#启动)启动节点。在仓库根目录执行：
 
 ```sh
 cargo build -p acorn-backend --locked
@@ -41,20 +41,20 @@ target/debug/acorn-backend --config "$HOME/.config/acorn/backend.toml"
 
 ## 配置
 
-完整字段见 [backend.example.toml](../../config/backend.example.toml)。
+完整字段见 [backend.example.toml](../../config/backend.example.toml)。已有部署配置须删除 `scheduler.poll_interval_ms` 及 `grpc.submit_timeout_ms/get_timeout_ms/ack_timeout_ms`。
 
-| 配置节       | 主要设置                                    | 示例值                                                            |
-| ------------ | ------------------------------------------- | ----------------------------------------------------------------- |
-| `http`       | 监听地址、JSON 请求上限、默认及最大页长     | `127.0.0.1:8080`，512 KiB，20 / 100                               |
-| `database`   | 端点、库名、用户名、连接池上限及等待预算    | `127.0.0.1:3306`、`appdb`、4 个连接、5000 ms 取得等待、3 秒锁等待 |
-| `test_user`  | 所有提交的归属用户 ID                       | `1`                                                               |
-| `scheduler`  | Worker 列表、待接纳容量、轮询及节点重试间隔 | 128 个名额，100 / 1000 ms                                         |
-| `grpc`       | 各 RPC 超时、消息发送及接收上限             | 1000 ms，16 MiB / 1 MiB                                           |
-| `request`    | 源码、用例、原始载荷及单用例资源上限        | 源码 64 KiB，最多 128 个用例                                      |
-| `results`    | 编译诊断、stdout、stderr 和故障说明保留上限 | 前三项各 64 KiB，故障说明 512 字节                                |
-| `health`     | 每轮采集后的间隔、单项探测超时              | 5000 / 1000 ms                                                    |
-| `llm_review` | 审查开关、模型地址、凭据、并发和预算        | 默认关闭；详见下文                                                |
-| `logging`    | 日志过滤级别                                | `info`                                                            |
+| 配置节       | 主要设置                                     | 示例值                                                            |
+| ------------ | -------------------------------------------- | ----------------------------------------------------------------- |
+| `http`       | 监听地址、JSON 请求上限、默认及最大页长      | `127.0.0.1:8080`，512 KiB，20 / 100                               |
+| `database`   | 端点、库名、用户名、连接池上限及等待预算     | `127.0.0.1:3306`、`appdb`、4 个连接、5000 ms 取得等待、3 秒锁等待 |
+| `test_user`  | 所有提交的归属用户 ID                        | `1`                                                               |
+| `scheduler`  | 状态地址列表、待接纳容量、Kafka 发布重试间隔 | 128 个名额，1000 ms                                               |
+| `grpc`       | 状态 RPC 的消息发送及接收上限                | 16 MiB / 1 MiB                                                    |
+| `request`    | 源码、用例、原始载荷及单用例资源上限         | 源码 64 KiB，最多 128 个用例                                      |
+| `results`    | 编译诊断、stdout、stderr 和故障说明保留上限  | 前三项各 64 KiB，故障说明 512 字节                                |
+| `health`     | 每轮采集后的间隔、单项探测超时               | 5000 / 1000 ms                                                    |
+| `llm_review` | 审查开关、模型地址、凭据、并发和预算         | 默认关闭；详见下文                                                |
+| `logging`    | 日志过滤级别                                 | `info`                                                            |
 
 数据库密码由进程环境变量 `MYSQL_PASSWORD` 提供，TOML 只保存非秘密连接字段；正式程序不自动加载 `.env`。MySQL SSL 显式禁用。API、Scheduler、审查与健康采集共用连接池，每条新连接设置 utf8mb4_0900_bin、READ COMMITTED、严格模式及两类锁等待。取得连接的等待预算与查询、锁等待分别计量；模型和 Worker 网络等待不借用数据库连接。
 
@@ -86,7 +86,7 @@ HTTP 和 gRPC 的访问范围由部署端配置。后端使用配置中的预置
 
 既有后端配置的 `[kafka].events_group_id` 改名为 `group_id`，保留原事件消费组值。
 
-当前服务入口使用 gRPC 判题。上述配置和客户端选项供 Kafka 驱动使用，消息接口见[共享协议](../protocol/README.md#kafka-消息编解码)。
+正式入口使用上述 Kafka 客户端发布任务并消费事件，gRPC 仅查询状态。消息接口见[共享协议](../protocol/README.md#kafka-消息编解码)。
 
 ## HTTP API
 
@@ -143,7 +143,7 @@ curl --fail-with-body -i http://127.0.0.1:8080/api/v1/submissions \
 | [wrong-answer.py](../../examples/submissions/wrong-answer.py) | `python`      | WA       |
 | [time-limit.c](../../examples/submissions/time-limit.c)       | `c`           | TLE      |
 
-提交状态依次为 `queued`、`dispatching`、`running`，最终为 `finished` 或 `failed`。`finished` 携带 AC、WA、CE、RE、TLE、MLE、OLE 之一；`failed` 携带执行或跟踪错误。CE 返回编译诊断，用例失败返回首个失败用例的输出及可用资源统计。HTTP 中的字节字段使用 Base64；资源统计使用微秒和字节。
+提交状态依次为 `queued`、`dispatching`、`running`，最终为 `finished` 或 `failed`。`finished` 携带 AC、WA、CE、RE、TLE、MLE、OLE 之一；`failed` 携带执行或消息协议错误。CE 返回编译诊断，用例失败返回首个失败用例的输出及可用资源统计。HTTP 中的字节字段使用 Base64；资源统计使用微秒和字节。
 
 ### 错误响应
 
@@ -201,7 +201,7 @@ curl --fail-with-body 'http://127.0.0.1:8080/api/v1/submissions?review_status=DO
 
 `GET /api/v1/health` 返回提交接纳条件、Scheduler 状态及名额、数据库读取和 Worker 最近探测结果。探测由后台共享采集执行，GET 读取缓存；默认每轮结束后等待 5 秒，单项超时 1 秒，观测达到 12 秒时标为 `stale`。
 
-Ctrl-C 或 SIGTERM 停止新提交、新分派和审查接纳，等待在途判题保存与一次 ACK，取消未完成模型等待，随后关闭 HTTP 和数据库。停机期间查询继续可用。重启会装入 queued 提交，将旧 dispatching/running 保存为 `failed / SchedulerInterrupted`，将旧 PENDING 审查保存为 `FAILED / ReviewInterrupted`。
+Ctrl-C 或 SIGTERM 停止新接纳、发布和审查，等待已登记创建交接后，在共同消息预算内收尾当前发送、事件持久化和消费者 RAII 释放，再关闭 HTTP、健康采集和数据库。停机期间查询继续可用，不等待远程 Worker 判题。重启只重交 queued，恢复 dispatching/running 等待；旧 PENDING 审查保存为 FAILED/ReviewInterrupted。SDK 析构在阻塞线程执行，超时不会取消底层析构，进程退出仍可能等待它。
 
 日志输出到 stderr，以提交 ID 关联创建、分派和终态保存事件。关键数据库写入或调度任务失败会触发进程退出，错误原因写入日志。
 
@@ -227,13 +227,20 @@ ACORN_TEST_DATABASE_CONFIG=/path/to/mysql-test.toml \
 
 启用 binlog 时，服务器还须允许该账户创建测试触发器，否则可能返回 1419。由管理员预先准备开发实例，所需设置及影响范围见[迁移测试环境说明](../../docs/09-mysql-migration-design.md#112-命令与环境)；测试本身不修改服务器全局变量。
 
-使用已配置沙箱的主机检查真实单／双 Worker 链路，选择空闲的专用 box ID：
+使用已配置 Kafka 和沙箱的主机检查真实 Worker 链路，选择空闲的专用 box ID：
 
 ```sh
-ACORN_TEST_DATABASE_CONFIG=/path/to/mysql-test.toml ACORN_ISOLATE_BOX_ID=204 \
+ACORN_TEST_KAFKA_SERVERS=localhost:9092 ACORN_TEST_DATABASE_CONFIG=/path/to/mysql-test.toml ACORN_ISOLATE_BOX_ID=204 \
   cargo test -p acorn-backend --locked --test workflow real_http_worker_acceptance -- --ignored --nocapture
-ACORN_TEST_DATABASE_CONFIG=/path/to/mysql-test.toml ACORN_ISOLATE_BOX_ID=205 ACORN_ISOLATE_BOX_ID_2=206 \
-  cargo test -p acorn-backend --locked --test workflow real_two_workers_acceptance -- --ignored --nocapture
+```
+
+后端进程的 Kafka 恢复、错误监督及审查停机检查需要先构建同一工作区的 Worker。两端二进制闭环使用现有受控 Isolate 管理器，只验证编排：
+
+```sh
+cargo build --workspace --locked
+ACORN_TEST_WORKER_EXECUTABLE="$PWD/target/debug/acorn-worker" \
+  ACORN_TEST_KAFKA_SERVERS=localhost:9092 ACORN_TEST_DATABASE_CONFIG=/path/to/mysql-test.toml \
+  cargo test -p acorn-backend --locked --test workflow process_ -- --ignored --test-threads=1
 ```
 
 workspace 格式、编译及 Clippy 命令见[根说明](../../README_zh-CN.md#开发检查)，组件职责与调度合同见[后端设计](../../docs/03-backend-design.md)。

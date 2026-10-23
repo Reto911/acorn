@@ -163,7 +163,7 @@ pub struct TestUserConfig {
     pub user_id: i64,
 }
 
-/// Waiting-admission capacity and Worker dispatch settings.
+/// Waiting-admission capacity, status endpoints and publication retry settings.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SchedulerConfig {
@@ -171,22 +171,14 @@ pub struct SchedulerConfig {
     pub pending_max_count: u32,
     /// Unique gRPC endpoint URIs, such as http://127.0.0.1:50051.
     pub workers: Vec<String>,
-    /// Interval between normal progress queries, in milliseconds.
-    pub poll_interval_ms: u64,
-    /// Delay before reusing a rejected or unavailable endpoint, in milliseconds.
+    /// Delay before retrying an uncertain Kafka task publication, in milliseconds.
     pub retry_interval_ms: u64,
 }
 
-/// Independent deadlines and transport budgets for the three Worker RPCs.
+/// Transport message budgets for read-only Worker status RPCs.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrpcConfig {
-    /// SubmitJob deadline in milliseconds.
-    pub submit_timeout_ms: u64,
-    /// GetJob deadline in milliseconds.
-    pub get_timeout_ms: u64,
-    /// AcknowledgeResult deadline in milliseconds.
-    pub ack_timeout_ms: u64,
     /// Maximum outgoing encoded Worker request size.
     pub max_request_bytes: usize,
     /// Maximum incoming encoded Worker reply size.
@@ -295,7 +287,7 @@ pub struct RequestConfig {
     pub max_run_memory_kib: u64,
 }
 
-/// Raw result limits, distinct from Base64 JSON size and gRPC encoding overhead.
+/// Raw result limits, distinct from Base64 JSON size and event encoding overhead.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResultsConfig {
@@ -484,16 +476,9 @@ impl Config {
                 u64::from(self.scheduler.pending_max_count),
             ),
             (
-                "scheduler.poll_interval_ms",
-                self.scheduler.poll_interval_ms,
-            ),
-            (
                 "scheduler.retry_interval_ms",
                 self.scheduler.retry_interval_ms,
             ),
-            ("grpc.submit_timeout_ms", self.grpc.submit_timeout_ms),
-            ("grpc.get_timeout_ms", self.grpc.get_timeout_ms),
-            ("grpc.ack_timeout_ms", self.grpc.ack_timeout_ms),
             ("grpc.max_request_bytes", self.grpc.max_request_bytes as u64),
             (
                 "grpc.max_response_bytes",
@@ -617,11 +602,7 @@ impl Config {
             .checked_mul(32)
             .and_then(|size| size.checked_add(self.request.payload_max_bytes))
             .and_then(|size| size.checked_add(36 + 1024))
-            .context("gRPC request budget overflow")?;
-        ensure!(
-            self.grpc.max_request_bytes >= request_required,
-            "gRPC request limit cannot hold configured payload"
-        );
+            .context("Task message budget overflow")?;
         ensure!(
             self.kafka.max_task_record_bytes >= request_required,
             "Kafka task record limit cannot hold configured payload"
@@ -635,11 +616,7 @@ impl Config {
                     .max(self.results.failure_diagnostic_max_bytes)
             })
             .and_then(|size| size.checked_add(36 + 1024))
-            .context("gRPC result budget overflow")?;
-        ensure!(
-            self.grpc.max_response_bytes >= result_required,
-            "gRPC response limit cannot hold bounded results"
-        );
+            .context("Event message budget overflow")?;
         ensure!(
             self.kafka.max_event_record_bytes >= result_required,
             "Kafka event record limit cannot hold bounded results"

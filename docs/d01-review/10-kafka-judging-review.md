@@ -116,7 +116,7 @@ Kafka 的 delete 保留策略会清理未消费的旧日志，实际清理并非
 
 第 6.3 节的安全停止和资源保留是现有合同；新增部分只有停止 MQ 新接纳，以及在单独消息预算内交接结果和位点。正文使用“不再接纳新任务”，避免将停止新接纳误写成立即停止交接所需的消费驱动。
 
-第 7 节与 LLM 的关联仅是现有自动交接：[Scheduler 跟踪](../../crates/backend/src/scheduler/tracking.rs)已在机器终态落库前调用 prepare_automatic，并以 save_terminal 同时保存审查初态，之后由 Scheduler handoff。Kafka 事件消费者需要接替该调用方，原业务 ACK 调用处改为提交事件消费位点；LLM 客户端及队列不因此改走 Kafka。正文保留这一衔接及重复终态不重复审查，其他细节引用第 08 篇。
+第 7 节与 LLM 的关联仅是现有自动交接：原 Scheduler 跟踪（已移除，现由[事件处理器](../../crates/backend/src/scheduler/kafka/events.rs)接替）已在机器终态落库前调用 prepare_automatic，并以 save_terminal 同时保存审查初态，之后由 Scheduler handoff。Kafka 事件消费者需要接替该调用方，原业务 ACK 调用处改为提交事件消费位点；LLM 客户端及队列不因此改走 Kafka。正文保留这一衔接及重复终态不重复审查，其他细节引用第 08 篇。
 
 ### 3.7 组检测间隔与健康地址发现
 
@@ -215,3 +215,47 @@ Worker 不写数据库。若 Worker 永久失去 MQ 通信能力，后端没有�
 配置字段及预算默认值在 K01.2 固定，目标 Kafka 版本及部署命令在 K07.1 固定。实施进度及检查结果由实施记录维护。
 
 位点提交的 [safe 路线补充研究](10-kafka-safe-commit-study.md)保留接口、规约及性能比较，记录 K04 后的两端范围和最终接受的取舍。S01 已将决定纳入设计，程序改型及检查按[修复跟踪](../d02-execution/10-kafka-judging-execution.md#10-safe-接口修复跟踪)推进。
+
+## 5. K05 精简性复审
+
+复审本批未提交的正式入口、Scheduler 监督、消费者释放、Worker 运行入口、配置校验及迁移后的测试夹具，按现有输入、资源、并发和状态合同判断各项处理的必要性。
+
+- 后端 Kafka 启动失败时，HTTP 尚未提供服务，审查服务也没有接纳工作，进程将直接退出。删除专门停止并等待空闲审查服务的错误分支，沿用 `?` 返回启动错误。
+- Scheduler 正常排空后，服务任务集合已经为空，无须再次取消并等待。将剩余任务取消和回收放在消息收尾超时分支。
+- 测试夹具删除旧 RPC 拒绝冷却使用的 60 秒重试覆盖；未启动 Kafka 服务的受控事件夹具只需关闭接纳并排空创建和审查，不再发送无接收方的 Kafka 关闭信号。
+
+运行期故障仍须排空已登记创建及当前消息处理；共享消息预算、分区归属检查、消费者阻塞析构及取消时的释放路径分别对应生命周期、位点隔离和 SDK 资源释放合同，予以保留。Worker 的单槽及停止确认检查、外部任务和事件的边界校验、Kafka 编码预算同样保留。监督任务的退出检查用于报告实际后台故障，不引入恢复或重试路径。协议移除后的 gRPC 载荷交叉校验及运行入口重复结果容量检查已随 K05 删除。
+
+复验范围和实际结果见[实施记录](../d02-execution/10-kafka-judging-execution.md#11-k05-生命周期与旧流程移除)。
+
+## 6. Kafka 析构与阻塞线程调研
+
+### 6.1 依赖行为
+
+本轮按 Cargo.lock 中的 rdkafka 0.39.0、rdkafka-sys 4.10.0+2.12.1 和 Tokio 1.53.2 核对依赖源码；默认动态链接环境的 librdkafka 为 2.13.0。没有修改运行实现或进行析构耗时实验。
+
+StreamConsumer 内部持有 BaseConsumer。BaseConsumer::drop 在配置 group.id 时调用 close_queue，然后循环执行 `poll(Duration::from_millis(100))`，直到 closed 返回 true；100 毫秒是单次 poll 参数，不是析构总上限。底层客户端还需执行同步销毁。这里存在实际阻塞操作，RAII 不保证异步释放。依据见 [StreamConsumer 源码](https://github.com/fede1024/rust-rdkafka/blob/v0.39.0/src/consumer/stream_consumer.rs)、[BaseConsumer 析构](https://docs.rs/rdkafka/0.39.0/src/rdkafka/consumer/base_consumer.rs.html#762-782)及 [librdkafka 关闭与销毁 API](https://docs.confluent.io/platform/current/clients/librdkafka/html/rdkafka_8h.html)。
+
+spawn_blocking 使用 Tokio 的阻塞线程池，不要求每次新建一条专用线程。已开始的任务不能通过 abort 取消，运行时退出仍可能等待它；外层消息超时只限制等待。直接在异步任务中 drop 阻塞对象会占用一个调度线程，多线程运行时不必因此整体停止，但当前任务不能继续驱动自己的并行分支。依据见 [Tokio 1.53.2 spawn_blocking](https://docs.rs/tokio/1.53.2/tokio/task/fn.spawn_blocking.html)。
+
+### 6.2 项目位置与必要性
+
+当前手写 Rust 有 5 处仅为 drop 使用 spawn_blocking，释放对象均为 Kafka 消费者或其所有者。
+
+| 位置                                                                                          | 场景与判断                                                                                                                                                     |
+| --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [backend EventConsumer::run](../../crates/backend/src/scheduler/kafka/events.rs)              | 正常返回及处理错误后等待消费者释放。隔离同步析构能让 Scheduler 继续计时并执行受预算约束的收尾，有明确作用                                                      |
+| [backend EventConsumer::drop](../../crates/backend/src/scheduler/kafka/events.rs)             | 唯一仅启动阻塞释放的自定义 Drop。Scheduler 超时取消消费任务时会触发，有实际调用路径；可通过让生命周期负责人持有消费者、被取消任务只借用它，合并到一处显式释放  |
+| [worker close::close](../../crates/worker/src/kafka/close.rs)                                 | BLOCKED 时进程继续提供状态 RPC、发布终态；正常停机也需继续交接消息。建议保留阻塞隔离，可简化 begin_close 的 tokio::spawn 和 close 内 spawn_blocking 的双层任务 |
+| [worker 容量与归属测试的 passive consumer](../../crates/worker/tests/kafka.rs)                | 消费者退出后还要让另一 Worker 取得同一分区并继续执行。保留隔离有助于该实际重平衡流程继续运行                                                                   |
+| [backend 重启与故障测试的 tasks observer](../../crates/backend/tests/cases/kafka_workflow.rs) | 观察者手动 assign，后台进程已经退出，剩余步骤仅清理夹具。可接受直接 drop；保留 await 不会缩短析构时间，这一处可以简化                                          |
+
+另有 5 处 spawn_blocking 用于同步位点提交、已保存位点查询和测试初始化，闭包内可能自然释放消费者；这些调用不属于专门为析构增加的调度。创建计数、Scheduler 关闭标志及审查关闭标志的其他 3 个自定义 Drop 均在当前线程完成。
+
+### 6.3 简化边界
+
+是否隔离析构，应取决于具体类型的同步行为，以及释放期间是否还要驱动其他工作或观察预算。普通内存、许可和短锁更新不应统一增加阻塞任务；已确认的同步 Kafka 消费者关闭则具有不同的成本。
+
+后端自定义 Drop 的形式并非合同要求，现有取消路径需要的是消费者被正确释放。若调整实现，可由 Scheduler 保留消费者所有权，结束或取消消费 future 后统一在一处释放，从而删除 Option 搬移及只做 spawn_blocking 的 Drop；直接删除当前 Drop 会让超时取消路径回到执行线程析构。Worker 可直接保留阻塞任务的 JoinHandle，减少异步包装，不新增通用释放抽象。这些是调研建议，尚未改动实现或调整既有设计合同。
+
+FutureProducer 的最后一个所有者同样会经 ThreadedProducer 析构等待内部轮询线程，BaseProducer 还执行 purge 和带 500 毫秒参数的 flush；这不是整个 producer 析构耗时的保证。现有代码未统一隔离这些析构，也不据此扩大为所有 SDK 对象的线程包装任务。依据见 [producer 析构实现](https://docs.rs/rdkafka/0.39.0/src/rdkafka/producer/base_producer.rs.html#629-641)及 [ThreadedProducer::drop](https://docs.rs/rdkafka/0.39.0/src/rdkafka/producer/base_producer.rs.html#798-817)。

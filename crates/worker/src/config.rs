@@ -176,10 +176,8 @@ pub struct SandboxConfig {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResultsConfig {
-    /// Maximum number of terminal records awaiting ACK.
+    /// Maximum number of execution results awaiting Kafka handoff.
     pub max_unacknowledged_results: usize,
-    /// Capacity of the acknowledged-result FIFO.
-    pub acknowledged_queue_length: usize,
 }
 
 /// Text log filtering settings.
@@ -297,10 +295,6 @@ impl Config {
                 "results.max_unacknowledged_results",
                 self.results.max_unacknowledged_results as u64,
             ),
-            (
-                "results.acknowledged_queue_length",
-                self.results.acknowledged_queue_length as u64,
-            ),
         ] {
             ensure!(value > 0, "{name} must be positive");
         }
@@ -368,10 +362,6 @@ impl Config {
             .and_then(|size| size.checked_add(self.request.payload_max_bytes))
             .context("Request message budget overflow")?;
         ensure!(
-            self.server.max_request_bytes >= request_envelope,
-            "Request message limit cannot hold the configured payload and protocol envelope"
-        );
-        ensure!(
             self.kafka.max_task_record_bytes >= request_envelope,
             "Kafka task record limit cannot hold configured payload"
         );
@@ -385,10 +375,6 @@ impl Config {
             .checked_add(self.request.job_id_max_bytes)
             .and_then(|size| size.checked_add(1024))
             .context("Result message budget overflow")?;
-        ensure!(
-            self.server.max_response_bytes >= response_required,
-            "Response message limit cannot hold bounded results"
-        );
         ensure!(
             self.kafka.max_event_record_bytes >= response_required,
             "Kafka event record limit cannot hold bounded results"

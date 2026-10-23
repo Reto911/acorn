@@ -455,7 +455,6 @@ async fn terminal_storage_and_immutability() {
                 .await
                 .unwrap()
         );
-        assert!(!database.requeue(&created.info.id).await.unwrap());
         assert!(!database.mark_dispatching(&created.info.id).await.unwrap());
         assert!(!database.mark_running(&created.info.id).await.unwrap());
         assert_eq!(
@@ -536,73 +535,6 @@ async fn terminal_storage_and_immutability() {
     fixture.close().await;
 }
 
-/// Startup operations preserve queued and terminal records while failing only old in-flight work.
-#[tokio::test]
-async fn startup_reads_and_conditional_transitions() {
-    let fixture = Fixture::new().await;
-    let database = &fixture.database;
-    let queued = database.create_submission(request("c")).await.unwrap().info;
-    let dispatching = database.create_submission(request("c")).await.unwrap().info;
-    let running = database
-        .create_submission(request("python"))
-        .await
-        .unwrap()
-        .info;
-    let finished = database.create_submission(request("c")).await.unwrap().info;
-    assert!(database.mark_dispatching(&dispatching.id).await.unwrap());
-    assert!(database.requeue(&dispatching.id).await.unwrap());
-    assert!(database.mark_dispatching(&dispatching.id).await.unwrap());
-    assert!(database.mark_running(&running.id).await.unwrap());
-    assert!(!database.mark_running(&running.id).await.unwrap());
-    assert!(!database.mark_dispatching(&running.id).await.unwrap());
-    assert!(database.mark_dispatching(&finished.id).await.unwrap());
-    assert!(
-        database
-            .save_terminal(&finished.id, &accepted(&fixture.config), None)
-            .await
-            .unwrap()
-    );
-    let old_terminal = database.submission(&finished.id).await.unwrap();
-    let startup = database.queued_tasks().await.unwrap();
-    assert_eq!(startup.len(), 1);
-    assert_eq!(startup[0].request.job_id, queued.id);
-    assert_eq!(database.interrupt_in_flight().await.unwrap(), 2);
-    assert_eq!(database.interrupt_in_flight().await.unwrap(), 0);
-    assert_eq!(
-        database.submission(&finished.id).await.unwrap(),
-        old_terminal
-    );
-    for id in [&dispatching.id, &running.id] {
-        let stored = database.submission(id).await.unwrap().unwrap();
-        let Some(TerminalDetails::Failure(failure)) = stored.terminal_details else {
-            panic!("Expected interruption")
-        };
-        assert_eq!(failure.code, "SchedulerInterrupted");
-    }
-    let another = database.create_submission(request("c")).await.unwrap().info;
-    let mut expected = [queued, another];
-    expected.sort_by(|a, b| (a.created_at_ms, &a.id).cmp(&(b.created_at_ms, &b.id)));
-    assert_eq!(
-        database
-            .queued_tasks()
-            .await
-            .unwrap()
-            .iter()
-            .map(|task| task.request.job_id.clone())
-            .collect::<Vec<_>>(),
-        expected
-            .iter()
-            .map(|info| info.id.clone())
-            .collect::<Vec<_>>()
-    );
-    let mut small = fixture.config.clone();
-    small.scheduler.pending_max_count = 1;
-    let limited = Database::open(&small).await.unwrap();
-    assert!(matches!(limited.queued_tasks().await, Err(Error::Data(_))));
-    limited.close().await;
-    fixture.close().await;
-}
-
 /// Recovery counts queued and delivered work together and releases only committed ownership.
 #[tokio::test]
 async fn judging_recovery_and_once_only_permit_release() {
@@ -640,7 +572,6 @@ async fn judging_recovery_and_once_only_permit_release() {
     let mut config = fixture.config.clone();
     config.scheduler.pending_max_count = 1;
     let limited = Database::open(&config).await.unwrap();
-    assert_eq!(limited.queued_tasks().await.unwrap().len(), 1);
     assert!(matches!(
         limited.judging_recovery().await,
         Err(Error::Data(_))
@@ -993,69 +924,10 @@ async fn startup_checks_and_finite_lock_wait() {
     fixture.close().await;
 }
 
-/// The P06 executable validates an initialized database and clearly reports pending services.
+/// The shipped seed user stores an Argon2id hash with independent salt and digest.
 #[tokio::test]
-async fn executable_serves_http_and_stops() {
+async fn seed_user_password_hash() {
     let fixture = Fixture::new().await;
-    use std::{process::Stdio, time::Duration};
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-    let mut config = fixture.process_config();
-    config["http"]["listen"] = "127.0.0.1:0".into();
-    let text = toml::to_string(&config).unwrap();
-    let path = fixture.directory.path().join("backend.toml");
-    std::fs::write(&path, text).unwrap();
-    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_acorn-backend"))
-        .arg("--config")
-        .arg(path)
-        .env("MYSQL_PASSWORD", std::env::var("MYSQL_PASSWORD").unwrap())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
-    let mut logs = BufReader::new(child.stderr.take().unwrap()).lines();
-    let address = tokio::time::timeout(Duration::from_secs(5), async {
-        while let Some(line) = logs.next_line().await.unwrap() {
-            if line.contains("Backend HTTP listening") {
-                return line
-                    .split("listen=")
-                    .nth(1)
-                    .unwrap()
-                    .split_whitespace()
-                    .next()
-                    .unwrap()
-                    .to_owned();
-            }
-        }
-        panic!("Backend did not start listening")
-    })
-    .await
-    .unwrap();
-    let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
-    stream
-        .write_all(b"GET /api/v1/problems HTTP/1.0\r\n\r\n")
-        .await
-        .unwrap();
-    let mut response = String::new();
-    tokio::time::timeout(Duration::from_secs(5), stream.read_to_string(&mut response))
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(response.starts_with("HTTP/1.0 200"));
-    assert!(response.contains("\"items\""));
-    nix::sys::signal::kill(
-        nix::unistd::Pid::from_raw(child.id().unwrap() as i32),
-        nix::sys::signal::Signal::SIGTERM,
-    )
-    .unwrap();
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .code(),
-        Some(0)
-    );
     let mut connection = fixture.connection().await;
     let hash: String = sqlx::query("SELECT password_hash FROM users WHERE id = 1")
         .fetch_one(&mut connection)
