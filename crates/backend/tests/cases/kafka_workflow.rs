@@ -131,7 +131,12 @@ async fn real_kafka_backend_publication_and_events() -> Result<()> {
             Ok(())
         })
         .await??;
-        let creation = CreationService::new(config, fixture.database.clone(), scheduler.clone());
+        let creation = CreationService::new(
+            config,
+            fixture.database.clone(),
+            scheduler.clone(),
+            crate::support::observed_membership(config),
+        );
         let created = creation
             .create(CreateSubmission {
                 problem_id: 1,
@@ -428,9 +433,18 @@ async fn process_http_kafka_worker() -> Result<()> {
     .await?;
     let mut backend = BackendProcess::spawn(&fixture);
     let http = backend.listening().await;
-    let (created, body) = network_call(http, "POST", "/api/v1/submissions", Some(serde_json::json!({
-        "problem_id":1,"language_id":"python","source":include_str!("../../../../examples/submissions/a-plus-b.py")
-    })), Some(Uuid::new_v4())).await;
+    let key = Uuid::new_v4();
+    let (created, body) = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let response = network_call(http, "POST", "/api/v1/submissions", Some(serde_json::json!({
+                "problem_id":1,"language_id":"python","source":include_str!("../../../../examples/submissions/a-plus-b.py")
+            })), Some(key)).await;
+            if response.0 != 503 || response.1["error"]["code"] != "WorkersUnavailable" {
+                break response;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }).await?;
     ensure!(created == 202, "HTTP creation failed: {body}");
     let id = body["submission_id"]
         .as_str()

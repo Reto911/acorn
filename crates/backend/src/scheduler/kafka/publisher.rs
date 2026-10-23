@@ -36,7 +36,7 @@ impl Publisher {
     /// Construct the task publisher without starting dispatch or changing persisted work.
     pub fn new(config: &Config, scheduler: Scheduler, database: Database) -> Result<Self> {
         Ok(Self {
-            producer: super::producer_config(&config.kafka).create()?,
+            producer: scheduler.kafka_observer().producer,
             scheduler,
             database,
             config: config.kafka.clone(),

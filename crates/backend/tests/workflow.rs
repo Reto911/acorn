@@ -41,6 +41,132 @@ async fn health_response(app: &axum::Router) -> Value {
     body
 }
 
+/// Real classic-group observations gate only new records; health remains a passive separate cache.
+#[tokio::test]
+#[ignore = "requires ACORN_TEST_DATABASE_CONFIG, MYSQL_PASSWORD and ACORN_TEST_KAFKA_SERVERS"]
+async fn real_kafka_observation_and_admission() {
+    use acorn_backend::membership::Membership;
+
+    let mut fixture = Fixture::new().await;
+    fixture.config.worker_membership.interval_ms = 50;
+    fixture.config.health.interval_ms = 60_000;
+    let broker = support::broker::Broker::start(&mut fixture).await;
+    let scheduler = Scheduler::restore(&fixture.config, Default::default()).unwrap();
+    let (review, review_task) =
+        ReviewService::start(&fixture.config.llm_review, fixture.database.clone()).unwrap();
+    let (membership, membership_task) = Membership::start(
+        &fixture.config.worker_membership,
+        scheduler.kafka_observer(),
+    )
+    .unwrap();
+    assert_eq!(membership.snapshot().members, None);
+    let creation = CreationService::new(
+        &fixture.config,
+        fixture.database.clone(),
+        scheduler.clone(),
+        membership.clone(),
+    );
+    let (health, health_task) =
+        Health::start(&fixture.config.health, fixture.database.clone(), &scheduler).unwrap();
+    let app = http::router(
+        &fixture.config,
+        fixture.database.clone(),
+        creation.clone(),
+        scheduler.clone(),
+        health.clone(),
+        review.clone(),
+    );
+    wait_for(|| {
+        membership.snapshot().members == Some(0) && health.snapshot().kafka.state == ProbeState::Ok
+    })
+    .await;
+    let body = json!({"problem_id":1,"language_id":"python","source":"print(42)"});
+    let rejected_key = Uuid::new_v4();
+    let (status, _, rejected) = call(
+        &app,
+        "POST",
+        "/api/v1/submissions",
+        Some(body.clone()),
+        Some(rejected_key),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(rejected["error"]["code"], "WorkersUnavailable");
+    assert!(
+        fixture
+            .database
+            .submission_by_key(rejected_key)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let cached = health.snapshot().kafka;
+    for _ in 0..2 {
+        let snapshot = health_response(&app).await;
+        assert_eq!(snapshot["kafka"]["state"], "ok");
+        assert_eq!(
+            snapshot["kafka"]["checked_at_ms"],
+            cached.checked_at_ms.unwrap()
+        );
+    }
+
+    // A failed metadata request does not overwrite another collector or the member cache.
+    let mut missing = fixture.config.clone();
+    missing.kafka.events_topic.push_str(".missing");
+    let unavailable = Scheduler::restore(&missing, Default::default()).unwrap();
+    let (failed_health, failed_task) =
+        Health::start(&missing.health, fixture.database.clone(), &unavailable).unwrap();
+    wait_for(|| failed_health.snapshot().kafka.state == ProbeState::Failed).await;
+    assert_eq!(
+        failed_health.snapshot().kafka.error_code,
+        Some(ProbeErrorCode::KafkaMetadataFailed)
+    );
+    assert_eq!(health.snapshot().kafka, cached);
+    assert_eq!(membership.snapshot().members, Some(0));
+    failed_health.stop();
+    failed_task.await.unwrap().unwrap();
+    health.stop();
+    health_task.await.unwrap().unwrap();
+
+    let (leave, member) = broker.member();
+    wait_for(|| membership.snapshot().members == Some(1)).await;
+    let key = Uuid::new_v4();
+    let (status, _, created) = call(
+        &app,
+        "POST",
+        "/api/v1/submissions",
+        Some(body.clone()),
+        Some(key),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{created}");
+    leave.send(()).unwrap();
+    member.await.unwrap();
+    wait_for(|| membership.snapshot().members == Some(0)).await;
+    let (status, _, repeated) =
+        call(&app, "POST", "/api/v1/submissions", Some(body), Some(key)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(repeated["submission_id"], created["submission_id"]);
+    assert_eq!(
+        fixture
+            .database
+            .submission_state(created["submission_id"].as_str().unwrap())
+            .await
+            .unwrap(),
+        Some(SubmissionState::Queued)
+    );
+    assert_eq!(health.snapshot().kafka, cached);
+
+    creation.stop();
+    creation.wait_idle().await;
+    membership.stop();
+    membership_task.await.unwrap().unwrap();
+    review.stop();
+    review_task.await.unwrap().unwrap();
+    broker.close().await;
+    fixture.close().await;
+}
+
 /// Basic public query shapes exclude private tests and support retained old versions.
 #[tokio::test]
 async fn published_queries_and_history_shapes() {
@@ -219,7 +345,8 @@ async fn health_round_updates_independently_and_stops_pending_checks() {
     assert_eq!(snapshot.workers[0].probe.state, ProbeState::Unknown);
     assert!(snapshot.database.checked_at_ms.unwrap() > 0);
     for _ in 0..10 {
-        assert_eq!(health.snapshot(), snapshot);
+        assert_eq!(health.snapshot().database, snapshot.database);
+        assert_eq!(health.snapshot().workers, snapshot.workers);
         let body = health_response(&harness.app).await;
         assert_eq!(body["database"]["state"], "ok");
         assert_eq!(
@@ -236,7 +363,8 @@ async fn health_round_updates_independently_and_stops_pending_checks() {
         assert_eq!(server.mock.status_calls.load(Ordering::SeqCst), 1);
     }
     harness.stop_health().await;
-    assert_eq!(health.snapshot(), snapshot);
+    assert_eq!(health.snapshot().database, snapshot.database);
+    assert_eq!(health.snapshot().workers, snapshot.workers);
     harness.close().await;
 }
 
@@ -300,7 +428,9 @@ async fn health_status_failures_and_recovery_keep_admission_open() {
             ProbeErrorCode::WorkerStatusUnsupported => "WorkerStatusUnsupported",
             ProbeErrorCode::ProbeTimeout => "ProbeTimeout",
             ProbeErrorCode::InvalidWorkerStatus => "InvalidWorkerStatus",
-            ProbeErrorCode::DatabaseReadFailed => unreachable!(),
+            ProbeErrorCode::DatabaseReadFailed | ProbeErrorCode::KafkaMetadataFailed => {
+                unreachable!()
+            }
         };
         assert_eq!(body["workers"][0]["error_code"], expected_code);
         let public = body.to_string();
@@ -386,8 +516,12 @@ async fn health_database_read_failure_and_timeout_recover() {
             timeout_ms,
         };
         let (health, task) = Health::start(&config, fixture.database.clone(), &scheduler).unwrap();
-        let creation =
-            CreationService::new(&fixture.config, fixture.database.clone(), scheduler.clone());
+        let creation = CreationService::new(
+            &fixture.config,
+            fixture.database.clone(),
+            scheduler.clone(),
+            support::observed_membership(&fixture.config),
+        );
         let app = http::router(
             &fixture.config,
             fixture.database.clone(),
@@ -453,6 +587,30 @@ async fn queue_full_and_idempotency_preserve_identity_and_version() {
     .await;
     assert_eq!(status, StatusCode::ACCEPTED);
     harness.fixture.publish_next().await;
+    harness.membership.record(Ok(0)).unwrap();
+    for sample in [Ok(0), Err("controlled query failure".into())] {
+        harness.membership.record(sample).unwrap();
+        let rejected_key = Uuid::new_v4();
+        let (status, _, rejected) = call(
+            &harness.app,
+            "POST",
+            "/api/v1/submissions",
+            Some(body.clone()),
+            Some(rejected_key),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(rejected["error"]["code"], "WorkersUnavailable");
+        assert!(
+            harness
+                .fixture
+                .database
+                .submission_by_key(rejected_key)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
     let (status, _, repeated) = call(
         &harness.app,
         "POST",
@@ -486,6 +644,7 @@ async fn queue_full_and_idempotency_preserve_identity_and_version() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(conflict["error"]["code"], "IdempotencyConflict");
+    harness.membership.record(Ok(1)).unwrap();
     let new_key = Uuid::new_v4();
     let (status, _, full) = call(
         &harness.app,
@@ -549,6 +708,7 @@ async fn queued_rehandoff_keeps_original_version() {
         .await
         .unwrap();
     harness.fixture.publish_next().await;
+    harness.membership.record(Ok(0)).unwrap();
     let (status, _, response) = call(
         &harness.app,
         "POST",
@@ -560,6 +720,7 @@ async fn queued_rehandoff_keeps_original_version() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(response["submission_id"], orphan.info.id);
     assert_eq!(harness.terminal(&orphan.info.id).await.info.version_no, 1);
+    harness.membership.record(Ok(1)).unwrap();
     let id = create(&harness.app, "python", "ac").await;
     assert_eq!(harness.terminal(&id).await.info.version_no, 2);
     harness.close().await;
@@ -966,11 +1127,17 @@ async fn process_creation_failure_exits_without_draining_workers() {
     use tokio::io::AsyncWriteExt;
     let mut fixture = Fixture::new().await;
     fixture.config.database.lock_wait_timeout_secs = 1;
+    fixture.config.worker_membership.interval_ms = 50;
+    fixture.config.logging.level = "debug".into();
     let running = fixture.queued("python").await;
     fixture.database.mark_running(&running).await.unwrap();
     let broker = support::broker::Broker::start(&mut fixture).await;
+    let (leave, member) = broker.member();
     let mut backend = BackendProcess::spawn(&fixture);
     let address = backend.listening().await;
+    backend
+        .until_log("Worker membership probe completed members=1")
+        .await;
 
     let mut connection = fixture.connection().await;
     let mut gate = connection.begin().await.unwrap();
@@ -1010,6 +1177,8 @@ async fn process_creation_failure_exits_without_draining_workers() {
     assert!(stored.info.terminal_at_ms.is_none());
     connection.close().await.unwrap();
     drop(stream);
+    leave.send(()).unwrap();
+    member.await.unwrap();
     broker.close().await;
     fixture.close().await;
 }

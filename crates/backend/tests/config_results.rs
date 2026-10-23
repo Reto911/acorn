@@ -148,6 +148,7 @@ fn health_configuration_defaults_and_age_limit() {
     for (field, value) in [
         ("interval_ms = 5_000", "interval_ms = 0"),
         ("timeout_ms = 1_000", "timeout_ms = 0"),
+        ("timeout_ms = 1_000", "timeout_ms = 2147483648"),
         ("interval_ms = 5_000", "interval_ms = 18446744073709551615"),
         ("interval_ms = 5_000", "interval_ms = 9223372036854775807"),
     ] {

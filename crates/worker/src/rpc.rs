@@ -34,7 +34,7 @@ impl JudgeWorker for WorkerService {
         Ok(Response::new(GetWorkerStatusReply {
             stopping: jobs.stopping,
             execution_state: execution_state as i32,
-            unacknowledged_results: jobs.unacknowledged_count() as u64,
+            unacknowledged_results: jobs.mq_results as u64,
             unacknowledged_capacity: self.shared.config.results.max_unacknowledged_results as u64,
         }))
     }

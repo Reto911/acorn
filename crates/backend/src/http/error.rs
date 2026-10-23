@@ -120,6 +120,11 @@ impl From<CreationError> for ApiError {
     fn from(error: CreationError) -> Self {
         match error {
             CreationError::Database(error) => error.into(),
+            CreationError::WorkersUnavailable => Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "WorkersUnavailable",
+                "No fresh positive Worker group observation is available. Retry later.",
+            ),
             CreationError::Admission {
                 cause: AdmissionError::QueueFull,
                 submission_id,

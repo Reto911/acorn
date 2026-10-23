@@ -1,4 +1,4 @@
-//! Read-only local snapshots and one shared, bounded database and Worker collector.
+//! Read-only local snapshots and one shared, bounded database, Kafka and Worker collector.
 
 use std::{
     sync::{Arc, Mutex},
@@ -79,7 +79,7 @@ pub struct WorkerStatus {
     pub stopping: bool,
     /// Occupancy of the remote execution position.
     pub execution_state: ExecutionState,
-    /// Retained runtime terminals still awaiting Kafka handoff.
+    /// Terminal entries still awaiting Kafka handoff.
     pub unacknowledged_results: u64,
     /// Positive configured ceiling for those results.
     pub unacknowledged_capacity: u64,
@@ -96,6 +96,8 @@ pub enum ProbeErrorCode {
     WorkerRpcFailed,
     /// The remote service does not implement the status RPC.
     WorkerStatusUnsupported,
+    /// Kafka metadata could not be read or lacks usable configured-topic partitions.
+    KafkaMetadataFailed,
     /// A status reply violates the defined enum or result-capacity conditions.
     InvalidWorkerStatus,
 }
@@ -106,7 +108,7 @@ pub enum ProbeErrorCode {
 pub(crate) struct ProbeError {
     /// Stable observation classification.
     pub code: ProbeErrorCode,
-    /// Original RPC or protocol error detail.
+    /// Original database, Kafka, RPC or protocol error detail.
     diagnostic: String,
 }
 
@@ -155,11 +157,13 @@ pub struct WorkerSnapshot {
     pub probe: ProbeSnapshot<WorkerStatus>,
 }
 
-/// Cached database and Worker observations; obtaining this snapshot performs no I/O.
+/// Cached database, Kafka and Worker observations; obtaining this snapshot performs no I/O.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Snapshot {
     /// Latest actual database table-read outcome.
     pub database: ProbeSnapshot<()>,
+    /// Actual metadata observation for both configured Kafka topics.
+    pub kafka: ProbeSnapshot<()>,
     /// Worker observations in configuration order.
     pub workers: Vec<WorkerSnapshot>,
 }
@@ -195,6 +199,8 @@ impl<T> Completed<T> {
 struct Cache {
     /// Database check, initially unknown.
     database: Option<Completed<()>>,
+    /// Configured Kafka topics, initially unknown.
+    kafka: Option<Completed<()>>,
     /// One initially unknown check per configured Worker.
     workers: Vec<Option<Completed<WorkerStatus>>>,
 }
@@ -222,6 +228,7 @@ impl Health {
         let health = Self {
             cache: Arc::new(Mutex::new(Cache {
                 database: None,
+                kafka: None,
                 workers: workers.iter().map(|_| None).collect(),
             })),
             stale_after: config.stale_after()?,
@@ -232,6 +239,7 @@ impl Health {
             database,
             workers,
             config.clone(),
+            scheduler.kafka_observer(),
             stopped,
         ));
         Ok((health, task))
@@ -243,6 +251,7 @@ impl Health {
         let now = Instant::now();
         Snapshot {
             database: project(cache.database.as_ref(), now, self.stale_after),
+            kafka: project(cache.kafka.as_ref(), now, self.stale_after),
             workers: cache
                 .workers
                 .iter()
@@ -300,6 +309,8 @@ fn project<T: Clone>(
 enum Check {
     /// Actual table read through the existing database boundary.
     Database(Completed<()>),
+    /// Configured-topic metadata obtained through the shared Kafka producer.
+    Kafka(Completed<()>),
     /// Validated status for the Worker at this configuration index.
     Worker(usize, Completed<WorkerStatus>),
 }
@@ -310,6 +321,7 @@ async fn collect(
     database: Database,
     workers: Vec<WorkerClient>,
     config: HealthConfig,
+    kafka: crate::scheduler::kafka::Observer,
     mut stopped: watch::Receiver<bool>,
 ) -> Result<()> {
     let timeout = Duration::from_millis(config.timeout_ms);
@@ -318,6 +330,14 @@ async fn collect(
             return Ok(());
         }
         let mut checks = JoinSet::new();
+        let observer = kafka.clone();
+        checks.spawn_blocking(move || {
+            let result = observer.metadata(timeout).map_err(|error| {
+                tracing::warn!(code = ?error.code, %error, "Kafka metadata health probe failed");
+                error.code
+            });
+            Completed::new(result).map(Check::Kafka)
+        });
         let database = database.clone();
         checks.spawn(async move {
             let result = match tokio::time::timeout(timeout, database.probe_read()).await {
@@ -369,6 +389,7 @@ async fn collect(
             let mut cache = health.cache.lock().expect("Health cache lock poisoned");
             match completed {
                 Check::Database(completed) => cache.database = Some(completed),
+                Check::Kafka(completed) => cache.kafka = Some(completed),
                 Check::Worker(index, completed) => cache.workers[index] = Some(completed),
             }
         }

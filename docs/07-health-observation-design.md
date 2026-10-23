@@ -1,16 +1,16 @@
 # 健康观测设计与实施计划
 
-版本：v1。本文定义 F08 的观测来源、状态 RPC、共享采集、HTTP、页面刷新、过期语义、任务划分及验收要求。范围确认见[审核记录](d01-review/07-health-observation-review.md)，实际过程与检查见[实施记录](d02-execution/06-frontend-development-execution.md#58-f08h01worker-状态-rpc)。
+版本：v2。本文定义 F08 的观测来源、状态 RPC、共享采集、HTTP、页面刷新、过期语义、任务划分及验收要求。范围确认见[审核记录](d01-review/07-health-observation-review.md)，实际过程与检查见[实施记录](d02-execution/06-frontend-development-execution.md#58-f08h01worker-状态-rpc)。
 
 ## 1. 目标与范围
 
-为浏览器提供 HTTP 响应、数据库读取、新提交接纳、Scheduler 生命周期和 Worker 接纳条件的只读观测。依据见[前端健康规划](05-frontend-design.md#62-后续健康功能)和[F08](06-frontend-development-plan.md#38-f08后续健康观测)。
+为浏览器提供 HTTP 响应、数据库读取、Kafka topic 元数据、本地新提交接纳、Scheduler 生命周期和 Worker 状态的只读观测。依据见[前端健康规划](05-frontend-design.md#62-后续健康功能)和[F08](06-frontend-development-plan.md#38-f08后续健康观测)。
 
 健康观测依赖 P01–P10 的后端和 F01–F07 的 GUI，作为独立任务划分。后端程序入口启动并监督唯一共享采集任务，正常和故障退出均在关闭数据库前停止并等待采集任务。
 
 本版交付一个 HTTP GET 接口、一个 Worker 状态 RPC、一个后端共享探测任务和一个手动和自动刷新的页面。复用现有 Tokio、Tonic、SQLx、Axum 和前端查询组件，无需新增依赖、数据库表或独立服务。
 
-观测结果不参与 Worker 选择、提交接纳、Job 状态转换或 ACK。原有[调度和故障规则](03-backend-design.md#7-scheduler)继续生效。本版包含页面内的观测过期警告；外部告警、自动修复、服务重启、历史监控数据、资源监控和定时试判不在范围内。
+健康观测结果不参与 Worker 选择、提交接纳、Job 状态转换或消息交接。独立的 Worker 消费组成员观测只约束新建接纳，遵守 [Kafka 成员观测合同](10-kafka-judging-design.md#56-worker-在线观测与接纳)，不并入健康缓存或本地接纳摘要。原有[调度和故障规则](03-backend-design.md#7-scheduler)继续生效。本版包含页面内的观测过期警告；外部告警、自动修复、服务重启、历史监控数据、资源监控和定时试判不在范围内。
 
 ## 2. 状态的含义与保证范围
 
@@ -20,9 +20,10 @@
 | 数据库     | 现有连接池中的一次实际表读取             | 在检查预算内完成读取                                   | 不保证后续写入成功或全库无损坏                 |
 | 新提交接纳 | 创建服务停止标记、Scheduler 状态和信号量 | 生成快照时是否停止新建、是否还有待接纳名额             | 实际 POST 仍执行原有校验和名额预留             |
 | Scheduler  | 已有 `stopping`、`closed` 标记           | 本地调度任务尚未结束，或正在停止                       | 不增加调度进度心跳或卡死判定                   |
-| Worker     | 新增状态 RPC                             | 此次通信成功，以及远端报告的执行占用、停机和结果区状态 | 不保证下一次提交必然接纳或实际沙箱执行成功     |
+| Kafka      | 对配置的任务及事件 topic 查询 metadata   | 请求完成且 topic 分区元数据可用                        | 不保证发送、消费或端到端判题成功               |
+| Worker     | 状态 RPC                                 | 此次通信成功，以及远端报告的执行占用、停机和结果区状态 | 不保证下一次提交必然接纳或实际沙箱执行成功     |
 
-队列满和 Worker 忙属于容量状态。所有 Worker 探测失败时，后端仍按原规则接纳排队任务，直到容量用尽；健康页面不改变这一行为。Scheduler 的“可尝试”缓存不作为在线或空闲证明。
+队列满和 Worker 忙属于容量状态。Worker RPC 或 Kafka metadata 健康检查失败本身不限制接纳；新建另行要求独立成员缓存中存在新鲜正成员数，再按 Scheduler 容量判断。成员数不表示空闲位置，健康页面不参与接纳决策。
 
 需要验证编译器、解释器、Isolate、配额和结果保存的完整链路时，继续使用[已有实际判题验收](../crates/backend/README.md#检查命令)。健康 GET 不创建试判任务，不重复工具检查或沙箱初始化。
 
@@ -58,7 +59,7 @@ enum WorkerExecutionState {
 | `RUNNING` | 执行位置存在，尚未因停止未确认而保留     |
 | `BLOCKED` | Job 收尾后无法确认停止，执行位置继续保留 |
 
-`stopping` 直接读取 `Jobs.stopping`。未确认结果数量复用 `Jobs::unacknowledged_count()`，容量读取现有 `results.max_unacknowledged_results`；查询不改变计数或结果保留。
+`stopping` 直接读取 `Jobs.stopping`。`unacknowledged_results` 读取 Kafka 驱动写入共享状态的待 MQ 交接终态数，包含 FIFO 排队及正在交接的条目，也包含未进入运行记录表的无效任务终态和旧归属终态。执行中的预留名额不计入；交接完成后移出计数。`unacknowledged_capacity` 读取 `results.max_unacknowledged_results`；字段名及编号不变，查询不改变队列或计数。
 
 正常状态均返回成功，包括忙、结果区满、执行位置阻塞和停机中。只有 RPC 本身失败才返回 gRPC 错误。消息不包含 Job ID、源码、测试数据、工具路径或诊断正文。
 
@@ -109,15 +110,15 @@ SELECT id FROM users LIMIT 1;
 
 ### 4.3 共享探测任务
 
-新增 `backend::health` 模块，持有数据库及各 Worker 的最近一次探测结果。缓存通过 `Arc<Mutex<...>>` 和短临界区共享，数据库及网络等待均在锁外；HTTP 只读取这份缓存，不发起 SQL 或 Worker RPC。
+新增 `backend::health` 模块，持有数据库、Kafka 及各 Worker 的最近一次探测结果。缓存通过 `Arc<Mutex<...>>` 和短临界区共享，数据库及网络等待均在锁外；HTTP 只读取这份缓存，不发起 SQL、Kafka 请求或 Worker RPC。
 
-`Scheduler::start` 仍为每个地址只构建一个 `WorkerClient`，Scheduler 句柄保留同一组客户端的廉价克隆，供 `health` 模块在库内取得克隆；节点分派和健康查询共享 channel。程序入口只传递 Scheduler 句柄，不需要公开内部客户端类型。
+`Scheduler::restore` 为每个配置地址构建一个只读 `WorkerClient`，健康采集复用其 channel。它同时构建任务生产者，任务发布、Kafka metadata 健康检查和独立成员观测共用该客户端的廉价克隆；后端不加入 Worker 任务组。
 
 一个后台任务按以下顺序工作：
 
 1. HTTP 开放时缓存可以尚无结果；后台立即开始第一轮。
-2. 每轮并发执行一次数据库读取和对每个配置 Worker 的一次 `GetWorkerStatus`。使用已有 Tokio `JoinSet`，复用 `WorkerClient` 的 channel，不为健康查询重新建连接。
-3. 每项调用均有本地超时；Worker RPC 同时携带同一预算的 gRPC deadline。每项完成后更新该项缓存和完成时间。
+2. 每轮并发执行一次数据库读取、一次 Kafka metadata 检查和对每个配置 Worker 的一次 `GetWorkerStatus`。使用已有 Tokio `JoinSet`，复用 `WorkerClient` 的 channel，不为健康查询重新建连接。
+3. 数据库使用异步超时，Worker RPC 同时携带同一预算的 gRPC deadline。Kafka 同步查询通过 `JoinSet::spawn_blocking` 运行，两个配置 topic 共用一次总预算，各 SDK 调用只取得剩余时间；检查 topic 存在、分区非空、分区错误及 leader 可用性，不发送业务或探测消息。每项完成后更新该项缓存和完成时间。
 4. 本轮全部结束后等待 `interval_ms`，再开始下一轮。同一对象不重叠探测，没有单轮重试或失败后的备用路径。
 
 配置只增加两个值：
@@ -128,7 +129,7 @@ interval_ms = 5_000
 timeout_ms = 1_000
 ```
 
-两值均为正数，缺省采用上述值，旧后端配置仍可加载。
+两值均为正数，`timeout_ms` 不超过 SDK 正整数毫秒上限 `2147483647`；缺省采用上述值，旧后端配置仍可加载。
 
 过期阈值表示缓存结果可以作为近期观测展示的最长时间，不是数据库或 Worker 调用超时，也不是 Job 执行期限。阈值固定派生为 `2 * (interval_ms + timeout_ms)`，默认 12 秒：按一轮约 1 秒检查、随后等待 5 秒估算，允许约两个周期没有新结果。配置校验拒绝该计算溢出，不增加独立的过期阈值配置。
 
@@ -138,16 +139,16 @@ timeout_ms = 1_000
 
 探测任务是后端进程内的一个 Tokio 后台任务。它的生命周期由程序入口负责：
 
-1. 单次数据库或 Worker 检查失败时，把错误写入该项缓存，探测任务继续下一轮。这属于正常的检查结果。
+1. 单次数据库、Kafka 或 Worker 检查失败时，把错误写入该项缓存，探测任务继续下一轮。这属于正常的检查结果。
 2. 探测任务本身异常结束时，例如发生 panic，入口记录错误；判题服务继续按原契约运行，不自动重建探测任务。缓存不再更新，按过期阈值随后显示 `stale`。严重数据库错误仍由已有存储故障通知触发业务退出，不被此规则覆盖。
 3. 正常停机时，后端先停止新提交和新分派，等待已开始的业务操作；这段时间 HTTP 查询仍可用，健康探测也可继续。HTTP 服务结束后，入口通知探测任务停止，等待其结束后再关闭共享数据库。
-4. 后端因已有业务故障退出时，同时通知探测任务停止。停止信号可以中断它正在等待的查询或轮次间隔，避免退出时还继续发起健康查询。
+4. 后端因已有业务故障退出时，同时通知探测任务停止。停止信号中断异步数据库／RPC 等待及轮次间隔；已经运行的阻塞 Kafka 查询继续受 SDK 有限超时约束，采集器等待其结束，不把取消等待当作底层查询取消。停止后不启动新一轮。
 
 这里停止的是健康采集任务，不是 Worker 的判题任务；不发送取消 Job、释放执行位置或消息交接的操作。
 
 ### 4.4 缓存状态和错误码
 
-数据库和每个 Worker 独立记录观测，HTTP 字段采用相同含义：
+数据库、Kafka 和每个 Worker 独立记录观测，HTTP 字段采用相同含义：
 
 | `state`   | `checked_at_ms` | `error_code` | Worker `status` |
 | --------- | --------------- | ------------ | --------------- |
@@ -158,15 +159,16 @@ timeout_ms = 1_000
 
 尚无结果时为 `unknown`。每次探测失败立即覆盖旧成功结果，不能继续显示旧的空闲状态。最近结果的单调时间年龄达到或超过过期阈值时，对外投影为 `stale`，不再输出旧 Worker 状态；内部仍只保留最近一条结果。数据库的 `ok` 表示读取成功。
 
-| 错误码                    | 来源                              |
-| ------------------------- | --------------------------------- |
-| `ProbeTimeout`            | 数据库或 Worker 调用超出本次预算  |
-| `DatabaseReadFailed`      | 数据库实际返回读取错误            |
-| `WorkerRpcFailed`         | Worker RPC 返回其他通信或服务错误 |
-| `WorkerStatusUnsupported` | Worker 返回 `UNIMPLEMENTED`       |
-| `InvalidWorkerStatus`     | 回复违反第 3.2 节的协议条件       |
+| 错误码                    | 来源                                                    |
+| ------------------------- | ------------------------------------------------------- |
+| `ProbeTimeout`            | 数据库、Kafka 或 Worker 调用超出本次预算                |
+| `KafkaMetadataFailed`     | Kafka metadata 请求失败，或配置 topic／分区元数据不可用 |
+| `DatabaseReadFailed`      | 数据库实际返回读取错误                                  |
+| `WorkerRpcFailed`         | Worker RPC 返回其他通信或服务错误                       |
+| `WorkerStatusUnsupported` | Worker 返回 `UNIMPLEMENTED`                             |
+| `InvalidWorkerStatus`     | 回复违反第 3.2 节的协议条件                             |
 
-`failed` 表示本次检查没有取得有效状态，不断言 Worker 进程已死亡。旧 Worker 不支持新 RPC 时明确显示接口不支持，不尝试用假 Job 或其他调用补齐状态。原始数据库和 RPC 错误保留在英文服务端日志中，HTTP 只返回稳定错误码；正常探测日志使用 debug。
+`failed` 表示本次检查没有取得有效状态，不断言 Worker 进程已死亡。旧 Worker 不支持新 RPC 时明确显示接口不支持，不尝试用假 Job 或其他调用补齐状态。原始数据库、Kafka 和 RPC 错误保留在英文服务端日志中，HTTP 只返回稳定错误码；正常探测日志使用 debug。
 
 ## 5. HTTP 契约与可见范围
 
@@ -174,7 +176,7 @@ timeout_ms = 1_000
 
 `GET /api/v1/health` 成功取得快照时返回 `200`，即使组件处于 `failed`、`stale`、`full` 或 `stopping`。它供 GUI 展示各维度，不使用 HTTP 状态码替代组件状态，不增加整体健康布尔值或 readiness 接口。
 
-本接口直接读取本地状态和缓存，数据库或 Worker 的单次探测失败不妨碍它返回响应。目前没有独立存活探针的调用方，因此不另设 `/api/v1/health/live`；本次 HTTP 是否响应由调用结果体现。
+本接口直接读取本地状态和缓存，数据库、Kafka 或 Worker 的单次探测失败不妨碍它返回响应。目前没有独立存活探针的调用方，因此不另设 `/api/v1/health/live`；本次 HTTP 是否响应由调用结果体现。
 
 ```json
 {
@@ -186,6 +188,11 @@ timeout_ms = 1_000
     "pending_capacity": 128
   },
   "database": {
+    "state": "ok",
+    "checked_at_ms": 1700000004000,
+    "error_code": null
+  },
+  "kafka": {
     "state": "ok",
     "checked_at_ms": 1700000004000,
     "error_code": null
@@ -209,7 +216,7 @@ timeout_ms = 1_000
 
 `execution_state` 转换为 `idle`、`running`、`blocked`。所有示例字段均为固定响应字段；探测字段的 `null` 规则见第 4.4 节，本地状态和容量字段始终来自实际读取。`snapshot_at_ms` 是 HTTP 组装时间，各 `checked_at_ms` 是该项探测完成时间，不能混用。
 
-数据库和各 Worker 并发探测、各自更新，所以完成时间可能不同。保留各自的 `checked_at_ms`，使用户能看到指标是哪次检查取得的；即使刚收到 HTTP 响应，也不能据此把缓存中的所有指标视为刚完成检查。时间字段只随最近结果保存在内存，不建立历史记录。
+数据库、Kafka 和各 Worker 并发探测、各自更新，所以完成时间可能不同。保留各自的 `checked_at_ms`，使用户能看到指标是哪次检查取得的；即使刚收到 HTTP 响应，也不能据此把缓存中的所有指标视为刚完成检查。时间字段只随最近结果保存在内存，不建立历史记录。
 
 ### 5.2 可见范围
 

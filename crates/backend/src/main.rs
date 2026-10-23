@@ -9,6 +9,7 @@ use acorn_backend::{
     http,
     llm_review::ReviewService,
     logging,
+    membership::Membership,
     scheduler::Scheduler,
     submissions::CreationService,
 };
@@ -56,7 +57,14 @@ async fn serve(config: &Config, database: Database) -> Result<()> {
     let (review, mut review_task) = ReviewService::start(&config.llm_review, database.clone())?;
     let (scheduler, mut scheduler_task) =
         Scheduler::start(config, database.clone(), startup, review.clone())?;
-    let creation = CreationService::new(config, database.clone(), scheduler.clone());
+    let (membership, mut membership_task) =
+        Membership::start(&config.worker_membership, scheduler.kafka_observer())?;
+    let creation = CreationService::new(
+        config,
+        database.clone(),
+        scheduler.clone(),
+        membership.clone(),
+    );
     let (health, mut health_task) = Health::start(&config.health, database.clone(), &scheduler)?;
     let router = http::router(
         config,
@@ -80,6 +88,7 @@ async fn serve(config: &Config, database: Database) -> Result<()> {
     let mut review_finished = false;
     let mut http_finished = false;
     let mut health_finished = false;
+    let mut membership_finished = false;
     let mut stopping = false;
     let mut creation_drained = false;
     let result = loop {
@@ -133,12 +142,17 @@ async fn serve(config: &Config, database: Database) -> Result<()> {
                 health_finished = true;
                 observe_health_completion(result, false);
             },
+            result = &mut membership_task, if !membership_finished => {
+                membership_finished = true;
+                observe_membership_completion(result, false);
+            },
             signal = stop_signal(), if !stopping => {
                 if let Err(error) = signal {
                     break Err(error);
                 }
                 tracing::info!("Backend stopping admission and dispatch");
                 creation.stop();
+                membership.stop();
                 scheduler.pause();
                 review.stop();
                 stopping = true;
@@ -155,6 +169,7 @@ async fn serve(config: &Config, database: Database) -> Result<()> {
         scheduler.pause();
         review.stop();
         health.stop();
+        membership.stop();
         if let Some(stop) = stop.take() {
             let _ = stop.send(());
         }
@@ -184,6 +199,10 @@ async fn serve(config: &Config, database: Database) -> Result<()> {
             }
         }
     }
+    membership.stop();
+    if !membership_finished {
+        observe_membership_completion(membership_task.await, true);
+    }
     health.stop();
     if !health_finished {
         observe_health_completion(health_task.await, true);
@@ -204,6 +223,19 @@ fn observe_health_completion(
         Ok(Ok(())) => tracing::error!("Health collector stopped unexpectedly"),
         Ok(Err(error)) => tracing::error!(error = %error, "Health collector failed"),
         Err(error) => tracing::error!(error = %error, "Health collector task failed"),
+    }
+}
+
+/// Observe membership lifecycle separately; failure leaves new admission subject to cache expiry.
+fn observe_membership_completion(
+    result: std::result::Result<Result<()>, tokio::task::JoinError>,
+    stopping: bool,
+) {
+    match result {
+        Ok(Ok(())) if stopping => tracing::info!("Worker membership collector stopped"),
+        Ok(Ok(())) => tracing::error!("Worker membership collector stopped unexpectedly"),
+        Ok(Err(error)) => tracing::error!(%error, "Worker membership collector failed"),
+        Err(error) => tracing::error!(%error, "Worker membership collector task failed"),
     }
 }
 

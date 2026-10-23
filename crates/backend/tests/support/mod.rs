@@ -18,6 +18,7 @@ use acorn_backend::{
     health::Health,
     http,
     llm_review::ReviewService,
+    membership::Membership,
     scheduler::Scheduler,
     submissions::{CreateSubmission, CreationService, Submission},
 };
@@ -92,6 +93,13 @@ impl Fixture {
     }
 }
 
+/// Supply a fresh controlled group sample for tests that do not exercise broker observation.
+pub fn observed_membership(config: &acorn_backend::config::Config) -> Membership {
+    let membership = Membership::new(&config.worker_membership).unwrap();
+    membership.record(Ok(1)).unwrap();
+    membership
+}
+
 /// Real backend executable with captured logs and deployment-style termination.
 pub struct BackendProcess {
     /// Child is killed if a test fails before explicit cleanup.
@@ -109,6 +117,7 @@ impl BackendProcess {
     pub fn spawn(fixture: &Fixture) -> Self {
         let mut config = fixture.process_config();
         config["http"]["listen"] = "127.0.0.1:0".into();
+        config["logging"]["level"] = fixture.config.logging.level.clone().into();
         config["scheduler"]["pending_max_count"] =
             i64::from(fixture.config.scheduler.pending_max_count).into();
         config["scheduler"]["workers"] = toml::Value::Array(
@@ -138,6 +147,16 @@ impl BackendProcess {
         config["kafka"]["tasks_topic"] = fixture.config.kafka.tasks_topic.clone().into();
         config["kafka"]["events_topic"] = fixture.config.kafka.events_topic.clone().into();
         config["kafka"]["group_id"] = fixture.config.kafka.group_id.clone().into();
+        config["worker_membership"]["tasks_group_id"] = fixture
+            .config
+            .worker_membership
+            .tasks_group_id
+            .clone()
+            .into();
+        config["worker_membership"]["interval_ms"] =
+            (fixture.config.worker_membership.interval_ms as i64).into();
+        config["worker_membership"]["timeout_ms"] =
+            (fixture.config.worker_membership.timeout_ms as i64).into();
         config["kafka"]["shutdown_timeout_ms"] =
             (fixture.config.kafka.shutdown_timeout_ms as i64).into();
         let review = &fixture.config.llm_review;
@@ -310,6 +329,8 @@ pub struct Harness {
     pub scheduler: Scheduler,
     /// Production owned creation service.
     pub creation: CreationService,
+    /// Controlled observations isolate creation checks from a real broker.
+    pub membership: Membership,
     /// The same passive cache exposed by the production router.
     pub health: Health,
     /// Production independent review service, shared with Scheduler.
@@ -355,8 +376,13 @@ impl Harness {
         let (review, review_task) =
             ReviewService::start(&fixture.config.llm_review, fixture.database.clone()).unwrap();
         let scheduler = Scheduler::restore(&fixture.config, Default::default()).unwrap();
-        let creation =
-            CreationService::new(&fixture.config, fixture.database.clone(), scheduler.clone());
+        let membership = observed_membership(&fixture.config);
+        let creation = CreationService::new(
+            &fixture.config,
+            fixture.database.clone(),
+            scheduler.clone(),
+            membership.clone(),
+        );
         let (health, health_task) =
             Health::start(&fixture.config.health, fixture.database.clone(), &scheduler).unwrap();
         let app = http::router(
@@ -371,6 +397,7 @@ impl Harness {
             fixture,
             scheduler,
             creation,
+            membership,
             health,
             review,
             app,

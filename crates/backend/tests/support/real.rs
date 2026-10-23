@@ -3,7 +3,7 @@
 use std::{net::SocketAddr, time::Duration};
 
 use acorn_backend::{
-    health::Health, http, llm_review::ReviewService, scheduler::Scheduler,
+    health::Health, http, llm_review::ReviewService, membership::Membership, scheduler::Scheduler,
     submissions::CreationService,
 };
 use acorn_worker::{config::Config as WorkerConfig, rpc::WorkerService};
@@ -98,6 +98,10 @@ pub struct RealHarness {
     address: SocketAddr,
     /// Creation operations owned independently of HTTP connections.
     creation: CreationService,
+    /// Real independent group observation and its bounded lifecycle.
+    membership: Membership,
+    /// Membership query task joined before storage teardown.
+    membership_task: JoinHandle<anyhow::Result<()>>,
     /// Dispatcher task observed at teardown.
     scheduler_task: JoinHandle<anyhow::Result<()>>,
     /// Independent review lifecycle, disabled during these Isolate checks.
@@ -133,8 +137,18 @@ impl RealHarness {
             review.clone(),
         )
         .unwrap();
-        let creation =
-            CreationService::new(&fixture.config, fixture.database.clone(), scheduler.clone());
+        let (membership, membership_task) = Membership::start(
+            &fixture.config.worker_membership,
+            scheduler.kafka_observer(),
+        )
+        .unwrap();
+        super::wait_for(|| membership.snapshot().members.is_some_and(|count| count > 0)).await;
+        let creation = CreationService::new(
+            &fixture.config,
+            fixture.database.clone(),
+            scheduler.clone(),
+            membership.clone(),
+        );
         let (health, health_task) =
             Health::start(&fixture.config.health, fixture.database.clone(), &scheduler).unwrap();
         let app = http::router(
@@ -162,6 +176,8 @@ impl RealHarness {
             broker,
             address,
             creation,
+            membership,
+            membership_task,
             scheduler_task,
             review,
             review_task,
@@ -222,6 +238,7 @@ impl RealHarness {
     /// Drain creation, persistence and event handoff before stopping transports and the database.
     pub async fn close(self) {
         self.creation.stop();
+        self.membership.stop();
         self.scheduler.pause();
         self.review.stop();
         self.creation.wait_idle().await;
@@ -232,6 +249,7 @@ impl RealHarness {
         self.http_task.await.unwrap().unwrap();
         self.health.stop();
         self.health_task.await.unwrap().unwrap();
+        self.membership_task.await.unwrap().unwrap();
         for worker in self.workers {
             worker.close().await;
         }

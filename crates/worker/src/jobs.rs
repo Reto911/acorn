@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use acorn_protocol::worker::v1::{GetJobReply, JobState};
+use acorn_protocol::worker::v1::GetJobReply;
 use tokio::{sync::watch, task::JoinHandle};
 
 use crate::sandbox::StopReason;
@@ -19,7 +19,7 @@ pub(crate) struct Execution {
     pub task: Option<JoinHandle<()>>,
 }
 
-/// All admission and result transitions protected by one short synchronous lock.
+/// Execution state, runtime snapshots and MQ-count projection under one short lock.
 #[derive(Default)]
 pub(crate) struct Jobs {
     /// Running and retained terminal records keyed only by opaque Job ID.
@@ -28,14 +28,6 @@ pub(crate) struct Jobs {
     pub execution: Option<Execution>,
     /// New IDs are rejected once shutdown begins; existing records remain usable.
     pub stopping: bool,
-}
-
-impl Jobs {
-    /// Count terminals still retained for Kafka handoff.
-    pub fn unacknowledged_count(&self) -> usize {
-        self.records
-            .values()
-            .filter(|record| record.borrow().state != JobState::Running as i32)
-            .count()
-    }
+    /// Terminal FIFO entries, including the in-flight MQ handoff; excludes execution reservations.
+    pub mq_results: usize,
 }

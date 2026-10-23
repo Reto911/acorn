@@ -14,7 +14,7 @@ LLM 增量在同一进程增加与 Scheduler 平行的 llm_review 模块，机�
 
 前后端完全分离，后端仅提供 API，不托管前端静态文件，也不实现 CORS 中间件。HTTP 访问边界和浏览器跨域响应由部署端通过防火墙、反向代理及路由配置安排。
 
-浏览器页面、Monaco 编辑、本地草稿和提交交互见[前端 GUI 设计](05-frontend-design.md)，实施见[前端开发计划](06-frontend-development-plan.md)。健康观测通过 Worker 状态 RPC、后端共享采集及只读 HTTP 快照提供页面数据；入口监督、停机、健康页面和过期警告遵守[健康观测设计](07-health-observation-design.md)。
+浏览器页面、Monaco 编辑、本地草稿和提交交互见[前端 GUI 设计](05-frontend-design.md)，实施见[前端开发计划](06-frontend-development-plan.md)。健康观测通过数据库读取、Kafka metadata、Worker 状态 RPC、后端共享采集及只读 HTTP 快照提供页面数据；入口监督、停机、健康页面和过期警告遵守[健康观测设计](07-health-observation-design.md)。
 
 执行规则以 [Worker 设计](01-worker-design.md)为准，存储结构以[数据库设计](02-database-design.md)和[建表 SQL](../sql/001-initial-schema.sql)为准。Scheduler 只有一个活动实例，与 API 一同启动和退出。
 
@@ -202,6 +202,7 @@ HTTP `error.code` 如下，LLM 新增项已由 L04 接入；增加错误码时�
 | `ProblemVersionNotFound`    | `404`       | 指定题目下不存在该已发布版本                                                         |
 | `SubmissionNotFound`        | `404`       | 提交不存在                                                                           |
 | `IdempotencyConflict`       | `409`       | 同一用户的同一幂等键携带不同题目、语言或源码                                         |
+| `WorkersUnavailable`        | `503`       | 新建前没有可用的新鲜正成员数；此次不创建记录，同键已有记录沿用原规则                 |
 | `QueueFull`                 | `503`       | 当前没有待接纳名额                                                                   |
 | `JudgingNotFinished`（LLM） | `409`       | 手动审查的机器 state 不是 finished                                                   |
 | `ReviewChanged`（LLM）      | `409`       | 手动接纳时最新审查 ID 与 expected_review_id 不同，需先取得最新快照                   |
@@ -228,7 +229,7 @@ llm_review 在短接纳操作开始时登记其生命周期，复用创建服务
 
 1. 校验 HTTP 请求、幂等键和源码大小，用配置中的测试用户确定归属。
 2. 先查 `(user_id, create_request_key)`。已有记录按既定内容比较规则返回；只有仍为 `queued` 且未在内存中的记录需要重新交接。
-3. 新建前原子预留一个待接纳名额，满时返回 `503`，不创建 Submission。预留只在内存中记录，不是数据库记录或 Worker 执行资源。
+3. 新建前只读独立 Worker 组成员缓存；新鲜零成员或 unknown（尚无样本、查询失败、过期）返回 `503 WorkersUnavailable`，不创建 Submission。成员为正时原子预留一个待接纳名额，满时返回 `503 QueueFull`。已有同键记录的返回或 queued 重新交接不受成员限制。预留只在内存中记录，不是数据库记录或 Worker 执行资源。
 4. 在 READ COMMITTED 短事务中再次查重。确实为新提交时，选取最新版本，装配并验证测试数据和限额，生成 UUID，插入 `queued` 记录和源码；仅当 INSERT 返回 1062 时回滚并在新短事务读取同一用户和幂等键，共用已有记录的内容比较和固定版本装配。同内容返回原记录并释放多余预留，不同内容返回冲突；键不存在时仍报告原存储错误，不再次 INSERT。
 5. 数据库提交成功后，用已预留的名额将完整任务交给 Scheduler，再完成创建响应。回滚或校验失败释放预留。
 

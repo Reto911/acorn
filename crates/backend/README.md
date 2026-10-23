@@ -80,7 +80,7 @@ HTTP 和 gRPC 的访问范围由部署端配置。后端使用配置中的预置
 
 后端在必要数据库写入完成后，使用 SDK safe 异步接口发起事件位点提交；不读回、不逐条等待 broker 回执。请求入队失败仍先完成已保存审查的本地交接，再报告错误并结束消费服务。入队成功仅表示 SDK 已受理，位点可能落后并产生事件重放；已有终态和审查按幂等规则处理。既有 `[kafka]` 配置须删除 `commit_timeout_ms`；该字段已移除，保留它会按未知字段拒绝启动。
 
-独立的 `[worker_membership]` 可省略，`tasks_group_id` 默认 `acorn-judge-workers-v1`，须与 Worker 的 `[kafka].group_id` 一致；`interval_ms` 默认 `5000`，`timeout_ms` 默认 `1000`；样本新鲜期限为 `2 × (interval_ms + timeout_ms)`，默认 12 秒。间隔必须为正，查询预算使用正的客户端毫秒范围，派生期限不可溢出。此配置与 `[health]` 独立。
+独立的 `[worker_membership]` 可省略，`tasks_group_id` 默认 `acorn-judge-workers-v1`，须与 Worker 的 `[kafka].group_id` 一致；`interval_ms` 默认 `5000`，`timeout_ms` 默认 `1000`；样本新鲜期限为 `2 × (interval_ms + timeout_ms)`，默认 12 秒。间隔必须为正，查询预算使用正的客户端毫秒范围，派生期限不可溢出。此配置与 `[health]` 独立。后台只查询该组，不加入它；新鲜零成员或 unknown 在新建入库前返回 `503 WorkersUnavailable`，已有同键提交沿原规则返回或重新交接。正成员数仍受 Scheduler 容量限制，不表示空闲执行位置。
 
 两端配置直接使用 [acorn-kafka](../kafka/README.md) 的普通 `KafkaConfig`。`scheduler::kafka::producer_config(&config.kafka)`／`consumer_config(&config.kafka)` 分别选择任务生产／事件消费，并调用共享客户端策略：PLAINTEXT、禁止自动建 topic、幂等生产及 `acks=all`、手动位点和 `auto.offset.reset=error`、classic 消费组。任务生产者和事件消费者的传输上限分别在编码上限外预留 1024 字节，接收上限再预留 512 字节；生产队列最多 128 条且字节上限为两个最大记录，预取队列字节软上限为一个最大记录，可被单次 fetch 超过。
 
@@ -199,9 +199,9 @@ curl --fail-with-body 'http://127.0.0.1:8080/api/v1/submissions?review_status=DO
 
 ## 健康观测与停机
 
-`GET /api/v1/health` 返回提交接纳条件、Scheduler 状态及名额、数据库读取和 Worker 最近探测结果。探测由后台共享采集执行，GET 读取缓存；默认每轮结束后等待 5 秒，单项超时 1 秒，观测达到 12 秒时标为 `stale`。
+`GET /api/v1/health` 返回提交接纳条件、Scheduler 状态及名额、数据库读取、Kafka 两个 topic 的 metadata 和 Worker 最近探测结果。探测由后台共享采集执行，GET 读取缓存；默认每轮结束后等待 5 秒，单项超时 1 秒，观测达到 12 秒时标为 `stale`。
 
-Ctrl-C 或 SIGTERM 停止新接纳、发布和审查，等待已登记创建交接后，在共同消息预算内收尾当前发送、事件持久化和消费者 RAII 释放，再关闭 HTTP、健康采集和数据库。停机期间查询继续可用，不等待远程 Worker 判题。重启只重交 queued，恢复 dispatching/running 等待；旧 PENDING 审查保存为 FAILED/ReviewInterrupted。SDK 析构在阻塞线程执行，超时不会取消底层析构，进程退出仍可能等待它。
+Ctrl-C 或 SIGTERM 停止新接纳、发布和审查，等待已登记创建交接后，在共同消息预算内收尾当前发送、事件持久化和消费者 RAII 释放，再关闭 HTTP、健康采集和数据库；独立成员观测在停止接纳后结束。停机期间查询继续可用，不等待远程 Worker 判题。重启只重交 queued，恢复 dispatching/running 等待；旧 PENDING 审查保存为 FAILED/ReviewInterrupted。SDK 析构在阻塞线程执行，超时不会取消底层析构，进程退出仍可能等待它。
 
 日志输出到 stderr，以提交 ID 关联创建、分派和终态保存事件。关键数据库写入或调度任务失败会触发进程退出，错误原因写入日志。
 

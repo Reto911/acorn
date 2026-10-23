@@ -8,6 +8,7 @@ use super::{CreateSubmission, CreatedSubmission, SubmissionState};
 use crate::{
     config::Config,
     database::{self, Database},
+    membership::Membership,
     scheduler::{AdmissionError, Scheduler},
 };
 
@@ -25,6 +26,9 @@ pub enum CreationError {
         /// Existing queued record, included only for a queue-full response.
         submission_id: Option<String>,
     },
+    /// No fresh positive Worker-group observation is available for a new record.
+    #[error("No Worker group members are currently available")]
+    WorkersUnavailable,
     /// The independently owned creation task failed unexpectedly.
     #[error("Creation task failed: {0}")]
     Task(#[from] tokio::task::JoinError),
@@ -75,16 +79,24 @@ pub struct CreationService {
     scheduler: Scheduler,
     /// Source validation ceilings.
     config: Arc<Config>,
+    /// Independent membership cache; existing keys bypass this admission gate.
+    membership: Membership,
     /// Outstanding creation operations and stop flag.
     shared: Arc<Shared>,
 }
 
 impl CreationService {
     /// Assemble the service using the same database and Scheduler as the HTTP queries.
-    pub fn new(config: &Config, database: Database, scheduler: Scheduler) -> Self {
+    pub fn new(
+        config: &Config,
+        database: Database,
+        scheduler: Scheduler,
+        membership: Membership,
+    ) -> Self {
         Self {
             database,
             scheduler,
+            membership,
             config: Arc::new(config.clone()),
             shared: Arc::new(Shared::default()),
         }
@@ -185,6 +197,15 @@ impl CreationService {
                     task: None,
                 });
             }
+        }
+        if existing.is_none()
+            && !self
+                .membership
+                .snapshot()
+                .members
+                .is_some_and(|count| count > 0)
+        {
+            return Err(CreationError::WorkersUnavailable);
         }
         let permit =
             self.scheduler

@@ -433,9 +433,13 @@ async fn real_kafka_result_backpressure_and_total_shutdown_budget() -> Result<()
         .create()?;
     let running = Running::with_producer(broker.config.clone(), producer)?;
     let result: Result<()> = async {
-        for id in ["buffered-first", "buffered-second", "unadmitted-third"] {
+        for (id, language) in [
+            ("buffered-first", "python"),
+            ("invalid-second", "unknown"),
+            ("unadmitted-third", "python"),
+        ] {
             broker
-                .task(job(id, "python", "print(42)", &[(b"", b"42")]))
+                .task(job(id, language, "print(42)", &[(b"", b"42")]))
                 .await?;
         }
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -461,7 +465,7 @@ async fn real_kafka_result_backpressure_and_total_shutdown_budget() -> Result<()
                 .lines()
                 .filter(|line| line.contains("--init"))
                 .count()
-                == 2,
+                == 1,
             "Full result queue admitted another task"
         );
         ensure!(

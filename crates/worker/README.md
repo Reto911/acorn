@@ -117,9 +117,11 @@ Kafka 服务保持本机单槽，执行期间持续驱动消费组，忙或结�
 
 服务名为 `acorn.worker.v1.JudgeWorker`，定义见 [worker.proto](../../proto/acorn/worker/v1/worker.proto)。Rust 类型和调用入口由 [acorn-protocol](../protocol/README.md)提供。
 
-| RPC               | 用途                                         |
-| ----------------- | -------------------------------------------- |
-| `GetWorkerStatus` | 查询执行占用、停机标记、未确认结果数量和容量 |
+| RPC               | 用途                                             |
+| ----------------- | ------------------------------------------------ |
+| `GetWorkerStatus` | 查询执行占用、停机标记、待 MQ 交接终态数量和容量 |
+
+状态字段 `unacknowledged_results` 包含排队及正在交接的终态，含无效任务终态；执行中的预留名额不计入。`unacknowledged_capacity` 仍为 `results.max_unacknowledged_results`。
 
 忙、结果区满或停机时暂停任务接纳；同原归属下仍保留的 ID 复用快照。位点滞后、重平衡或进程重启可能重复执行，后端保留首个有效终态。
 

@@ -191,7 +191,7 @@ pub struct GrpcConfig {
 pub struct HealthConfig {
     /// Positive delay after a completed round, in milliseconds.
     pub interval_ms: u64,
-    /// Positive budget for one database or Worker check, in milliseconds.
+    /// Positive budget for one database, Kafka or Worker check, in milliseconds.
     pub timeout_ms: u64,
 }
 
@@ -456,8 +456,8 @@ impl Config {
             "health.interval_ms must be positive"
         );
         ensure!(
-            self.health.timeout_ms > 0,
-            "health.timeout_ms must be positive"
+            (1..=i32::MAX as u64).contains(&self.health.timeout_ms),
+            "health.timeout_ms must fit positive client milliseconds"
         );
         self.health.stale_after()?;
         for (name, value) in [

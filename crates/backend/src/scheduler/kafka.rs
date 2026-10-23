@@ -1,9 +1,11 @@
 //! Backend task publication, event processing and role-specific Kafka client options.
 
 mod events;
+mod observation;
 mod publisher;
 
 pub use events::{EventConsumer, EventProcessor};
+pub use observation::Observer;
 pub use publisher::Publisher;
 
 use acorn_kafka::KafkaConfig;

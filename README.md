@@ -207,6 +207,8 @@ Automatic reviews follow the `review_mode` of the submission's fixed problem ver
 
 The System status (`系统状态`) page at [/health](http://localhost:5173/health) fetches a snapshot every 10 seconds and supports manual refresh. From the command line, use `GET /api/v1/health`.
 
+The snapshot includes database reads, metadata checks for both Kafka topics, and Worker execution and pending MQ handoff counts. Health checks do not gate admission. Independent Worker group observation rejects new records with `503 WorkersUnavailable` until a fresh positive member count is available; existing idempotency keys retain their normal behavior. Configure `[worker_membership].tasks_group_id` to match the Workers’ `[kafka].group_id`.
+
 Both Rust services write English logs to stderr, with the level controlled by `logging.level`. Use submission IDs to correlate backend dispatch, result persistence, and Worker execution logs.
 
 To stop the system, send Ctrl-C or SIGTERM to the backend first. The backend drains registered local operations and current message work within its message budget; it does not wait for remote judging to finish. Workers stop through their sandbox and message shutdown budgets. On restart, only queued submissions are republished; dispatching/running submissions continue waiting for events. Old pending reviews are interrupted. Consumer RAII destruction runs on a blocking thread and may continue after the application wait times out. Persisted terminal results remain available.

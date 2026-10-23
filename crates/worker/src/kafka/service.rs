@@ -107,6 +107,8 @@ impl KafkaWorker {
         let mut failure = None;
         let result: Result<()> = async {
             loop {
+                worker.shared.jobs.lock().expect("Job state lock poisoned").mq_results =
+                    results.len() + usize::from(sending_terminal);
                 if *stop.borrow() && !shutdown_started {
                     shutdown_started = true;
                     latest = None;
@@ -279,6 +281,13 @@ impl KafkaWorker {
             Ok(())
         };
         drop(sending);
+        drop(results);
+        worker
+            .shared
+            .jobs
+            .lock()
+            .expect("Job state lock poisoned")
+            .mq_results = 0;
         begin_close(&mut consumer, &ownership, &mut closing);
         let close = if let Some(task) = closing {
             let close_deadline = deadline.unwrap_or_else(|| {

@@ -207,6 +207,8 @@ retry_interval_ms = 1_000
 
 “系统状态”页面位于 [/health](http://localhost:5173/health)，每 10 秒获取一次快照，也可手动刷新。命令行可读取 `GET /api/v1/health`。
 
+快照包含数据库读取、Kafka 两个 topic 的元数据检查，以及 Worker 执行状态和待 MQ 交接结果数量。健康检查不参与接纳决策；独立 Worker 组观测在没有新鲜正成员数时以 `503 WorkersUnavailable` 暂拒新建，已有幂等键仍按原规则处理。`[worker_membership].tasks_group_id` 须与 Worker 的 `[kafka].group_id` 一致。
+
 两个 Rust 服务将英文日志输出到 stderr，`logging.level` 控制级别。可以通过提交 ID 关联后端分派、结果保存和 Worker 执行日志。
 
 停止时先向后端发送 Ctrl-C 或 SIGTERM，后端在消息预算内收尾已登记的本地操作和当前消息，不等待远程判题；Worker 按沙箱及消息预算停止。后端重启只重交 queued，恢复 dispatching/running 等待，旧 PENDING 审查标记中断。消费者在阻塞线程通过 RAII 析构，应用等待超时后底层析构仍可能继续；已保存的终态继续可查。

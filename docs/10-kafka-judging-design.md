@@ -173,7 +173,7 @@ queued/dispatching 在既有待接纳容量内排队，首次合法 RUNNING 后�
 
 成员观测使用独立后台任务和专用缓存，管理采集预算、完成时间、最近错误及过期状态。同步查询放在阻塞工作线程，创建服务只读缓存。该任务与健康采集的生命周期、缓存及故障互不影响。
 
-unknown 表示没有可用的新鲜成员数，包括启动尚无样本、查询失败或样本过期。新鲜零成员或 unknown 均在新提交入库前返回 503；有成员时按 Scheduler 信号量判断容量，允许繁忙 Worker 前积压。成员检测存在延迟，成员数不表示空闲执行位置数。
+unknown 表示没有可用的新鲜成员数，包括启动尚无样本、查询失败或样本过期。新鲜零成员或 unknown 均在新提交入库前返回 503 WorkersUnavailable；有成员时按 Scheduler 信号量判断容量，允许繁忙 Worker 前积压。成员检测存在延迟，成员数不表示空闲执行位置数。
 
 此观测仅用于新建接纳；已有任务继续处理，同幂等键沿用第 5.2 节规则。已有任务的状态与重投由事件处理及 Kafka 消费合同决定，健康 HTTP 和页面继续使用原健康采集。
 
@@ -366,7 +366,7 @@ Kafka 健康项采用以下方案：
 
 1. 使用后端已有 Kafka 客户端，对两个已配置 topic 作有界 metadata 查询，观测实际 Kafka 请求能否完成、topic 是否存在及分区元数据是否可用。复用 health 的周期和预算，不发送探测任务或业务消息。
 2. 阻塞 SDK 查询放在阻塞线程并传入有限调用超时；一轮探测有界且不重叠。查询接口见 [Client::fetch_metadata](https://docs.rs/rdkafka/0.39.0/rdkafka/client/struct.Client.html#method.fetch_metadata)。
-3. 在健康快照新增 kafka 项，沿用 unknown/ok/failed/stale、检查完成时间和稳定错误码；成功时可展示已取得的 topic 分区数及 leader 是否可用。健康页读取缓存，不在 HTTP 请求中访问 Kafka。
+3. 在健康快照新增 kafka 项，沿用 unknown/ok/failed/stale、检查完成时间和稳定错误码；请求超时为 ProbeTimeout，其余请求或 topic／分区元数据错误为 KafkaMetadataFailed；成功时可展示已取得的 topic 分区数及 leader 是否可用。健康页读取缓存，不在 HTTP 请求中访问 Kafka。
 
 这项结果只表示本次元数据请求及其内容，不保证端到端判题成功。发送、消费的实际错误由对应驱动处理，Kafka 健康失败本身不改变接纳或任务状态。
 

@@ -101,6 +101,8 @@ pub(super) struct HealthSnapshot {
     scheduler: SchedulerHealth,
     /// Latest database read observation, excluding its internal unit value.
     database: Probe,
+    /// Latest metadata observation for both Kafka topics.
+    kafka: Probe,
     /// Worker observations in configuration order.
     workers: Vec<WorkerHealth>,
 }
@@ -130,6 +132,7 @@ impl HealthSnapshot {
                 pending_capacity: local.scheduler.pending_capacity,
             },
             database: cached.database.into(),
+            kafka: cached.kafka.into(),
             workers: cached.workers.into_iter().map(Into::into).collect(),
         }
     }
@@ -171,6 +174,7 @@ impl<T> From<health::ProbeSnapshot<T>> for Probe {
             error_code: probe.error_code.map(|code| match code {
                 health::ProbeErrorCode::ProbeTimeout => "ProbeTimeout",
                 health::ProbeErrorCode::DatabaseReadFailed => "DatabaseReadFailed",
+                health::ProbeErrorCode::KafkaMetadataFailed => "KafkaMetadataFailed",
                 health::ProbeErrorCode::WorkerRpcFailed => "WorkerRpcFailed",
                 health::ProbeErrorCode::WorkerStatusUnsupported => "WorkerStatusUnsupported",
                 health::ProbeErrorCode::InvalidWorkerStatus => "InvalidWorkerStatus",
@@ -209,7 +213,7 @@ struct WorkerStatus {
     stopping: bool,
     /// Idle, running or blocked execution occupancy.
     execution_state: &'static str,
-    /// Retained runtime terminals awaiting Kafka handoff.
+    /// Terminal entries awaiting Kafka handoff.
     unacknowledged_results: u64,
     /// Positive configured result-retention ceiling.
     unacknowledged_capacity: u64,
@@ -505,6 +509,10 @@ mod tests {
             ),
             (health::ProbeErrorCode::WorkerRpcFailed, "WorkerRpcFailed"),
             (
+                health::ProbeErrorCode::KafkaMetadataFailed,
+                "KafkaMetadataFailed",
+            ),
+            (
                 health::ProbeErrorCode::WorkerStatusUnsupported,
                 "WorkerStatusUnsupported",
             ),
@@ -557,6 +565,12 @@ mod tests {
                             error_code: None,
                             value: Some(()),
                         },
+                        kafka: health::ProbeSnapshot {
+                            state: health::ProbeState::Unknown,
+                            checked_at_ms: None,
+                            error_code: None,
+                            value: None,
+                        },
                         workers: Vec::new(),
                     },
                 );
@@ -565,7 +579,8 @@ mod tests {
                     json!({
                         "snapshot_at_ms":42, "submission_admission":name,
                         "scheduler":{"state":lifecycle_name, "pending_used":1, "pending_capacity":2},
-                        "database":{"state":"ok", "checked_at_ms":41, "error_code":null}, "workers":[],
+                        "database":{"state":"ok", "checked_at_ms":41, "error_code":null},
+                        "kafka":{"state":"unknown", "checked_at_ms":null, "error_code":null}, "workers":[],
                     })
                 );
             }

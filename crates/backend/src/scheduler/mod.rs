@@ -63,6 +63,8 @@ struct Shared {
     pending_max_count: u32,
     /// Status-only clients in configuration order; observation never selects work.
     workers: Vec<WorkerClient>,
+    /// Shared task producer and read-only broker observation targets.
+    kafka: kafka::Observer,
     /// Wake the publisher for handoff, stop or completion.
     changed: Notify,
     /// Stop message intake after creation handoffs, independently of publication wakeups.
@@ -130,6 +132,7 @@ impl Scheduler {
                 capacity: Arc::new(Semaphore::new(config.scheduler.pending_max_count as usize)),
                 pending_max_count: config.scheduler.pending_max_count,
                 workers,
+                kafka: kafka::Observer::new(&config.kafka)?,
                 changed: Notify::new(),
                 finish: watch::channel(false).0,
             }),
@@ -203,6 +206,11 @@ impl Scheduler {
     /// Share status channels with independent health observation.
     pub(crate) fn worker_clients(&self) -> Vec<WorkerClient> {
         self.shared.workers.clone()
+    }
+
+    /// Share the existing task client without joining the Worker consumer group.
+    pub fn kafka_observer(&self) -> kafka::Observer {
+        self.shared.kafka.clone()
     }
 
     /// Reserve capacity before starting a creation transaction, without waiting.

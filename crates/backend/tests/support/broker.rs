@@ -29,6 +29,33 @@ pub struct Broker {
 }
 
 impl Broker {
+    /// Poll a real passive member for observation and process tests, with explicit leave ownership.
+    pub fn member(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let mut config = self.config.clone();
+        config.group_id.clone_from(&self.task_group);
+        let consumer: StreamConsumer = kafka::consumer_config(&config).create().unwrap();
+        consumer.subscribe(&[&config.tasks_topic]).unwrap();
+        let (leave, mut leaving) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut leaving => break,
+                    received = consumer.recv() => { received.unwrap(); },
+                }
+            }
+            consumer.unsubscribe();
+            tokio::task::spawn_blocking(move || drop(consumer))
+                .await
+                .unwrap();
+        });
+        (leave, task)
+    }
+
     /// Create isolated topics and initialize both groups at their beginning.
     pub async fn start(fixture: &mut Fixture) -> Self {
         let id = Uuid::new_v4().simple().to_string();
@@ -42,6 +69,11 @@ impl Broker {
         config.events_topic = format!("acorntest.events.{id}");
         config.group_id = format!("acorntest.events.{id}");
         let task_group = format!("acorntest.tasks.{id}");
+        fixture
+            .config
+            .worker_membership
+            .tasks_group_id
+            .clone_from(&task_group);
         let admin: AdminClient<DefaultClientContext> =
             kafka::producer_config(config).create().unwrap();
         let options = AdminOptions::new()
