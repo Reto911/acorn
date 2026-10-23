@@ -126,6 +126,7 @@ describe('one frozen submission request per tab', () => {
 
   it.each([
     ['BackendStopping', 503],
+    ['WorkersUnavailable', 503],
     ['InternalError', 500],
     ['FutureErrorCode', 400],
     ['toString', 400],

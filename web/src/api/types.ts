@@ -172,6 +172,7 @@ export interface HttpErrorBody {
 export type HealthProbeErrorCode =
   | 'ProbeTimeout'
   | 'DatabaseReadFailed'
+  | 'KafkaMetadataFailed'
   | 'WorkerRpcFailed'
   | 'WorkerStatusUnsupported'
   | 'InvalidWorkerStatus'
@@ -205,5 +206,6 @@ export interface HealthSnapshot {
     pending_capacity: number
   }
   database: HealthObservation
+  kafka: HealthObservation
   workers: WorkerObservation[]
 }

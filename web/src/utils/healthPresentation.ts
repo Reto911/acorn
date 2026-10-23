@@ -43,6 +43,7 @@ export const executionLabels: Record<WorkerStatus['execution_state'], string> =
 export const probeErrorLabels: Record<HealthProbeErrorCode, string> = {
   ProbeTimeout: '检查超时，未在预算内取得结果',
   DatabaseReadFailed: '数据库读取检查失败',
+  KafkaMetadataFailed: 'Kafka 元数据请求失败或 topic 分区不可用',
   WorkerRpcFailed: 'Worker 通信或服务检查失败',
   WorkerStatusUnsupported: 'Worker 不支持状态查询接口',
   InvalidWorkerStatus: 'Worker 返回的状态不符合协议',
@@ -57,6 +58,7 @@ export function healthTime(value: number | null) {
 export function staleObservations(snapshot: HealthSnapshot) {
   return [
     { id: 'database', label: '数据库', ...snapshot.database },
+    { id: 'kafka', label: 'Kafka', ...snapshot.kafka },
     ...snapshot.workers.map((worker) => ({ ...worker, label: worker.id })),
   ].filter((observation) => observation.state === 'stale')
 }

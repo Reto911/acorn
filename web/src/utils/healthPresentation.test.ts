@@ -37,6 +37,7 @@ describe('health observation presentation', () => {
     expect(probeErrorLabels).toEqual({
       ProbeTimeout: '检查超时，未在预算内取得结果',
       DatabaseReadFailed: '数据库读取检查失败',
+      KafkaMetadataFailed: 'Kafka 元数据请求失败或 topic 分区不可用',
       WorkerRpcFailed: 'Worker 通信或服务检查失败',
       WorkerStatusUnsupported: 'Worker 不支持状态查询接口',
       InvalidWorkerStatus: 'Worker 返回的状态不符合协议',
@@ -51,6 +52,7 @@ describe('health observation presentation', () => {
       submission_admission: 'open',
       scheduler: { state: 'running', pending_used: 0, pending_capacity: 128 },
       database: { state: 'stale', checked_at_ms: 1000, error_code: null },
+      kafka: { state: 'stale', checked_at_ms: 1500, error_code: null },
       workers: [
         {
           id: 'worker-1',
@@ -89,10 +91,16 @@ describe('health observation presentation', () => {
       })),
     ).toEqual([
       { label: '数据库', checked_at_ms: 1000 },
+      { label: 'Kafka', checked_at_ms: 1500 },
       { label: 'worker-1', checked_at_ms: 2000 },
       { label: 'worker-4', checked_at_ms: 4000 },
     ])
     snapshot.database = { state: 'ok', checked_at_ms: 5000, error_code: null }
+    snapshot.kafka = {
+      state: 'failed',
+      checked_at_ms: 5500,
+      error_code: 'KafkaMetadataFailed',
+    }
     snapshot.workers[0] = {
       id: 'worker-1',
       state: 'ok',

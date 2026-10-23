@@ -4,7 +4,7 @@
 
 ## 1. 当前状态
 
-当前设计为 v20；K01–K05 的 16 项任务完成，其余 6 项由 K06–K07 推进。两端正式入口使用 Kafka 判题，后端恢复 queued、dispatching/running 等待及许可，监督任务发布、事件消费和有限消息收尾；Worker 同时运行 Kafka 服务和只读状态 RPC。旧业务 RPC、节点轮询、查询与 ACK 缓存及废弃配置已移除，实际改动及检查见[第 11 节](#11-k05-生命周期与旧流程移除)。成员观测、接纳限制、Kafka 健康和完整部署验收尚待后续任务。进度见[任务清单](#4-任务清单)，审核决定见[审核记录](../d01-review/10-kafka-judging-review.md#2-已确认决定与草案修正)。
+当前设计为 v20；K01–K06 的 19 项任务完成，剩余 3 项由 K07 推进。正式判题入口使用 Kafka；后端独立观测 Worker 消费组并约束新建接纳，健康采集新增两个 topic 的 metadata 检查，Worker 状态及页面保留实际待 MQ 交接终态数量／容量。K05 改动见[第 11 节](#11-k05-生命周期与旧流程移除)，K06 改动及有限验证见[第 12 节](#12-k06-在线观测与健康页面)。完整部署及 KV01–KV06 集成验收由 K07 完成。进度见[任务清单](#4-任务清单)，审核决定见[审核记录](../d01-review/10-kafka-judging-review.md#2-已确认决定与草案修正)。
 
 Safe 接口修复的 S01–S06 已完成，两端均异步提交位点；Worker 保留 StreamConsumer，通过 SDK RAII 释放消费者。共享原生确认模块及 commit_timeout_ms 已移除，S06 已补齐动态／静态构建和静态 Worker 定向验证，safe 修复全部收口。按[修复步骤](../10-kafka-judging-design.md#12-safe-接口修复计划)在[第 10 节](#10-safe-接口修复跟踪)单独跟踪，不改变原 K01–K07 任务编号或历史完成记录。
 
@@ -72,9 +72,9 @@ Safe 接口修复的 S01–S06 已完成，两端均异步提交位点；Worker 
 
 任务定义见[设计 K06](../10-kafka-judging-design.md#k06-在线观测与健康页面)。
 
-- [ ] K06.1 实现独立成员观测及缓存，接入新鲜零成员／unknown 暂拒新建规则。
-- [ ] K06.2 实现 Kafka metadata 健康采集、快照及只读 HTTP 表达。
-- [ ] K06.3 更新 MQ 交接数值语义及健康页面，同步健康和前端设计。
+- [x] K06.1 实现独立成员观测及缓存，接入新鲜零成员／unknown 暂拒新建规则。
+- [x] K06.2 实现 Kafka metadata 健康采集、快照及只读 HTTP 表达。
+- [x] K06.3 更新 MQ 交接数值语义及健康页面，同步健康和前端设计。
 
 ### 4.7 K07 集成验收与部署交付
 
@@ -565,3 +565,54 @@ cargo test -p acorn-worker --locked --test kafka real_kafka_worker_capacity_and_
 K05.1–K05.3 完成。KV05 的启动恢复、消息收尾、独立 Worker 和监督退出部分已作上述检查；未声称完成 KV05 的全部健康及接纳条款。K06 继续实现成员观测、零成员／unknown 接纳限制、Kafka 健康及页面；K07 完成目标部署、真实 C/Python 主要判题路线和双 Worker 并发验收。
 
 本批未重跑真实 Isolate 隔离及完整双 Worker 验收，未运行完整 workspace 测试或 broker 故障下 SDK 析构最长耗时检查；RAII 析构不可取消及异步位点可能滞后的边界保持不变。失败或中断轮次未完成夹具清理，残留的独立测试资源按既有开发端处置约定处理，不对既有资源批量清理。
+
+## 12. K06 在线观测与健康页面
+
+### 12.1 实际改动
+
+- 后端增加独立成员采集及专用缓存，按配置查询 classic Worker 任务消费组，记录完成时间、最近错误及派生新鲜期限。同步调用运行在阻塞线程，使用有限 SDK 超时；任务独立监督和停止，不加入 Worker 任务组。
+- 创建服务先处理幂等键，仅在新建前读取成员缓存。新鲜零成员或 unknown 返回 `503 WorkersUnavailable` 且不入库；正成员数继续受 Scheduler 信号量限制。已有 queued 重新交接、终态查询及已登记创建的停止合同保留。
+- Scheduler 构造一次任务生产者，发布、成员观测和 metadata 健康采集共享客户端。健康采集在原机制中检查两个配置 topic，共用一次 Kafka 检查预算，并验证 topic、分区错误和 leader；新增 `kafka` 缓存及 HTTP 字段，沿用四态、完成时间和稳定错误码。HTTP 不发起探测，成员采集和健康采集分别拥有生命周期及缓存。
+- Worker 状态读取 Kafka 驱动同步的待 MQ 交接终态数，包含 FIFO 和正在交接的结果、无效任务及旧归属终态；执行中预留名额不计入。RPC／HTTP 数量和容量字段名、协议编号保持不变。
+- 页面增加 Kafka 检查及过期提示，数量列采用“待 MQ 交接结果 / 容量”，无有效观测时不显示零。新增明确的未接纳提示，手动重试仍复用原请求及幂等键。本地接纳摘要维持原意义。
+- 同步 Worker、后端、前端、健康及 Kafka 设计，以及中英文根说明和受影响模块说明。复用原有创建、健康、背压和进程测试，仅新增一个成员缓存边界单元测试和一个真实 Kafka 观测／接纳集成用例。
+
+### 12.2 实际检查
+
+Rust 检查：
+
+```sh
+cargo fmt --all -- --check
+cargo check --workspace --all-targets --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test -p acorn-backend --locked --lib --test config_results
+cargo test -p acorn-backend --locked --test workflow -- health_ queue_full_and_idempotency_preserve_identity_and_version queued_rehandoff_keeps_original_version concurrent_creation_merges_and_rollback_releases_permits
+cargo test -p acorn-backend --locked --test workflow -- disconnected_create_finishes_transaction_and_handoff terminal_replay_bypasses_capacity_and_preserves_first_result stopping_preserves_creation_started_before_preflight
+cargo test -p acorn-backend --locked --test workflow real_kafka_observation_and_admission -- --ignored
+cargo test -p acorn-worker --locked --test kafka -- real_kafka_worker_capacity_and_shutdown real_kafka_result_backpressure_and_total_shutdown_budget --ignored
+cargo test -p acorn-backend --locked --test workflow process_http_kafka_worker -- --ignored
+cargo test -p acorn-backend --locked --test workflow process_creation_failure_exits_without_draining_workers -- --ignored
+```
+
+集成检查由本地环境加载 `MYSQL_PASSWORD`、`ACORN_TEST_DATABASE_CONFIG`、`ACORN_TEST_KAFKA_SERVERS`；进程检查另指定同一工作区的 `ACORN_TEST_WORKER_EXECUTABLE`。沿用独立 MySQL 数据库及专用 Kafka topic／组，密码未写入文档或测试配置。
+
+| 检查范围                     | 实际结果                                                                                                                                      |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| Rust 格式、编译和必需 Clippy | 通过                                                                                                                                          |
+| 后端库及配置                 | 12 项库测试、9 项配置测试通过；覆盖成员 unknown、失败及过期，Kafka HTTP 字段和错误码，以及 SDK 超时配置边界                                   |
+| 健康、接纳及创建生命周期     | 10 项既有 workflow 检查通过；零成员／unknown 不建记录，同键返回及 queued 重新交接保留，正成员仍受容量限制，断连交接和停机前已登记创建行为保留 |
+| 真实 Kafka 观测及接纳        | 1 项通过；观测成员 0→1→0，两个 topic metadata 成功及缺失 topic 失败，HTTP 缓存读取、采集独立停止，以及成员离开不结束已有 queued 提交          |
+| Worker 容量及背压            | 2 项既有检查通过；执行中预留不计入结果数，正在发送的结果和无效任务终态共同填满容量，满时暂停接纳及共同停机预算保留                            |
+| 正式进程                     | 两端 Kafka 提交闭环、创建关键写入故障退出各 1 项通过；使用现有受控沙箱管理器，仅作为编排证据                                                  |
+| 前端                         | 格式、lint、类型检查和构建通过；3 个受影响测试文件的 37 项测试通过，构建仍提示已有编辑器大 chunk                                              |
+| 浏览器                       | 无头浏览器使用受控 HTTP 快照检查 Kafka 四态、手动刷新、独立过期提示、具体数量／容量和未知不显示零；4 次 GET，无页面脚本错误                   |
+| 文档                         | 受影响文档格式、本地链接／锚点和空白检查通过；第 05 篇只检查本次修改段落，保留原有未格式化表格                                                |
+
+前端使用已有 `pnpm --dir web format:check`、`lint`、`build`，以及 `pnpm --dir web test src/utils/healthPresentation.test.ts src/composables/useSubmissionRequest.test.ts src/api/http.test.ts`。文档使用已有 Prettier 和本地链接检查。
+
+### 12.3 检查中出现的问题与边界
+
+- 首次沙箱内数据库集成检查被本地网络权限限制拦截；允许访问测试服务后，相关检查通过，该权限失败不作为业务结果。
+- 首次两端进程检查在启动期间高频重试 `WorkersUnavailable` 时出现 HTTP 等待超时；将测试轮询间隔改为 500 ms 后复验通过。该调整只影响测试等待，不增加产品自动重试。
+- 两项真实 Kafka 检查并行执行时，既有夹具在首次初始化组位点阶段返回过一次 `UnknownTopicOrPartition`，创建故障检查尚未开始。该用例单独复验通过；本次未增加初始化重试。该偶发初始化失败保留在记录中，K07 部署及初始化验收仍需关注。
+- 本批采用默认动态模式，未重跑完整 workspace 测试、静态模式或完整真实 Isolate 判题矩阵。K06 仅覆盖 KV05 的成员接纳部分和 KV06 的健康展示部分；完整部署、真实判题及双 Worker 并行验收仍属 K07。

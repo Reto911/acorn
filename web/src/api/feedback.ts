@@ -32,6 +32,10 @@ const messages: Record<string, [string, string]> = {
     '本次请求已结束，请先查看提交历史；再次主动提交可能创建另一条记录。',
   ],
   QueueFull: ['当前排队任务较多', '原提交请求已保留，请稍后手动重试原提交。'],
+  WorkersUnavailable: [
+    '暂未观测到可用 Worker',
+    '此次未创建提交，原请求已保留，请稍后手动重试。',
+  ],
   JudgingNotFinished: [
     '机器判题尚未完成',
     '请刷新提交状态，只有机器判题已完成的提交可以启动审查。',
@@ -97,7 +101,8 @@ export function errorFeedback(
       (error.status !== undefined &&
         error.status >= 500 &&
         error.code !== 'QueueFull' &&
-        error.code !== 'BackendStopping'))
+        error.code !== 'BackendStopping' &&
+        error.code !== 'WorkersUnavailable'))
   if (createUnknown)
     return {
       title: '尚未确认是否提交成功',

@@ -97,7 +97,7 @@ const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone
           </div>
           <dl class="health-facts">
             <div>
-              <dt>新提交接纳</dt>
+              <dt>本地新提交接纳</dt>
               <dd>{{ admissionLabels[snapshot.submission_admission] }}</dd>
             </div>
             <div>
@@ -135,6 +135,33 @@ const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone
               <dd>
                 {{ probeErrorLabels[snapshot.database.error_code]
                 }}<br /><code>{{ snapshot.database.error_code }}</code>
+              </dd>
+            </div>
+          </dl>
+        </section>
+        <section class="surface" aria-labelledby="kafka-title">
+          <div class="panel-heading"><h2 id="kafka-title">Kafka</h2></div>
+          <dl class="health-facts">
+            <div>
+              <dt>任务与事件 topic 元数据检查</dt>
+              <dd>
+                {{
+                  snapshot.kafka.state === 'ok'
+                    ? '元数据可用'
+                    : observationLabels[snapshot.kafka.state]
+                }}
+              </dd>
+            </div>
+            <div>
+              <dt>最后检查时间</dt>
+              <dd>{{ healthTime(snapshot.kafka.checked_at_ms) }}</dd>
+            </div>
+            <div v-if="snapshot.kafka.error_code">
+              <dt>检查错误</dt>
+              <dd>
+                {{ probeErrorLabels[snapshot.kafka.error_code] }}<br /><code>{{
+                  snapshot.kafka.error_code
+                }}</code>
               </dd>
             </div>
           </dl>
@@ -184,7 +211,7 @@ const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone
                 : '未取得有效状态'
             }}</template>
           </ElTableColumn>
-          <ElTableColumn label="未确认结果 / 容量" min-width="145">
+          <ElTableColumn label="待 MQ 交接结果 / 容量" min-width="145">
             <template #default="{ row }">{{
               row.state === 'ok' && row.status
                 ? `${row.status.unacknowledged_results} / ${row.status.unacknowledged_capacity}`
