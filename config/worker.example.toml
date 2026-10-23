@@ -55,10 +55,12 @@ max_unacknowledged_results = 128
 [logging]
 level = "info"
 
+# Initialize topics and group offsets first; see crates/kafka/README.md.
 [kafka]
 bootstrap_servers = ["localhost:9092"]
 tasks_topic = "acorn.judge.tasks.v1"
 events_topic = "acorn.judge.events.v1"
+# All Workers share this task group, observed by backend worker_membership.
 group_id = "acorn-judge-workers-v1"
 delivery_timeout_ms = 30_000
 queue_timeout_ms = 1_000

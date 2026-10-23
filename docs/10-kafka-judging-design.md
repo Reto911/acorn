@@ -380,7 +380,7 @@ Worker 健康 RPC 使用 scheduler.workers 列表调用 GetWorkerStatus，保留
 
 ## 10. 整体部署
 
-首期采用单 broker，两个业务 topic 的副本数均为 1，min.insync.replicas=1。首次初始化消费组前，broker 必须配置：
+部署基线固定为 Apache Kafka 4.3.1，采用单 broker，两个业务 topic 的副本数均为 1，min.insync.replicas=1。broker 配置要求、topic 与消费组初始化步骤见[共享部署说明](../crates/kafka/README.md#单-broker-部署)。首次初始化消费组前，broker 必须配置：
 
 ```properties
 offsets.topic.replication.factor=1

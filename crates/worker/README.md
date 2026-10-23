@@ -97,6 +97,8 @@ target/debug/acorn-worker --config "$HOME/.config/acorn/worker.toml"
 
 ### Kafka 客户端配置
 
+Kafka 4.3.1 单 broker 的启动、topic 及首次消费组位点初始化见[共享部署说明](../kafka/README.md#单-broker-部署)，两端启动前须完成该初始化。
+
 构建默认动态链接系统 librdkafka（至少 2.12.1），需要开发包及 pkg-config；静态构建方法见[根说明](../../README_zh-CN.md#构建)。仅构建 Worker 时可执行 `cargo build -p acorn-worker --locked --no-default-features --features kafka-static`。
 
 `[kafka]` 必填，必须显式提供 `bootstrap_servers`、`tasks_topic`、`events_topic` 和 `group_id`。端点使用 `host:port` 或 `[IPv6]:port`，不带 URL 协议；两个 topic 必须不同。消息上限及 `delivery_timeout_ms`、`queue_timeout_ms`、`shutdown_timeout_ms` 的默认值与范围见[后端配置](../backend/README.md#kafka-客户端配置)，两端按部署对齐。使用已有配置时，将 `[kafka]` 节合并到实际 `--config` 指定的文件，保留工具路径、沙箱和执行配置。既有 `[kafka]` 配置须删除 `commit_timeout_ms`，该字段已不再接受。

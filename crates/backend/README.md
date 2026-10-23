@@ -64,9 +64,11 @@ HTTP 和 gRPC 的访问范围由部署端配置。后端使用配置中的预置
 
 ### Kafka 客户端配置
 
+Kafka 4.3.1 单 broker 的启动、topic 及首次消费组位点初始化见[共享部署说明](../kafka/README.md#单-broker-部署)，两端启动前须完成该初始化。
+
 构建默认动态链接系统 librdkafka（至少 2.12.1），需要开发包及 pkg-config；静态构建方法见[根说明](../../README_zh-CN.md#构建)。仅构建后端时可执行 `cargo build -p acorn-backend --locked --no-default-features --features kafka-static`。
 
-`[kafka]` 必填，`bootstrap_servers`、`tasks_topic`、`events_topic` 和 `group_id` 必须显式配置。端点采用 `host:port` 或 `[IPv6]:port`，不带 URL 协议；两个 topic 必须不同。宿主访问 Compose 中的 EXTERNAL listener 可使用示例的 `localhost:9092`。使用已有私有配置时，将该节合并到实际 `--config` 指定的文件，其余数据库和审查配置保留原值；数值预算可省略并使用下表默认值。
+`[kafka]` 必填，`bootstrap_servers`、`tasks_topic`、`events_topic` 和 `group_id` 必须显式配置。端点采用 `host:port` 或 `[IPv6]:port`，不带 URL 协议；两个 topic 必须不同。示例使用 `localhost:9092`，实际端点须与 broker 对客户端广播的可达地址一致。使用已有私有配置时，将该节合并到实际 `--config` 指定的文件，其余数据库和审查配置保留原值；数值预算可省略并使用下表默认值。
 
 | 字段                     | 默认值     | 含义                         |
 | ------------------------ | ---------- | ---------------------------- |
@@ -233,6 +235,16 @@ ACORN_TEST_DATABASE_CONFIG=/path/to/mysql-test.toml \
 ACORN_TEST_KAFKA_SERVERS=localhost:9092 ACORN_TEST_DATABASE_CONFIG=/path/to/mysql-test.toml ACORN_ISOLATE_BOX_ID=204 \
   cargo test -p acorn-backend --locked --test workflow real_http_worker_acceptance -- --ignored --nocapture
 ```
+
+双 Worker 并行检查还需第二个空闲的专用 box ID，两者不能相同：
+
+```sh
+ACORN_TEST_KAFKA_SERVERS=localhost:9092 ACORN_TEST_DATABASE_CONFIG=/path/to/mysql-test.toml \
+  ACORN_ISOLATE_BOX_ID=204 ACORN_ISOLATE_BOX_ID_2=210 \
+  cargo test -p acorn-backend --locked --test workflow real_two_workers_overlap -- --ignored --nocapture
+```
+
+该用例将两份不同提交投递至不同 Worker 的任务分区，直接通过状态 RPC 确认执行重叠，再核对两份持久化 AC；HTTP 创建及发布由前一项主要判题路线检查覆盖。
 
 后端进程的 Kafka 恢复、错误监督及审查停机检查需要先构建同一工作区的 Worker。两端二进制闭环使用现有受控 Isolate 管理器，只验证编排：
 

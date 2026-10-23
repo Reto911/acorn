@@ -105,7 +105,11 @@ mysql --host=127.0.0.1 --port=3306 --user=example_initializer --password --ssl-m
 
 ### 准备 Kafka
 
-配置可互通的 broker，按[部署合同](docs/10-kafka-judging-design.md#10-整体部署)创建任务及事件 topic 并初始化两个消费组位点。两份 TOML 的 topic 保持一致，后端事件组和 Worker 任务组分开；所有 Worker 共用任务组。服务禁止自动建 topic 和自动重置位点。
+按[单 broker 配置要求](crates/kafka/README.md#单-broker-部署)准备可互通的 Apache Kafka **4.3.1** broker。应用示例端点为 `localhost:9092`；两份 TOML 的 `bootstrap_servers` 须与实际部署一致。
+
+首次启动应用前，按 [topic 与消费组初始化命令](crates/kafka/README.md#首次创建-topic-和初始化位点)创建 8 个任务分区和 1 个事件分区，并初始化两个组的全部分区位点；说明包含记录上限、一天保留期及核对命令。两份 TOML 的 topic 保持一致，后端事件组和 Worker 任务组分开，所有 Worker 共用任务组。
+
+普通重启保留 broker 数据及现有位点，先启动 broker，再启动应用；topic 创建及位点初始化只在首次部署时执行。服务禁止自动建 topic 和自动重置位点。
 
 ### 启动服务
 
@@ -130,6 +134,8 @@ target/debug/acorn-backend --config "$HOME/.config/acorn/backend.toml"
 cd web
 pnpm dev
 ```
+
+刚启动时 Worker 组观测可能尚未完成。`503 WorkersUnavailable` 表示此次新建在入库前被拒绝；等待取得新鲜正成员数后，手动重试原请求并保留同一幂等键。
 
 ### 提交第一份代码
 

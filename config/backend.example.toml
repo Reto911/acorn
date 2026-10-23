@@ -48,10 +48,12 @@ failure_diagnostic_max_bytes = 512
 [logging]
 level = "info"
 
+# Initialize topics and group offsets first; see crates/kafka/README.md.
 [kafka]
 bootstrap_servers = ["localhost:9092"]
 tasks_topic = "acorn.judge.tasks.v1"
 events_topic = "acorn.judge.events.v1"
+# This backend consumes events; Workers share a separate task group.
 group_id = "acorn-backend-judge-events-v1"
 delivery_timeout_ms = 30_000
 queue_timeout_ms = 1_000
@@ -60,6 +62,7 @@ max_task_record_bytes = 16_777_216
 max_event_record_bytes = 1_048_576
 
 [worker_membership]
+# Must match the Workers' [kafka].group_id.
 tasks_group_id = "acorn-judge-workers-v1"
 interval_ms = 5_000
 timeout_ms = 1_000

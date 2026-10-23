@@ -105,7 +105,11 @@ See the [SQL guide](sql/README.md) for script contents, account responsibilities
 
 ### Prepare Kafka
 
-Configure a reachable broker, create the task and event topics, and initialize both consumer groups as specified in the [deployment contract](docs/10-kafka-judging-design.md#10-整体部署). Match the topics in both TOML files and use separate backend-event and Worker-task groups. All Workers share the task group. The services disable automatic topic creation and offset reset.
+Prepare a reachable Apache Kafka **4.3.1** broker using the [single-broker configuration requirements](crates/kafka/README.md#单-broker-部署). The example application endpoint is `localhost:9092`; set `bootstrap_servers` in both TOML files to match your deployment.
+
+Before starting either application for the first time, follow the [topic and group initialization commands](crates/kafka/README.md#首次创建-topic-和初始化位点): create 8 task partitions and 1 event partition, then initialize all partition offsets for both groups. The guide includes record limits, one-day retention, and verification commands. Match both topics in the TOML files; all Workers share the task group, and the backend uses a separate event group.
+
+For ordinary restarts, retain the broker data and existing offsets, start the broker, then start the applications. Topic creation and offset initialization are first-deployment operations. The services disable automatic topic creation and offset reset.
 
 ### Start the Services
 
@@ -130,6 +134,8 @@ Start the frontend in terminal C:
 cd web
 pnpm dev
 ```
+
+Worker group observation may still be pending immediately after startup. A `503 WorkersUnavailable` response rejects a new record before insertion; wait for a fresh positive group observation, then manually retry the original request with the same idempotency key.
 
 ### Submit Your First Program
 

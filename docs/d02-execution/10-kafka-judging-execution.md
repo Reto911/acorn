@@ -4,7 +4,7 @@
 
 ## 1. 当前状态
 
-当前设计为 v20；K01–K06 的 19 项任务完成，剩余 3 项由 K07 推进。正式判题入口使用 Kafka；后端独立观测 Worker 消费组并约束新建接纳，健康采集新增两个 topic 的 metadata 检查，Worker 状态及页面保留实际待 MQ 交接终态数量／容量。K05 改动见[第 11 节](#11-k05-生命周期与旧流程移除)，K06 改动及有限验证见[第 12 节](#12-k06-在线观测与健康页面)。完整部署及 KV01–KV06 集成验收由 K07 完成。进度见[任务清单](#4-任务清单)，审核决定见[审核记录](../d01-review/10-kafka-judging-review.md#2-已确认决定与草案修正)。
+当前设计为 v20；K01–K07 的 22 项任务完成。正式判题入口使用 Kafka；后端独立观测 Worker 消费组并约束新建接纳，健康采集检查两个 topic 的 metadata，Worker 状态及页面保留实际待 MQ 交接终态数量／容量。K05 改动见[第 11 节](#11-k05-生命周期与旧流程移除)，K06 改动见[第 12 节](#12-k06-在线观测与健康页面)，固定版本的单 broker 部署及首次初始化验证见[第 13 节](#13-k071-单-broker-部署与首次初始化)。KV01–KV06 验收、构建及交付结果见[第 14 节](#14-k072k073-集成验收与交付)，其中保留测试初始化失败及搁置问题。进度见[任务清单](#4-任务清单)，审核决定见[审核记录](../d01-review/10-kafka-judging-review.md#2-已确认决定与草案修正)。
 
 Safe 接口修复的 S01–S06 已完成，两端均异步提交位点；Worker 保留 StreamConsumer，通过 SDK RAII 释放消费者。共享原生确认模块及 commit_timeout_ms 已移除，S06 已补齐动态／静态构建和静态 Worker 定向验证，safe 修复全部收口。按[修复步骤](../10-kafka-judging-design.md#12-safe-接口修复计划)在[第 10 节](#10-safe-接口修复跟踪)单独跟踪，不改变原 K01–K07 任务编号或历史完成记录。
 
@@ -80,9 +80,9 @@ Safe 接口修复的 S01–S06 已完成，两端均异步提交位点；Worker 
 
 任务定义见[设计 K07](../10-kafka-judging-design.md#k07-集成验收与部署交付)。
 
-- [ ] K07.1 固定目标 Kafka 版本，验证内部位点 topic 配置、业务 topic 创建及首次组位点提交。
-- [ ] K07.2 执行必需静态检查、相关测试及 KV01–KV06，记录实际结果与限制。
-- [ ] K07.3 更新中英文及模块使用说明，交付构建、配置与整体部署文档。
+- [x] K07.1 固定目标 Kafka 版本，验证内部位点 topic 配置、业务 topic 创建及首次组位点提交。
+- [x] K07.2 执行必需静态检查、相关测试及 KV01–KV06，记录实际结果与限制。
+- [x] K07.3 更新中英文及模块使用说明，交付构建、配置与整体部署文档。
 
 ## 5. K01：依赖、配置与消息接入
 
@@ -616,3 +616,118 @@ cargo test -p acorn-backend --locked --test workflow process_creation_failure_ex
 - 首次两端进程检查在启动期间高频重试 `WorkersUnavailable` 时出现 HTTP 等待超时；将测试轮询间隔改为 500 ms 后复验通过。该调整只影响测试等待，不增加产品自动重试。
 - 两项真实 Kafka 检查并行执行时，既有夹具在首次初始化组位点阶段返回过一次 `UnknownTopicOrPartition`，创建故障检查尚未开始。该用例单独复验通过；本次未增加初始化重试。该偶发初始化失败保留在记录中，K07 部署及初始化验收仍需关注。
 - 本批采用默认动态模式，未重跑完整 workspace 测试、静态模式或完整真实 Isolate 判题矩阵。K06 仅覆盖 KV05 的成员接纳部分和 KV06 的健康展示部分；完整部署、真实判题及双 Worker 并行验收仍属 K07。
+
+## 13. K07.1 单 broker 部署与首次初始化
+
+### 13.1 实际改动
+
+- 部署基线固定为 Apache Kafka 4.3.1，明确内部位点 topic 副本数为 1、禁止 broker 自动建 topic，以及任务消息和副本获取上限的配置要求。
+- [共享部署说明](../../crates/kafka/README.md#单-broker-部署)提供 broker 配置要求、两个业务 topic 创建、首次消费组位点初始化、只读核对和普通停止／重启要求。两个业务 topic 分区为 8／1，副本数及 min.insync.replicas 均为 1，delete 保留期为一天，记录上限分别为 16778240／1049600 字节。
+- 首次初始化只在应用未启动的新部署执行；两个消费组的全部分区从新 topic 的起始位点开始。普通重启保留 broker 数据及现有位点。同步中英文根说明、两端使用说明及第 10 篇部署合同。
+- 本批未修改 Rust、协议或现有测试用例。
+
+### 13.2 实际检查
+
+部署检查在独立 Kafka 环境、备用宿主端口和新建数据目录执行，未修改现有 Kafka／MySQL 服务配置。
+
+| 检查              | 实际结果                                                                                                                                                             |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| broker 版本与就绪 | CLI 版本为 4.3.1，metadata 就绪检查成功                                                                                                                              |
+| broker 配置       | 实际配置为 auto.create.topics.enable=false、offsets.topic.replication.factor=1，message.max.bytes 和 replica.fetch.max.bytes 均为 16778240                           |
+| 业务 topic        | 任务／事件分区分别为 8／1，副本数为 1，全部分区 leader 有效；记录上限、min.insync.replicas、delete 策略及一天保留期均与文档一致                                      |
+| 首次位点          | Kafka 管理命令成功初始化任务组的 8 个分区和事件组的 1 个分区，CURRENT-OFFSET 均为 0；内部 __consumer_offsets 自动建立，副本数为 1                                    |
+| 保留数据重启      | 仅在隔离 broker 写入一条验收标记并将事件组位点推进为 1；停止后保留原数据重启，9 条分区位点、topic 身份及集群元数据保持不变，事件位点仍为 1；重启过程未重新初始化位点 |
+| 宿主客户端        | 既有 real_kafka_message_roundtrip 在新 broker 的宿主端点通过，验证 SDK 任务／运行／终态消息往返；临时 topic 已由夹具清理                                             |
+| 文档及配置        | Markdown Prettier、Shell 示例语法、本地链接／锚点及 git diff --check 通过                                                                                            |
+
+消息检查使用已有命令，并由环境将端点指向本次隔离 broker：
+
+```sh
+ACORN_TEST_KAFKA_SERVERS=localhost:19094 cargo test -p acorn-backend --locked --test kafka real_kafka_message_roundtrip -- --ignored
+```
+
+### 13.3 UnknownTopicOrPartition 定向复验
+
+依据第 12.3 节的失败组合，保持原夹具和配置，在同版本现有 broker 上做三轮并行复验，每轮各执行以下两项，实际均通过：
+
+```sh
+cargo test -p acorn-backend --locked --test workflow -- real_kafka_observation_and_admission process_creation_failure_exits_without_draining_workers --ignored --test-threads=2
+```
+
+环境沿用既有独立 MySQL 测试库及 UUID topic／组夹具。本次未复现 UnknownTopicOrPartition，不能确定此前的触发原因。按用户允许暂缓不稳定问题的要求，本次搁置该问题，原失败记录保留；现有初始化夹具保持不变。
+
+K07.1 已完成。本批不覆盖完整真实 Isolate 判题、双 Worker 并发、整体 GUI 验收或两种构建模式的最终交付，继续由 K07.2–K07.3 完成；未重跑完整 workspace 测试或与本批无关的故障矩阵。
+
+## 14. K07.2–K07.3 集成验收与交付
+
+### 14.1 实际改动
+
+- 复用既有 Kafka、独立 MySQL 和真实 Isolate workflow 夹具，新增一项 `real_two_workers_overlap`。两个 Worker 使用不同专用 box，等待 classic range 分配稳定后向分区 0／7 投递不同提交，通过并行状态 RPC 观察同一轮均为 Running，最终两份提交各完成 104 例并持久化 AC。该用例定向控制分区；HTTP 创建和正式 Publisher 由五条主要判题路线覆盖。
+- 既有并发创建用例补齐三个不同幂等键的并发接纳，继续核对同键合并、回滚和剩余容量。两个旧审查进程用例复用已有被动任务组成员，等待独立成员观测后发起新建，并在共同收尾中退出该成员。
+- 同步中英文根说明、backend／Worker／共享 Kafka 使用说明；两份配置示例标明首次初始化要求及消费组角色，后端标明被观测组须与 Worker 组一致。双 Worker 检查命令列明第二个专用 box 环境变量。部署交付沿用第 13 节的 broker 配置要求及首次初始化／普通重启步骤。
+
+### 14.2 实际检查
+
+Rust 格式、workspace 全目标编译及必需 Clippy 通过，最终两份正式二进制保留默认动态构建：
+
+```sh
+cargo fmt --all -- --check
+cargo check --workspace --all-targets --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo build --workspace --locked --no-default-features --features acorn-backend/kafka-static,acorn-worker/kafka-static
+cargo build --workspace --locked
+```
+
+`readelf -d` 核对两端静态构建均无 librdkafka 共享依赖，默认动态构建均依赖 librdkafka.so.1。静态模式的既有 Worker 容量／分区撤销／停机用例通过；主要真实 Isolate 路线及页面使用默认动态模式。
+
+| 范围                 | 实际结果                                                                                                                                                                                              |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 协议检查             | 3 项 Kafka 编解码／上限测试、2 项 wire contract 测试通过                                                                                                                                              |
+| 后端常规检查         | 12 项库测试、9 项配置测试、13 项数据库测试和 27 项常规 workflow 通过；扩展后的不同键并发用例定向复验通过                                                                                              |
+| 后端 Kafka／进程检查 | 消息往返一项通过；发布／事件、成员接纳、正式二进制闭环、混合状态重启、读写故障、审查启动与停机及审查完成故障共 10 项用例最终通过，失败轮次见第 14.4 节                                                |
+| Worker 检查          | 21 项常规测试通过；真实 Kafka 的容量／撤销／停机、BLOCKED 替代接管、积压／总预算、SIGTERM 四项最终通过；静态模式容量用例通过                                                                          |
+| 真实 Isolate         | 五条主要判题路线和双 Worker 重叠执行通过；AC 路线各完成 104 例，CE 完成 0 例，WA／TLE 各完成 1 例                                                                                                     |
+| 前端工程             | `pnpm --dir web format:check`、`lint`、`build` 和 `test` 通过；构建包含类型检查，12 个测试文件的 65 项测试通过                                                                                        |
+| 真实页面             | Chromium 以 1024×900 视口操作生产构建，完成 Python 提交、AC、手动审查 PENDING→PASS、历史筛选／返回／刷新及 Kafka 健康和待 MQ 交接数量展示，未记录页面脚本错误                                         |
+| broker 暂断          | 仅停止隔离 broker，题目和已完成提交查询保持 200，AC／PASS 保留；健康缓存及实际页面报告 failed／KafkaMetadataFailed，数据库和 Worker RPC 仍为 ok，本地接纳指标仍为 open；保留数据重启后 Kafka 健康恢复 |
+| 缺失位点             | 使用独立未初始化事件组启动正式后端，报告 AutoOffsetReset／KafkaEventReceiveFailed 并以非零状态退出                                                                                                    |
+| 文档及配置           | Markdown Prettier、168 个本地链接／锚点、稳定标题编号、22 项任务标识、中英文命令及 Shell／TOML 示例检查通过，git diff --check 通过                                                                    |
+
+数据库检查由环境提供 MYSQL_PASSWORD、ACORN_TEST_DATABASE_CONFIG，Kafka 指向独立 broker；进程闭环另提供本工作区 ACORN_TEST_WORKER_EXECUTABLE。实际主要命令如下，首次失败和复验分开记录：
+
+```sh
+cargo test -p acorn-protocol --locked
+cargo test -p acorn-backend --locked --lib --test config_results --test database --test workflow
+cargo test -p acorn-backend --locked --test kafka -- --ignored
+cargo test -p acorn-backend --locked --test workflow -- process_ real_kafka_backend_publication_and_events real_kafka_observation_and_admission --ignored --test-threads=1
+cargo test -p acorn-backend --locked --test workflow -- process_review_shutdown_cancels_and_marks_new_terminals process_review_startup_interrupts_without_reposting review_api_failure_and_critical_completion_failure --ignored --test-threads=1
+cargo test -p acorn-backend --locked --test workflow real_http_worker_acceptance -- --ignored --nocapture --test-threads=1
+cargo test -p acorn-backend --locked --test workflow -- real_two_workers_overlap concurrent_creation_merges_and_rollback_releases_permits --include-ignored --nocapture --test-threads=1
+cargo test -p acorn-worker --locked
+cargo test -p acorn-worker --locked --test kafka real_kafka_ -- --ignored --skip real_kafka_isolate_execution --test-threads=1
+cargo test -p acorn-worker --locked --test kafka real_kafka_result_backpressure_and_total_shutdown_budget -- --ignored
+cargo test -p acorn-worker --locked --no-default-features --features kafka-static --test kafka real_kafka_worker_capacity_and_shutdown -- --ignored
+```
+
+real_http_worker_acceptance 另提供一个专用 ACORN_ISOLATE_BOX_ID；最后一次双 Worker 定向检查提供两个不同的 ACORN_ISOLATE_BOX_ID、ACORN_ISOLATE_BOX_ID_2。真实页面使用独立测试库、正式后端和 Worker 二进制、真实 Kafka／Isolate；审查 Responses 使用本机受控端点，核对一次模型请求及持久化意见，不调用外部模型。
+
+### 14.3 KV01–KV06 结果
+
+| 编号 | 结果及覆盖                                                                                                                                                   |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| KV01 | 协议编解码及上限、进度与终态对应关系、固定版本数据库测试和真实 Kafka 原始字节往返通过                                                                        |
+| KV02 | 同键／不同键并发、满时不入库、事务回滚、重复事件许可释放及 queued／dispatching／running 恢复通过                                                             |
+| KV03 | 复用不确定发送与停止、保存后入队、入队错误仍交接审查、仅入队不等待逐条回执、首个终态保持和审查幂等检查，均通过                                               |
+| KV04 | 复用归属撤销、单槽、确认终态后仅重试入队、旧归属释放、BLOCKED 替代接管、结果满及有限总预算检查，均通过                                                       |
+| KV05 | 首次初始化及保留数据重启见第 13 节；本批补齐缺失 topic 健康报错、零成员／unknown 新建限制、混合状态重启、broker 暂断查询、健康失败及缺失位点故障退出，均通过 |
+| KV06 | 五条真实判题路线、双 Worker 同时执行不同提交、真实历史／审查／健康页面通过                                                                                   |
+
+### 14.4 失败、修正与验收边界
+
+- 新 broker 上首次五路线检查在夹具同步初始化位点时返回 NotCoordinator，未进入判题。独立双 Worker 检查通过后，仅复验失败的五路线，用例通过；初次失败保留，不为生产流程或夹具增加自动修复和重试分支。
+- Worker 四项检查中，积压用例在夹具初始化位点时返回 UnknownTopicOrPartition，其余三项通过；该项单独复验通过。按用户决定继续搁置触发原因，不能据此声称问题已解决，沿用第 13.3 节的失败记录。
+- 旧审查停机用例首次创建得到 503，其前置条件没有提供 K06 要求的正成员观测；修正两个涉及 HTTP 新建的审查进程用例后复验通过。审查启动用例一次等待审查状态超时，未修改其行为或放宽超时，单独复验通过，未确定该轮等待超时原因。
+- 双 Worker 复验曾在初始成员观测等待中超时，夹具原先未等待消费组完成加入／重平衡。将稳定分配作为实际成员采集的前置条件后，最终双 Worker 与不同键并发两项定向检查通过。
+- 页面审查验证使用受控 Responses；未验证外部模型服务，也未执行完整 workspace 测试、完整静态 Isolate／浏览器矩阵或额外故障矩阵。异步位点请求入队及 SDK RAII 析构的既有边界保持不变。
+
+K07.2–K07.3 完成，K01–K07 全部任务收口。上述偶发失败保留可见，后续若稳定复现再独立处理。验收服务正常停止并删除其独立测试库；隔离 Kafka 环境在完成检查后清理，既有 Kafka／MySQL 服务继续保留。失败轮次残留库沿用开发端处置约定，不批量清理既有资源。
