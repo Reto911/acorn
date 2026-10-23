@@ -726,7 +726,7 @@ async fn queued_rehandoff_keeps_original_version() {
     harness.close().await;
 }
 
-/// Simultaneous same-key creates merge into one persisted and locally queued submission.
+/// Same-key creates merge, distinct keys reserve independently, and rollback restores capacity.
 #[tokio::test]
 async fn concurrent_creation_merges_and_rollback_releases_permits() {
     let harness = Harness::start(1, 16).await;
@@ -755,6 +755,25 @@ async fn concurrent_creation_merges_and_rollback_releases_permits() {
     }
     assert_eq!(new_count, 1);
     assert_eq!(ids.len(), 1);
+    for _ in 0..3 {
+        let app = harness.app.clone();
+        requests.spawn(async move {
+            call(
+                &app,
+                "POST",
+                "/api/v1/submissions",
+                Some(json!({"problem_id":1,"language_id":"python","source":"distinct"})),
+                Some(Uuid::new_v4()),
+            )
+            .await
+        });
+    }
+    while let Some(response) = requests.join_next().await {
+        let (status, _, body) = response.unwrap();
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert!(ids.insert(body["submission_id"].as_str().unwrap().to_owned()));
+    }
+    assert_eq!(ids.len(), 4);
     for _ in 0..16 {
         let (status, _, body) = call(
             &harness.app,
@@ -771,7 +790,7 @@ async fn concurrent_creation_merges_and_rollback_releases_permits() {
     while let Ok(permit) = harness.scheduler.reserve() {
         permits.push(permit);
     }
-    assert_eq!(permits.len(), 15);
+    assert_eq!(permits.len(), 12);
     drop(permits);
     harness.close().await;
 }
@@ -1297,6 +1316,78 @@ async fn real_http_worker_acceptance() {
         eprintln!(
             "Real sample: submission={id} language={language} verdict={verdict} completed={completed}"
         );
+    }
+    harness.close().await;
+}
+
+/// Two real execution positions overlap on distinct submissions and persist both accepted results.
+#[tokio::test]
+#[ignore = "requires prepared Isolate, Kafka/MySQL and two dedicated ACORN_ISOLATE_BOX_ID/ACORN_ISOLATE_BOX_ID_2"]
+async fn real_two_workers_overlap() {
+    use acorn_protocol::worker::v1::{
+        GetWorkerStatusRequest, judge_worker_client::JudgeWorkerClient,
+    };
+    use std::time::Duration;
+    use support::real::{RealHarness, box_id};
+
+    let boxes = [
+        box_id("ACORN_ISOLATE_BOX_ID"),
+        box_id("ACORN_ISOLATE_BOX_ID_2"),
+    ];
+    assert_ne!(boxes[0], boxes[1]);
+    let harness = RealHarness::start(&boxes).await;
+    let mut ids = Vec::new();
+    // Stable range assignment of eight partitions to two Workers puts 0 and 7
+    // on different consumers. Only the first case sleeps, within its normal limit.
+    for partition in [0, 7] {
+        let created = harness
+            .fixture
+            .database
+            .create_submission(CreateSubmission {
+                problem_id: 1,
+                language_id: "python".into(),
+                source: b"import time\na,b=map(int,input().split())\nif (a,b)==(1,2): time.sleep(1)\nprint(a+b)\n".to_vec(),
+                request_key: Uuid::new_v4(),
+            })
+            .await
+            .unwrap();
+        harness
+            .broker
+            .task(&created.task.unwrap().request, partition)
+            .await;
+        harness
+            .fixture
+            .database
+            .mark_dispatching(&created.info.id)
+            .await
+            .unwrap();
+        ids.push(created.info.id);
+    }
+    let mut first = JudgeWorkerClient::connect(harness.workers[0].address.clone())
+        .await
+        .unwrap();
+    let mut second = JudgeWorkerClient::connect(harness.workers[1].address.clone())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let (a, b) = tokio::join!(
+                first.get_worker_status(GetWorkerStatusRequest {}),
+                second.get_worker_status(GetWorkerStatusRequest {}),
+            );
+            if a.unwrap().into_inner().execution_state == WorkerExecutionState::Running as i32
+                && b.unwrap().into_inner().execution_state == WorkerExecutionState::Running as i32
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("Both Workers must report live running occupancy in the same observation round");
+    assert_ne!(ids[0], ids[1]);
+    for id in ids {
+        harness.terminal(&id, "AC").await;
     }
     harness.close().await;
 }

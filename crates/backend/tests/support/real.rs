@@ -91,9 +91,9 @@ pub struct RealHarness {
     /// Scheduler state used to wait until persistence and the bounded event handoff have completed.
     pub scheduler: Scheduler,
     /// Independent Workers, each owning its explicitly selected Isolate box.
-    workers: Vec<RealWorker>,
+    pub workers: Vec<RealWorker>,
     /// Owned topic pair and initial offsets for both services.
-    broker: super::broker::Broker,
+    pub broker: super::broker::Broker,
     /// Actual HTTP listener address.
     address: SocketAddr,
     /// Creation operations owned independently of HTTP connections.
@@ -127,6 +127,7 @@ impl RealHarness {
         for &box_id in box_ids {
             workers.push(RealWorker::start(box_id, &broker).await);
         }
+        broker.assigned(box_ids.len()).await;
         fixture.config.scheduler.workers = workers.iter().map(|w| w.address.clone()).collect();
         let (review, review_task) =
             ReviewService::start(&fixture.config.llm_review, fixture.database.clone()).unwrap();

@@ -3,13 +3,16 @@
 use super::Fixture;
 use acorn_backend::scheduler::kafka;
 use acorn_kafka::KafkaConfig;
-use acorn_protocol::{records, worker::v1::GetJobReply};
+use acorn_protocol::{
+    records,
+    worker::v1::{GetJobReply, SubmitJobRequest},
+};
 use rdkafka::{
     Offset, TopicPartitionList,
     admin::{AdminClient, AdminOptions, NewTopic, TopicReplication},
     client::DefaultClientContext,
     consumer::{CommitMode, Consumer, StreamConsumer},
-    producer::{FutureProducer, FutureRecord},
+    producer::{FutureProducer, FutureRecord, Producer},
 };
 use std::time::Duration;
 use uuid::Uuid;
@@ -29,6 +32,50 @@ pub struct Broker {
 }
 
 impl Broker {
+    /// Wait for the intended real Workers' stable range assignment before targeting partitions.
+    pub async fn assigned(&self, members: usize) {
+        let producer = self.producer.clone();
+        let group = self.task_group.clone();
+        tokio::task::spawn_blocking(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                let groups = producer
+                    .client()
+                    .fetch_group_list(Some(&group), Duration::from_secs(1))
+                    .unwrap();
+                if let Some(group) = groups.groups().iter().find(|info| info.name() == group)
+                    && group.state() == "Stable"
+                    && group.members().len() == members
+                {
+                    assert_eq!(group.protocol(), "range");
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "Real Worker assignment did not stabilize"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    /// Deliver a fixed task to a known partition for the two-Worker overlap acceptance check.
+    pub async fn task(&self, request: &SubmitJobRequest, partition: i32) {
+        let encoded = records::encode_task(request, self.config.max_task_record_bytes).unwrap();
+        self.producer
+            .send(
+                FutureRecord::to(&self.config.tasks_topic)
+                    .partition(partition)
+                    .key(encoded.key())
+                    .payload(encoded.payload()),
+                Duration::from_millis(self.config.queue_timeout_ms),
+            )
+            .await
+            .unwrap();
+    }
+
     /// Poll a real passive member for observation and process tests, with explicit leave ownership.
     pub fn member(
         &self,

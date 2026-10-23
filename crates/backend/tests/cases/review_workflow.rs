@@ -1169,9 +1169,15 @@ async fn process_review_shutdown_cancels_and_marks_new_terminals() {
     let endpoint = Endpoint::start(true).await;
     let mut fixture = endpoint.fixture("ENABLE-ANY").await;
     fixture.config.llm_review.pending_max_count = 2;
+    fixture.config.worker_membership.interval_ms = 50;
+    fixture.config.logging.level = "debug".into();
     let broker = Broker::start(&mut fixture).await;
+    let (leave, member) = broker.member();
     let mut backend = BackendProcess::spawn(&fixture);
     let address = backend.listening().await;
+    backend
+        .until_log("Worker membership probe completed members=1")
+        .await;
     let mut ids = Vec::new();
     for source in ["running-review", "queued-review", "late-machine-terminal"] {
         let (status, body) = network_call(
@@ -1238,6 +1244,8 @@ async fn process_review_shutdown_cancels_and_marks_new_terminals() {
     }
     assert_eq!(endpoint.count(), 1);
     connection.close().await.unwrap();
+    leave.send(()).unwrap();
+    member.await.unwrap();
     broker.close().await;
     fixture.close().await;
     endpoint.close().await;
@@ -1264,9 +1272,15 @@ async fn review_api_failure_and_critical_completion_failure() {
 
     endpoint.state.release.send_replace(false);
     let mut fixture = endpoint.fixture("ENABLE-ALL").await;
+    fixture.config.worker_membership.interval_ms = 50;
+    fixture.config.logging.level = "debug".into();
     let broker = Broker::start(&mut fixture).await;
+    let (leave, member) = broker.member();
     let mut backend = BackendProcess::spawn(&fixture);
     let address = backend.listening().await;
+    backend
+        .until_log("Worker membership probe completed members=1")
+        .await;
     let (status, body) = network_call(
         address,
         "POST",
@@ -1293,6 +1307,8 @@ async fn review_api_failure_and_critical_completion_failure() {
     assert_eq!(stored.info.review_status, ReviewStatus::Pending);
     assert_eq!(endpoint.count(), 3);
     connection.close().await.unwrap();
+    leave.send(()).unwrap();
+    member.await.unwrap();
     broker.close().await;
     fixture.close().await;
     endpoint.close().await;
