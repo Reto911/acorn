@@ -3,6 +3,7 @@ name = "acorn-backend"
 description = "Acorn HTTP backend and in-process Scheduler"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [lints]

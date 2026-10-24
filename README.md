@@ -249,3 +249,7 @@ cargo test -p acorn-backend --locked --lib --test config_results
 The workspace requires Rustdoc for authored public and private Rust items, and each crate inherits the shared lint configuration. See the module READMEs for tests, protocol generation, and frontend checks, and the [documentation index](docs/README.md) for architecture and interface details.
 
 Database and workflow checks require `MYSQL_PASSWORD` and a private copy of [the MySQL test configuration](config/backend-test.example.toml), selected by `ACORN_TEST_DATABASE_CONFIG`. The development account creates and deletes a separate database for each test; see the [backend checks](crates/backend/README.md#检查命令).
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).

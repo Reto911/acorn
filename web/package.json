@@ -1,6 +1,7 @@
 {
   "name": "acorn-web",
   "version": "0.1.0",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@12.11.2",

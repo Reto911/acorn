@@ -3,6 +3,7 @@ name = "acorn-worker"
 description = "Acorn serial C and Python judging worker"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [lints]

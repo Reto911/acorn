@@ -249,3 +249,7 @@ cargo test -p acorn-backend --locked --lib --test config_results
 workspace 要求自写公共和私有 Rust 项提供 Rustdoc 文档，各 crate 继承统一 lint 配置。模块测试、协议生成和前端检查命令分别见对应 README；架构和接口细节见[文档索引](docs/README.md)。
 
 数据库和 workflow 检查需要 `MYSQL_PASSWORD` 及[MySQL 测试配置](config/backend-test.example.toml)的私有副本，通过 `ACORN_TEST_DATABASE_CONFIG` 指定。开发账户为每个测试创建和删除独立数据库，见[后端检查说明](crates/backend/README.md#检查命令)。
+
+## 许可证
+
+本项目采用 [MIT 许可证](LICENSE)。
