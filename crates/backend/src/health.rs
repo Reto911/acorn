@@ -103,7 +103,7 @@ pub enum ProbeErrorCode {
 }
 
 /// Original error context retained for logs, never included in a cached public observation.
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, thiserror::Error)]
 #[error("{diagnostic}")]
 pub(crate) struct ProbeError {
     /// Stable observation classification.
@@ -174,13 +174,13 @@ struct Completed<T> {
     checked_at: Instant,
     /// Backend wall-clock completion time exposed in snapshots.
     checked_at_ms: i64,
-    /// Latest result without raw error context.
-    result: std::result::Result<T, ProbeErrorCode>,
+    /// Latest result and private diagnostic; public snapshots expose only the stable code.
+    result: std::result::Result<T, ProbeError>,
 }
 
 impl<T> Completed<T> {
     /// Record completion with real clocks, reporting any timestamp failure explicitly.
-    fn new(result: std::result::Result<T, ProbeErrorCode>) -> Result<Self> {
+    fn new(result: std::result::Result<T, ProbeError>) -> Result<Self> {
         let checked_at = Instant::now();
         let elapsed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -296,13 +296,33 @@ fn project<T: Clone>(
                 snapshot.state = ProbeState::Ok;
                 snapshot.value = Some(value.clone());
             }
-            Err(code) => {
+            Err(error) => {
                 snapshot.state = ProbeState::Failed;
-                snapshot.error_code = Some(*code);
+                snapshot.error_code = Some(error.code);
             }
         }
     }
     snapshot
+}
+
+/// Replace every completion, returning a changed failure or a recovery for logging outside the lock.
+fn record<T>(
+    latest: &mut Option<Completed<T>>,
+    completed: Completed<T>,
+) -> (Option<ProbeError>, bool) {
+    let previous = latest
+        .as_ref()
+        .and_then(|previous| previous.result.as_ref().err())
+        .map(|error| error.code);
+    let warning = completed
+        .result
+        .as_ref()
+        .err()
+        .filter(|error| Some(error.code) != previous)
+        .cloned();
+    let recovered = previous.is_some() && completed.result.is_ok();
+    *latest = Some(completed);
+    (warning, recovered)
 }
 
 /// Independently completed checks returned by the current round.
@@ -332,10 +352,7 @@ async fn collect(
         let mut checks = JoinSet::new();
         let observer = kafka.clone();
         checks.spawn_blocking(move || {
-            let result = observer.metadata(timeout).map_err(|error| {
-                tracing::warn!(code = ?error.code, %error, "Kafka metadata health probe failed");
-                error.code
-            });
+            let result = observer.metadata(timeout);
             Completed::new(result).map(Check::Kafka)
         });
         let database = database.clone();
@@ -345,21 +362,14 @@ async fn collect(
                     tracing::debug!("Database health probe completed");
                     Ok(())
                 }
-                // Database::observe already logs and classifies the original storage error.
-                Ok(Err(_)) => Err(ProbeErrorCode::DatabaseReadFailed),
-                Err(error) => {
-                    tracing::warn!(error = %error, "Database health probe timed out");
-                    Err(ProbeErrorCode::ProbeTimeout)
-                }
+                Ok(Err(error)) => Err(ProbeError::new(ProbeErrorCode::DatabaseReadFailed, error)),
+                Err(error) => Err(ProbeError::new(ProbeErrorCode::ProbeTimeout, error)),
             };
             Completed::new(result).map(Check::Database)
         });
         for (index, worker) in workers.iter().cloned().enumerate() {
             checks.spawn(async move {
-                let result = worker.status(timeout).await.map_err(|error| {
-                    tracing::warn!(worker = index + 1, code = ?error.code, error = %error, "Worker health probe failed");
-                    error.code
-                });
+                let result = worker.status(timeout).await;
                 if result.is_ok() {
                     tracing::debug!(worker = index + 1, "Worker health probe completed");
                 }
@@ -386,11 +396,24 @@ async fn collect(
                     return Err(error);
                 }
             };
-            let mut cache = health.cache.lock().expect("Health cache lock poisoned");
-            match completed {
-                Check::Database(completed) => cache.database = Some(completed),
-                Check::Kafka(completed) => cache.kafka = Some(completed),
-                Check::Worker(index, completed) => cache.workers[index] = Some(completed),
+            let (component, worker, (warning, recovered)) = {
+                let mut cache = health.cache.lock().expect("Health cache lock poisoned");
+                match completed {
+                    Check::Database(completed) => {
+                        ("database", None, record(&mut cache.database, completed))
+                    }
+                    Check::Kafka(completed) => ("kafka", None, record(&mut cache.kafka, completed)),
+                    Check::Worker(index, completed) => (
+                        "worker",
+                        Some(index + 1),
+                        record(&mut cache.workers[index], completed),
+                    ),
+                }
+            };
+            if let Some(error) = warning {
+                tracing::warn!(component, worker, code = ?error.code, %error, "Health probe failed");
+            } else if recovered {
+                tracing::info!(component, worker, "Health probe recovered");
             }
         }
         tokio::select! {
@@ -414,6 +437,35 @@ mod tests {
     //! Freshness checks use supplied monotonic times without waiting for real expiration.
 
     use super::*;
+
+    /// Repeated failures still replace timestamps; only error-category changes and recovery are logged.
+    #[test]
+    fn completion_logging_tracks_failure_transitions() {
+        let mut latest = None;
+        for (index, (code, warn, recovered)) in [
+            (Some(ProbeErrorCode::WorkerRpcFailed), true, false),
+            (Some(ProbeErrorCode::WorkerRpcFailed), false, false),
+            (Some(ProbeErrorCode::ProbeTimeout), true, false),
+            (None, false, true),
+            (None, false, false),
+            (Some(ProbeErrorCode::WorkerRpcFailed), true, false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let completed = Completed {
+                checked_at: Instant::now(),
+                checked_at_ms: index as i64,
+                result: code.map_or(Ok(()), |code| {
+                    Err(ProbeError::new(code, format!("attempt {index}")))
+                }),
+            };
+            let (warning, recovery) = record(&mut latest, completed);
+            assert_eq!(warning.is_some(), warn);
+            assert_eq!(recovery, recovered);
+            assert_eq!(latest.as_ref().unwrap().checked_at_ms, index as i64);
+        }
+    }
 
     /// Each result replaces the last; exactly reaching the age limit hides value and error.
     #[test]
@@ -440,7 +492,7 @@ mod tests {
             latest = Some(Completed {
                 checked_at: now,
                 checked_at_ms: 42,
-                result,
+                result: result.map_err(|code| ProbeError::new(code, "Controlled probe failure")),
             });
             let fresh = project(
                 latest.as_ref(),

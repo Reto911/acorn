@@ -112,6 +112,7 @@ where
     P: std::future::Future<Output = Result<()>>,
 {
     let mut published = false;
+    let mut last_error = None;
     loop {
         if published && !entry.origin.owned() {
             return Ok(entry);
@@ -125,8 +126,15 @@ where
             return Ok(entry);
         }
         match result {
-            Ok(()) if published => return Ok(entry),
-            Ok(()) => published = true,
+            Ok(()) => {
+                if last_error.take().is_some() {
+                    tracing::info!(job = %entry.reply.job_id, published, "Kafka Worker handoff recovered");
+                }
+                if published {
+                    return Ok(entry);
+                }
+                published = true;
+            }
             Err(error) => {
                 if !error
                     .downcast_ref::<KafkaError>()
@@ -134,7 +142,13 @@ where
                 {
                     return Err(error);
                 }
-                tracing::warn!(job = %entry.reply.job_id, topic = %entry.origin.topic, partition = entry.origin.partition, offset = entry.origin.offset, published, %error, "Kafka Worker handoff will retry");
+                let code = error
+                    .downcast_ref::<KafkaError>()
+                    .and_then(KafkaError::rdkafka_error_code);
+                if last_error != code {
+                    tracing::warn!(job = %entry.reply.job_id, topic = %entry.origin.topic, partition = entry.origin.partition, offset = entry.origin.offset, published, ?code, %error, "Kafka Worker handoff will retry");
+                }
+                last_error = code;
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_secs(1)) => {},
                     _ = assignment.changed() => {},
@@ -151,7 +165,11 @@ mod tests {
     use super::*;
     use acorn_protocol::worker::v1::{JobPhase, JobState};
     use rdkafka::types::RDKafkaErrorCode;
-    use std::sync::atomic::AtomicUsize;
+    use std::{
+        io::{Read, Seek},
+        sync::atomic::AtomicUsize,
+    };
+    use tracing::instrument::WithSubscriber;
 
     /// A bounded terminal whose origin can be revoked during a controlled handoff.
     fn entry(lease: Arc<AtomicBool>) -> Entry {
@@ -172,7 +190,7 @@ mod tests {
         }
     }
 
-    /// Enqueue failure retries only the position; losing ownership releases a published terminal.
+    /// Retry enqueue without republishing or repeating warnings; revoked origins release retention.
     #[tokio::test]
     async fn confirmed_terminal_retries_only_enqueue_and_releases_revoked_origin() {
         let published = Arc::new(AtomicUsize::new(0));
@@ -180,6 +198,12 @@ mod tests {
         let (changed, changes) = watch::channel(());
         let sends = published.clone();
         let commits = enqueued.clone();
+        let mut logs = tempfile::tempfile().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(logs.try_clone().unwrap())
+            .finish();
         terminal(
             entry(Arc::new(AtomicBool::new(true))),
             move |_| {
@@ -188,20 +212,26 @@ mod tests {
             },
             move |origin| {
                 assert_eq!(origin.offset + 1, 8);
-                let first = commits.fetch_add(1, Ordering::Relaxed) == 0;
+                let attempt = commits.fetch_add(1, Ordering::Relaxed);
                 changed.send_replace(());
-                if first {
-                    Err(KafkaError::ConsumerCommit(RDKafkaErrorCode::QueueFull).into())
-                } else {
-                    Ok(())
+                match attempt {
+                    0 | 1 => Err(KafkaError::ConsumerCommit(RDKafkaErrorCode::QueueFull).into()),
+                    2 => Err(KafkaError::ConsumerCommit(RDKafkaErrorCode::RequestTimedOut).into()),
+                    _ => Ok(()),
                 }
             },
             changes,
         )
+        .with_subscriber(subscriber)
         .await
         .unwrap();
         assert_eq!(published.load(Ordering::Relaxed), 1);
-        assert_eq!(enqueued.load(Ordering::Relaxed), 2);
+        assert_eq!(enqueued.load(Ordering::Relaxed), 4);
+        logs.rewind().unwrap();
+        let mut output = String::new();
+        logs.read_to_string(&mut output).unwrap();
+        assert_eq!(output.matches("Kafka Worker handoff will retry").count(), 2);
+        assert_eq!(output.matches("Kafka Worker handoff recovered").count(), 1);
 
         let lease = Arc::new(AtomicBool::new(true));
         let revoked = lease.clone();

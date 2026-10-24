@@ -172,6 +172,7 @@ impl EventConsumer {
             .consumer
             .as_ref()
             .expect("Event consumer is owned while receiving");
+        let mut last_error = None;
         loop {
             if *stop.borrow() {
                 return Ok(());
@@ -181,9 +182,18 @@ impl EventConsumer {
                 received = consumer.recv() => received,
             };
             let message = match received {
-                Ok(message) => message,
+                Ok(message) => {
+                    if last_error.take().is_some() {
+                        tracing::info!("Kafka event transport recovered");
+                    }
+                    message
+                }
                 Err(error) if super::temporary(&error) => {
-                    tracing::warn!(error = %error, "Kafka event transport unavailable");
+                    let code = error.rdkafka_error_code();
+                    if last_error != code {
+                        tracing::warn!(?code, error = %error, "Kafka event transport unavailable");
+                    }
+                    last_error = code;
                     continue;
                 }
                 Err(error) => return Err(error).context("KafkaEventReceiveFailed"),

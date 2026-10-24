@@ -220,7 +220,7 @@ impl Executor {
             check_stop(control)?;
             current.phase = JobPhase::RunningCase;
             progress(*current);
-            tracing::info!(job = %context.request.job_id, language = %context.request.language_id, phase = "running_case", case = index + 1, "Case started");
+            tracing::debug!(job = %context.request.job_id, language = %context.request.language_id, phase = "running_case", case = index + 1, "Case started");
             let outcome = self
                 .sandbox
                 .run(
@@ -246,7 +246,7 @@ impl Executor {
             check_stop(control)?;
             current.completed_cases += 1;
             progress(*current);
-            tracing::info!(job = %context.request.job_id, language = %context.request.language_id, phase = "checking", case = index + 1, ?verdict, "Case adjudicated");
+            tracing::debug!(job = %context.request.job_id, language = %context.request.language_id, phase = "checking", case = index + 1, ?verdict, "Case adjudicated");
             if verdict != Verdict::Accepted {
                 return Ok(JudgeResult {
                     verdict: verdict as i32,

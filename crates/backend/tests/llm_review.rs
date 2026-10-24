@@ -220,12 +220,13 @@ async fn review(client: &ReviewClient) -> ReviewAttempt {
         .unwrap()
 }
 
-/// Requests carry the fixed contract and public input only, while opinions, usage and logs stay scoped.
+/// Requests preserve the fixed contract; outcomes use their agreed log levels without leaking input.
 #[tokio::test]
 async fn request_contract_and_valid_opinions() {
     let fixture = Fixture::new(vec![
         Reply::Json(response(&pass())),
         Reply::Json(response(&doubtful())),
+        Reply::Status(StatusCode::SERVICE_UNAVAILABLE),
     ])
     .await;
     let client = ReviewClient::new(&fixture.config).unwrap().unwrap();
@@ -250,9 +251,11 @@ async fn request_contract_and_valid_opinions() {
     assert_eq!(usage.output_tokens, Some(29));
     assert_eq!(usage.reasoning_tokens, Some(0));
     assert_eq!(review(&client).await.status, ReviewStatus::Doubtful);
+    let failed = review(&client).await;
+    assert_eq!(failed.status, ReviewStatus::Failed);
     {
         let requests = fixture.service.requests.lock().unwrap();
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 3);
         assert_eq!(requests[0].authorization, "Bearer controlled-dummy-key");
         let request: Value = serde_json::from_slice(&requests[0].body).unwrap();
         assert_eq!(request.as_object().unwrap().len(), 8);
@@ -292,11 +295,17 @@ async fn request_contract_and_valid_opinions() {
     }
     let log = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
     assert!(log.contains("Review request completed"));
+    for (attempt, level) in [(&accepted.id, "INFO"), (&failed.id, "WARN")] {
+        assert!(log.lines().any(|line| line.contains(&attempt.to_string())
+            && line.contains("Review request completed")
+            && line.contains(level)));
+    }
     for secret in [
         "controlled-dummy-key",
         "SOURCE-MUST-NOT-LOG",
         "REASONING-MUST-NOT-LOG",
         "公开题面",
+        "provider-secret-must-not-appear",
     ] {
         assert!(!log.contains(secret));
     }

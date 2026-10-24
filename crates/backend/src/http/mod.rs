@@ -81,7 +81,7 @@ pub fn router(
             .make_span_with(|request: &axum::http::Request<axum::body::Body>| {
                 tracing::info_span!("http", method = %request.method(), path = request.uri().path())
             })
-            .on_response(DefaultOnResponse::new().level(tracing::Level::INFO))))
+            .on_response(DefaultOnResponse::new().level(tracing::Level::DEBUG))))
         .with_state(state)
 }
 

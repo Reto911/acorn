@@ -1,5 +1,7 @@
 //! English, single-line backend logs on stderr with startup-selected filtering.
 
+use std::io::IsTerminal;
+
 use anyhow::{Context, Result};
 
 use crate::config::LoggingConfig;
@@ -13,7 +15,7 @@ pub fn init(config: &LoggingConfig) -> Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(level)
         .with_writer(std::io::stderr)
-        .with_ansi(false)
+        .with_ansi(std::io::stderr().is_terminal())
         .with_target(false)
         .try_init()
         .map_err(|error| anyhow::anyhow!("Failed to initialize backend logging: {error}"))

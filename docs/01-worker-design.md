@@ -438,7 +438,7 @@ Isolate box ID 由部署配置；同一宿主上不同 Worker 使用不同 ID。
 
 ## 9. 日志
 
-Worker 自身的日志消息统一使用英文，以人类可读的单行文本写入 stderr，由部署端收集和轮转。日志级别从配置读取，不在 Worker 中建设日志查询服务。编译器、解释器和提交程序的原始诊断保留原文，不由 Worker 翻译。
+Worker 自身的日志消息统一使用英文，以人类可读的单行文本写入 stderr，由部署端收集和轮转。stderr 连接终端时自动启用 ANSI 颜色，重定向时输出纯文本。日志级别从配置读取，不在 Worker 中建设日志查询服务。编译器、解释器和提交程序的原始诊断保留原文，不由 Worker 翻译。
 
 每行包含时间、级别和事件说明；任务相关事件附带 Job ID、语言和阶段，运行事件附带用例序号。记录接纳、编译开始与结束、用例开始与结论、任务终态、停止和清理错误，并在完成时记录耗时。重复任务和频繁状态观测仅在 debug 级别记录，避免淹没执行信息。
 
@@ -446,12 +446,12 @@ Worker 自身的日志消息统一使用英文，以人类可读的单行文本�
 2026-10-11T10:00:00+08:00 INFO  job=42 language=c phase=preparing Job accepted, cases=3
 2026-10-11T10:00:00+08:00 INFO  job=42 language=c phase=compiling Compilation started
 2026-10-11T10:00:01+08:00 WARN  job=42 language=c phase=running_case case=1/3 Failed to remove workspace; continuing, error="Permission denied"
-2026-10-11T10:00:01+08:00 INFO  job=42 language=c phase=checking case=1/3 Case passed, elapsed=8ms
-2026-10-11T10:00:01+08:00 INFO  job=42 language=c phase=checking case=2/3 Output mismatch; skipping remaining cases
+2026-10-11T10:00:01+08:00 DEBUG job=42 language=c phase=checking case=1/3 Case passed, elapsed=8ms
+2026-10-11T10:00:01+08:00 DEBUG job=42 language=c phase=checking case=2/3 Output mismatch; skipping remaining cases
 2026-10-11T10:00:01+08:00 INFO  job=42 language=c phase=done Judging finished, verdict=WA, elapsed=1030ms
 ```
 
-CE、WA 等正常判题结论记录为 info；未接纳、工作文件或已停止环境的清理失败记录为 warn；沙箱初始化、启动、停止和收集等执行故障记录为 error，给出操作、错误原因及可关联的 Job ID。日志不输出整份源码、完整测试数据或无界程序输出；编译和运行诊断保存在有界结果中。
+任务接纳、编译及 CE、WA 等最终判题结论记录为 info；逐用例开始和结果记录为 debug。未接纳、工作文件或已停止环境的清理失败记录为 warn；沙箱初始化、启动、停止和收集等执行故障记录为 error，给出操作、错误原因及可关联的 Job ID。Kafka 重试日志遵守第 10 篇第 8.3 节的错误类别去重规则。日志不输出整份源码、完整测试数据或无界程序输出；编译和运行诊断保存在有界结果中。
 
 ## 10. 最小验证范围
 

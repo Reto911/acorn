@@ -17,7 +17,8 @@ use crate::{
 };
 
 use super::{
-    ReviewAttempt, ReviewErrorCode, ReviewMode, ReviewTrigger, client::ReviewClient, policy,
+    ReviewAttempt, ReviewErrorCode, ReviewMode, ReviewStatus, ReviewTrigger, client::ReviewClient,
+    policy,
 };
 
 /// Expected manual-admission errors and reported operation failures.
@@ -347,7 +348,7 @@ impl ReviewService {
     ) -> Result<ReviewAttempt> {
         let attempt = attempt.failed(now_ms()?, code, None, None, None)?;
         self.database.finish_review(id, &attempt).await?;
-        tracing::info!(submission = id, review = %attempt.id, error_code = ?code, "Review ended without an opinion");
+        tracing::warn!(submission = id, review = %attempt.id, error_code = ?code, "Review ended without an opinion");
         Ok(attempt)
     }
 
@@ -375,7 +376,11 @@ impl ReviewService {
             } => result?,
         };
         let saved = self.database.finish_review(id, &completed).await?;
-        tracing::info!(submission = id, review = %completed.id, status = completed.status.as_str(), saved, "Review terminal committed");
+        if completed.status == ReviewStatus::Failed {
+            tracing::warn!(submission = id, review = %completed.id, status = completed.status.as_str(), saved, "Review terminal committed");
+        } else {
+            tracing::info!(submission = id, review = %completed.id, status = completed.status.as_str(), saved, "Review terminal committed");
+        }
         Ok(())
     }
 }

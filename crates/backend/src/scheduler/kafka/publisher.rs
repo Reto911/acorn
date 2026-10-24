@@ -125,6 +125,7 @@ async fn deliver<F: Future<Output = Result<(), KafkaError>>>(
     stop: &mut watch::Receiver<bool>,
     mut send: impl FnMut() -> F,
 ) -> Result<bool, KafkaError> {
+    let mut last_error = None;
     loop {
         if *stop.borrow()
             || !scheduler.awaiting_admission(id)
@@ -138,9 +139,18 @@ async fn deliver<F: Future<Output = Result<(), KafkaError>>>(
             return Ok(false);
         }
         match send().await {
-            Ok(()) => return Ok(true),
+            Ok(()) => {
+                if last_error.is_some() {
+                    tracing::info!(submission = id, "Kafka task delivery recovered");
+                }
+                return Ok(true);
+            }
             Err(error) => {
-                tracing::warn!(submission = id, error = %error, "Kafka task delivery failed");
+                let code = error.rdkafka_error_code();
+                if !super::temporary(&error) || last_error != code {
+                    tracing::warn!(submission = id, ?code, error = %error, "Kafka task delivery failed");
+                }
+                last_error = code;
                 if !scheduler.awaiting_admission(id) {
                     return Ok(false);
                 }

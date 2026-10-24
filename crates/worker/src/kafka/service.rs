@@ -13,6 +13,7 @@ use anyhow::{Context, Result, anyhow};
 use rdkafka::{
     Message, Offset,
     consumer::{Consumer, StreamConsumer},
+    error::KafkaError,
     message::OwnedMessage,
     producer::FutureProducer,
 };
@@ -41,8 +42,21 @@ struct Retained {
     updates: watch::Receiver<GetJobReply>,
 }
 
+/// Completion of the single in-flight event send or terminal handoff.
+enum Sent {
+    /// Terminal handoff completed and its runtime retention can be released.
+    Terminal(Box<Entry>),
+    /// A finite progress send reports to the driver that owns its failure category.
+    Running {
+        /// Execution whose snapshots share one failure observation.
+        job_id: String,
+        /// Publication outcome; only temporary transport failures may be skipped.
+        result: Result<()>,
+    },
+}
+
 /// At most one finite event send or terminal handoff is in flight.
-type Sending = Pin<Box<dyn Future<Output = Result<Option<Entry>>> + Send>>;
+type Sending = Pin<Box<dyn Future<Output = Result<Sent>> + Send>>;
 /// The existing sandbox shutdown future, polled alongside the consumer.
 type Stopping = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 
@@ -105,6 +119,8 @@ impl KafkaWorker {
         let mut closing: Option<JoinHandle<Result<()>>> = None;
         let mut paused = None;
         let mut failure = None;
+        let mut last_task_error = None;
+        let mut last_running_error = None;
         let result: Result<()> = async {
             loop {
                 worker.shared.jobs.lock().expect("Job state lock poisoned").mq_results =
@@ -149,17 +165,14 @@ impl KafkaWorker {
                                     handoff::commit(&weak, &ownership, &origin, *shutdown.borrow())
                                 },
                                 changes,
-                            ).await.map(Some)
+                            ).await.map(|entry| Sent::Terminal(Box::new(entry)))
                         }));
                     } else if let Some(reply) = latest.take() {
                         let producer = producer.clone();
                         let kafka = config.kafka.clone();
                         sending = Some(Box::pin(async move {
-                            match handoff::publish(&producer, &kafka.events_topic, &reply, kafka.max_event_record_bytes, Duration::from_millis(kafka.queue_timeout_ms)).await {
-                                Err(error) if error.downcast_ref::<rdkafka::error::KafkaError>().is_some_and(acorn_kafka::temporary) => tracing::warn!(job = %reply.job_id, %error, "Kafka Worker running snapshot unavailable"),
-                                result => result?,
-                            }
-                            Ok(None)
+                            let result = handoff::publish(&producer, &kafka.events_topic, &reply, kafka.max_event_record_bytes, Duration::from_millis(kafka.queue_timeout_ms)).await;
+                            Ok(Sent::Running { job_id: reply.job_id, result })
                         }));
                     }
                 }
@@ -174,9 +187,18 @@ impl KafkaWorker {
                     _ = assignment.changed() => { paused = None; }
                     received = receive(consumer.as_deref()) => {
                         let message = match received {
-                            Ok(message) => message,
+                            Ok(message) => {
+                                if last_task_error.take().is_some() {
+                                    tracing::info!("Kafka Worker task transport recovered");
+                                }
+                                message
+                            }
                             Err(error) if acorn_kafka::temporary(&error) => {
-                                tracing::warn!(%error, "Kafka Worker task transport unavailable");
+                                let code = error.rdkafka_error_code();
+                                if last_task_error != code {
+                                    tracing::warn!(?code, %error, "Kafka Worker task transport unavailable");
+                                }
+                                last_task_error = code;
                                 continue;
                             }
                             Err(error) => return Err(error).context("KafkaWorkerTaskReceiveFailed"),
@@ -245,11 +267,32 @@ impl KafkaWorker {
                     result = send(&mut sending) => {
                         sending = None;
                         sending_terminal = false;
-                        if let Some(entry) = result?
-                            && let Some(updates) = &entry.updates {
-                            worker.forget(updates);
-                            if retained.get(&entry.reply.job_id).is_some_and(|previous| previous.updates.same_channel(updates)) {
-                                retained.remove(&entry.reply.job_id);
+                        match result? {
+                            Sent::Terminal(entry) => {
+                                if last_running_error.as_ref().is_some_and(|(job, _)| job == &entry.reply.job_id) {
+                                    last_running_error = None;
+                                }
+                                if let Some(updates) = &entry.updates {
+                                    worker.forget(updates);
+                                    if retained.get(&entry.reply.job_id).is_some_and(|previous| previous.updates.same_channel(updates)) {
+                                        retained.remove(&entry.reply.job_id);
+                                    }
+                                }
+                            }
+                            Sent::Running { job_id, result } => match result {
+                                Ok(()) => {
+                                    if last_running_error.take().is_some_and(|(job, _)| job == job_id) {
+                                        tracing::info!(job = %job_id, "Kafka Worker running snapshot transport recovered");
+                                    }
+                                }
+                                Err(error) if error.downcast_ref::<KafkaError>().is_some_and(acorn_kafka::temporary) => {
+                                    let code = error.downcast_ref::<KafkaError>().and_then(KafkaError::rdkafka_error_code);
+                                    if last_running_error.as_ref().is_none_or(|(job, previous)| job != &job_id || *previous != code) {
+                                        tracing::warn!(job = %job_id, ?code, %error, "Kafka Worker running snapshot unavailable");
+                                    }
+                                    last_running_error = Some((job_id, code));
+                                }
+                                Err(error) => return Err(error),
                             }
                         }
                     }
@@ -333,7 +376,7 @@ async fn progress(active: &mut Option<Active>) -> Result<()> {
 }
 
 /// Poll the independent bounded event publication and terminal handoff.
-async fn send(sending: &mut Option<Sending>) -> Result<Option<Entry>> {
+async fn send(sending: &mut Option<Sending>) -> Result<Sent> {
     match sending {
         Some(sending) => sending.await,
         None => pending().await,

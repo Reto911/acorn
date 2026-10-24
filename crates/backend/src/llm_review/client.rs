@@ -100,20 +100,30 @@ impl ReviewClient {
             Err(code) => pending.failed(completed_at_ms, code, None, None, None)?,
         };
         let usage = completed.details.usage.as_ref();
-        tracing::info!(
-            submission = submission_id,
-            review = %completed.id,
-            trigger = ?completed.details.trigger,
-            model = %completed.details.model,
-            elapsed_ms = %started.elapsed().as_millis(),
-            http_status,
-            status = completed.status.as_str(),
-            error_code = ?completed.details.error.as_ref().map(|error| error.code),
-            input_tokens = ?usage.and_then(|usage| usage.input_tokens),
-            output_tokens = ?usage.and_then(|usage| usage.output_tokens),
-            reasoning_tokens = ?usage.and_then(|usage| usage.reasoning_tokens),
-            "Review request completed"
-        );
+        /// Keep completion fields identical across successful and failed attempts.
+        macro_rules! log_completion {
+            ($level:ident) => {
+                tracing::$level!(
+                    submission = submission_id,
+                    review = %completed.id,
+                    trigger = ?completed.details.trigger,
+                    model = %completed.details.model,
+                    elapsed_ms = %started.elapsed().as_millis(),
+                    http_status,
+                    status = completed.status.as_str(),
+                    error_code = ?completed.details.error.as_ref().map(|error| error.code),
+                    input_tokens = ?usage.and_then(|usage| usage.input_tokens),
+                    output_tokens = ?usage.and_then(|usage| usage.output_tokens),
+                    reasoning_tokens = ?usage.and_then(|usage| usage.reasoning_tokens),
+                    "Review request completed"
+                );
+            };
+        }
+        if completed.status == ReviewStatus::Failed {
+            log_completion!(warn);
+        } else {
+            log_completion!(info);
+        }
         Ok(completed)
     }
 

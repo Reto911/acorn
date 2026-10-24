@@ -129,13 +129,14 @@ impl Database {
 
     /// Read an actual table through the shared pool and ordinary read-error boundary.
     pub async fn probe_read(&self) -> Result<()> {
-        self.observe("Probe database read", false, async {
-            sqlx::query_scalar::<_, i64>("SELECT id FROM users LIMIT 1")
-                .fetch_optional(&self.pool)
-                .await?;
-            Ok(())
-        })
-        .await
+        let result = sqlx::query_scalar::<_, i64>("SELECT id FROM users LIMIT 1")
+            .fetch_optional(&self.pool)
+            .await;
+        if let Err(error) = &result {
+            // Periodic ordinary failures are logged on health-cache transitions.
+            self.report_sql_error("Probe database read", false, false, error);
+        }
+        result.map(|_| ()).map_err(Error::Sql)
     }
 
     /// Report storage failures at operation boundaries while preserving the original result.
@@ -147,19 +148,32 @@ impl Database {
     ) -> Result<T> {
         let result = future.await;
         if let Err(Error::Sql(error)) = &result {
-            let fatal = critical_write || severe_storage_error(error);
-            tracing::error!(operation, fatal, error = %error, "Database operation failed");
-            if fatal {
-                self.failure.send_if_modified(|failure| {
-                    if failure.is_some() {
-                        return false;
-                    }
-                    *failure = Some(format!("{operation}: {error}"));
-                    true
-                });
-            }
+            self.report_sql_error(operation, critical_write, true, error);
         }
         result
+    }
+
+    /// Keep fatal supervision common while allowing periodic nonfatal errors to use cached logging.
+    fn report_sql_error(
+        &self,
+        operation: &'static str,
+        critical_write: bool,
+        log_nonfatal: bool,
+        error: &sqlx::Error,
+    ) {
+        let fatal = critical_write || severe_storage_error(error);
+        if fatal || log_nonfatal {
+            tracing::error!(operation, fatal, error = %error, "Database operation failed");
+        }
+        if fatal {
+            self.failure.send_if_modified(|failure| {
+                if failure.is_some() {
+                    return false;
+                }
+                *failure = Some(format!("{operation}: {error}"));
+                true
+            });
+        }
     }
 
     /// Await release and closure of all shared connections at process shutdown.
