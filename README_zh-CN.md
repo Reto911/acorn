@@ -75,6 +75,22 @@ pnpm install --frozen-lockfile
 cp .env.example .env.local
 ```
 
+### 编译与部署
+
+[部署脚本](scripts/deploy.py)需要 Python 3.9 或更新版本。在仓库根目录选择部署或数据库初始化模式：
+
+```sh
+python3 scripts/deploy.py --dest /srv/acorn
+python3 scripts/deploy.py --dest /srv/acorn --profile debug --kafka-link static
+python3 scripts/deploy.py --init-db
+```
+
+普通部署默认使用 `release` 和动态 librdkafka。脚本锁定依赖构建两个 Rust 服务，按冻结锁文件安装前端依赖并构建前端，全部构建成功后再复制文件。目标目录须在源码检出目录之外。更新已有部署前先停止应用。
+
+目标目录包含 `bin/acorn-backend`、`bin/acorn-worker`、`web/dist/`、`config/` 下的配置示例及实际 TOML、`sql/` 下的两个脚本和 `examples/seed-user.sql`。已有实际配置会保留；显式传入 `--backend-config /path/to/backend.toml`、`--worker-config /path/to/worker.toml` 时替换对应文件。新建或替换的实际配置权限为 `0600`。每次部署替换前端产物，保留目标目录中的其他文件。核对实际配置后，使用脚本输出的命令启动服务。运行依赖及静态服务器由部署环境准备，静态链接仅指 librdkafka。
+
+`--init-db` 是独立交互模式，需要 PATH 中有 MySQL 8.4 客户端，依次询问主机、端口、已创建的空数据库、初始化账户及隐藏输入的密码。它按顺序执行仓库中的三个 SQL 脚本，拒绝含表或视图的数据库，遇到首个 SQL 错误停止。该模式无需目标目录或后端 TOML，不能与部署参数组合使用。密码通过临时私有客户端配置文件提供，完成或出错后删除该文件。后端运行账户另行配置；初始化失败按 [SQL 说明](sql/README.md#初始化)处理。
+
 ## Quick Start
 
 以下流程使用默认端口，在本机启动一个 Worker、一个后端和前端开发服务。后端与 Worker 的命令均从仓库根目录执行。

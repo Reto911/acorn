@@ -6,6 +6,8 @@
 
 当前设计为 v20；K01–K07 的 22 项任务完成。正式判题入口使用 Kafka；后端独立观测 Worker 消费组并约束新建接纳，健康采集检查两个 topic 的 metadata，Worker 状态及页面保留实际待 MQ 交接终态数量／容量。K05 改动见[第 11 节](#11-k05-生命周期与旧流程移除)，K06 改动见[第 12 节](#12-k06-在线观测与健康页面)，固定版本的单 broker 部署及首次初始化验证见[第 13 节](#13-k071-单-broker-部署与首次初始化)。KV01–KV06 验收、构建及交付结果见[第 14 节](#14-k072k073-集成验收与交付)，其中保留测试初始化失败及搁置问题。进度见[任务清单](#4-任务清单)，审核决定见[审核记录](../d01-review/10-kafka-judging-review.md#2-已确认决定与草案修正)。
 
+构建部署脚本及独立数据库初始化模式的交付与检查见[第 15 节](#15-构建部署脚本与独立数据库初始化)。
+
 Safe 接口修复的 S01–S06 已完成，两端均异步提交位点；Worker 保留 StreamConsumer，通过 SDK RAII 释放消费者。共享原生确认模块及 commit_timeout_ms 已移除，S06 已补齐动态／静态构建和静态 Worker 定向验证，safe 修复全部收口。按[修复步骤](../10-kafka-judging-design.md#12-safe-接口修复计划)在[第 10 节](#10-safe-接口修复跟踪)单独跟踪，不改变原 K01–K07 任务编号或历史完成记录。
 
 ## 2. 文档工作
@@ -731,3 +733,41 @@ real_http_worker_acceptance 另提供一个专用 ACORN_ISOLATE_BOX_ID；最后�
 - 页面审查验证使用受控 Responses；未验证外部模型服务，也未执行完整 workspace 测试、完整静态 Isolate／浏览器矩阵或额外故障矩阵。异步位点请求入队及 SDK RAII 析构的既有边界保持不变。
 
 K07.2–K07.3 完成，K01–K07 全部任务收口。上述偶发失败保留可见，后续若稳定复现再独立处理。验收服务正常停止并删除其独立测试库；隔离 Kafka 环境在完成检查后清理，既有 Kafka／MySQL 服务继续保留。失败轮次残留库沿用开发端处置约定，不批量清理既有资源。
+
+## 15. 构建部署脚本与独立数据库初始化
+
+### 15.1 实际改动
+
+- 新增 [scripts/deploy.py](../../scripts/deploy.py)，使用 Python 3.9 及以上标准库。`--dest` 构建并复制，`--init-db` 仅交互初始化数据库；两种模式及其参数互斥。数据库模式不读取部署目录或 backend.toml。
+- 普通部署默认 release／动态 librdkafka，支持 debug／静态 librdkafka。使用 Cargo JSON 产物记录定位两个实际二进制，复用既有 pnpm 冻结依赖安装和前端构建；全部构建成功后再复制到源码检出目录之外的目标目录。
+- 部署内容为两个服务、前端 dist、配置示例及实际配置、两个 sql 目录脚本和 examples/seed-user.sql。首次生成实际配置，重复部署保留；显式配置来源可替换对应文件。实际配置新建或替换时权限为 0600。复制单个文件时先写临时文件再替换，前端 dist 整体更新，保留其他文件。
+- 初始化交互读取 MySQL 连接信息及初始化账户，密码通过隐藏输入和临时私有客户端配置文件传递。确认目标库无表或视图后，依序执行现有三个 SQL，出错即停止并共同清理凭据文件。初始化账户与后端运行账户分开；建库、账户授权及 DDL 失败后的空库重建仍由部署端负责。
+- 开发阶段使用两项定向测试，覆盖重复部署保留配置、显式替换、前端更新及其他文件保留，以及 SQL 失败后停止执行和凭据清理；验证完成后按用户要求删除该测试脚本。同步中英文根说明、SQL 用法及第 09／10 篇对应部署合同。
+
+### 15.2 实际检查
+
+| 检查                  | 实际结果                                                                                                                                                                                 |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Python 语法与定向测试 | py_compile 通过；两项 unittest 通过                                                                                                                                                      |
+| 默认部署              | 实际 --dest 命令以 release／动态模式构建 Rust 和前端，复制到含空格的临时目录；两端 --version 成功，SQL 字节与原文件一致，配置示例及实际配置齐全，权限符合约定                            |
+| 重复部署与静态选项    | 实际 --profile debug --kafka-link static 命令通过；编辑后的实际配置、其他文件及 web 同级文件保留，旧 dist 资源移除；readelf 确认两端动态产物依赖 librdkafka.so.1、静态产物均无该共享依赖 |
+| 独立数据库初始化      | 通过真实终端交互执行 --init-db，使用 MySQL 8.4.11 客户端及独立空测试库，结构版本 4、用户 1、两种语言和 104 个用例符合现有 SQL；过程无需部署配置，密码未出现在终端输出                    |
+| 非空库拒绝            | 对同一测试库再次运行 --init-db，以状态 1 拒绝，未开始执行初始化 SQL；验证后清理该独立库                                                                                                  |
+| 参数边界              | --init-db 与 --dest 或构建选项组合时以状态 2 拒绝；目标目录位于源码检出目录内时在构建前拒绝                                                                                              |
+| Rust 工程检查         | cargo clippy --workspace --all-targets --locked -- -D warnings 通过                                                                                                                      |
+
+部署脚本相关命令：
+
+```sh
+python3 -m py_compile scripts/deploy.py
+python3 scripts/deploy.py --dest /path/to/deployment
+python3 scripts/deploy.py --dest /path/to/deployment --profile debug --kafka-link static
+python3 scripts/deploy.py --init-db
+cargo clippy --workspace --all-targets --locked -- -D warnings
+```
+
+普通部署中的 Cargo 构建使用 --workspace --locked，前端使用 pnpm install --frozen-lockfile 和 pnpm build，后者包括类型检查。运行环境的 MySQL 客户端另行提供，脚本不自动安装依赖。前端构建仍报告已有的大 chunk 提示，构建成功，未在本任务调整前端分包。
+
+中英文根说明及第 10 篇设计／实施记录的 Prettier 检查通过，本地链接、既有标题编号、22 项任务标识、中英文命令及 Shell／TOML 示例检查通过，git diff --check 通过。SQL README 和第 09 篇全文存在既有格式差异，HEAD 原文经格式化比较同样存在差异；本轮仅检查新增段落格式，保留其余内容。
+
+本轮未改动 Rust、前端业务源码或 SQL 内容，未重跑完整 workspace／Kafka／Isolate 验收。真实检查覆盖 release／动态与 debug／静态两种部署组合；服务启动、反向代理配置和主机沙箱准备仍按既有部署说明执行。

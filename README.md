@@ -75,6 +75,22 @@ pnpm install --frozen-lockfile
 cp .env.example .env.local
 ```
 
+### Build and Deploy
+
+The [deployment script](scripts/deploy.py) requires Python 3.9 or newer. From the repository root, select either deployment or database initialization:
+
+```sh
+python3 scripts/deploy.py --dest /srv/acorn
+python3 scripts/deploy.py --dest /srv/acorn --profile debug --kafka-link static
+python3 scripts/deploy.py --init-db
+```
+
+Deployment defaults to `release` and dynamic librdkafka. It builds both Rust services with locked dependencies, installs frontend dependencies with the frozen lockfile, and builds the frontend before copying files. The destination must be outside the source checkout. Stop applications before updating an existing deployment.
+
+The destination contains `bin/acorn-backend`, `bin/acorn-worker`, `web/dist/`, both example and active TOML files under `config/`, the two scripts under `sql/`, and `examples/seed-user.sql`. Existing active configurations are preserved; `--backend-config /path/to/backend.toml` and `--worker-config /path/to/worker.toml` explicitly replace the corresponding files. New or replaced active configurations have mode `0600`. Frontend output is replaced on each deployment; other destination files are retained. Review the active configurations before starting services with the commands printed by the script. Runtime dependencies and the static server remain deployment responsibilities; static linkage applies only to librdkafka.
+
+`--init-db` is an independent interactive mode. It needs the MySQL 8.4 client in PATH and prompts for host, port, an existing empty database, initialization account, and hidden password. It uses the three repository SQL scripts in order, rejects databases containing tables or views, and stops on the first SQL error. It requires neither a destination nor a backend TOML file, and cannot be combined with deployment options. Passwords are supplied through a temporary private client option file that is removed on completion or error. Configure the backend runtime account separately; initialization failure handling follows the [SQL guide](sql/README.md#初始化).
+
 ## Quick Start
 
 This workflow starts one Worker, one backend, and a frontend development server locally on the default ports. Run backend and Worker commands from the repository root.

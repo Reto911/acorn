@@ -37,6 +37,14 @@ CREATE DATABASE appdb CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 
 ## 初始化
 
+可在源码仓库中使用[部署脚本](../scripts/deploy.py)的独立初始化模式：
+
+```sh
+python3 scripts/deploy.py --init-db
+```
+
+该模式只初始化数据库，交互读取 MySQL 主机、端口、已有空库名、初始化账户和密码，无需部署目录或 backend.toml。它要求 PATH 中有 MySQL 8.4 客户端，拒绝含表或视图的目标库，按上表顺序执行三个 SQL，任一步失败即停止。密码通过权限 `0600` 的临时客户端配置文件传给 mysql，结束或出错后清理；实际配置文件及后端运行账户密码另行准备。
+
 以下示例使用初始化账户，每条命令提示输入该账户密码。当前 MySQL 连接明确禁用 SSL：
 
 ```sh
