@@ -4,15 +4,16 @@ acorn-backend 是 Acorn 的 HTTP 后端，使用 Axum、Tokio 和 SQLx。它管�
 
 ## 功能与模块
 
-| 模块                      | 职责                                                     |
-| ------------------------- | -------------------------------------------------------- |
-| `http`                    | JSON API、分页筛选、请求限制和错误响应                   |
-| `problems`、`submissions` | 题目版本查询、幂等创建、提交详情和历史                   |
-| `scheduler`               | 有界待发队列及许可、Kafka 任务发布、事件持久化和审查交接 |
-| `database`                | MySQL 访问、短事务和条件状态更新                         |
-| `llm_review`              | 自动及手动审查、独立队列、模型调用和最新意见保存         |
-| `health`                  | 数据库与 Worker 共享采集、最近观测缓存                   |
-| `config`、`logging`       | TOML 配置和英文 stderr 日志                              |
+| 模块                      | 职责                                                       |
+| ------------------------- | ---------------------------------------------------------- |
+| `http`                    | JSON API、会话与 Origin 边界、分页筛选、请求限制和错误响应 |
+| `auth`                    | 账号输入校验、Argon2id 密码、双 LRU 内存会话和 Cookie      |
+| `problems`、`submissions` | 题目版本查询、幂等创建、提交详情和历史                     |
+| `scheduler`               | 有界待发队列及许可、Kafka 任务发布、事件持久化和审查交接   |
+| `database`                | MySQL 访问、短事务和条件状态更新                           |
+| `llm_review`              | 自动及手动审查、独立队列、模型调用和最新意见保存           |
+| `health`                  | 数据库与 Worker 共享采集、最近观测缓存                     |
+| `config`、`logging`       | TOML 配置和英文 stderr 日志                                |
 
 一个后端进程运行一个 Scheduler，可连接多个 Worker。每个提交固定创建时的题目版本，源码和测试数据随任务交给 Worker；提交 ID 同时作为 Worker Job ID。
 
@@ -28,7 +29,7 @@ mkdir -p "$HOME/.config/acorn"
 cp config/backend.example.toml "$HOME/.config/acorn/backend.toml"
 ```
 
-编辑配置，核对 MySQL 端点、库名、账户、用户 ID 和 Worker 地址，然后启动：
+编辑配置，核对 MySQL 端点、库名、账户、用户 ID、外部 `http.public_origin`、`http.cookie_secure` 和 Worker 地址，然后启动：
 
 ```sh
 read -r -s -p 'MySQL 密码：' MYSQL_PASSWORD
@@ -39,30 +40,37 @@ target/debug/acorn-backend --config "$HOME/.config/acorn/backend.toml"
 
 应用连接已初始化的 MySQL 8.4／InnoDB 数据库，只接受结构版本 4。启动检查版本及预置用户，缺少密码时明确失败。命令行也支持 `--help` 和 `--version`。
 
-预置开发账号为 `test`，显示名 `Test User`，密码为 `Acorn-Test-Only-123!`，SQL 保存对应 Argon2id 哈希。后端库提供账号读写、输入校验及密码哈希／验证能力；当前 HTTP 尚无注册、登录或会话接口，提交归属仍由 `test_user.user_id` 指定。
+预置开发账号为 `test`，显示名 `Test User`，密码为 `Acorn-Test-Only-123!`，SQL 保存对应 Argon2id 哈希。HTTP 提供注册、登录、当前身份和退出，注册成功后须手动登录。题目接口公开，提交及审查接口要求登录并匹配预期用户头，健康接口要求登录。提交归属仍由 `test_user.user_id` 指定；列表、详情和审查尚未按认证用户隔离，使用多个账号不会获得个人数据隔离。浏览器登录交互尚未接入，受保护操作先使用下述 HTTP 示例。
 
 ## 配置
 
 完整字段见 [backend.example.toml](../../config/backend.example.toml)。已有部署配置须删除 `scheduler.poll_interval_ms` 及 `grpc.submit_timeout_ms/get_timeout_ms/ack_timeout_ms`。
 
-| 配置节       | 主要设置                                     | 示例值                                                            |
-| ------------ | -------------------------------------------- | ----------------------------------------------------------------- |
-| `http`       | 监听地址、JSON 请求上限、默认及最大页长      | `127.0.0.1:8080`，512 KiB，20 / 100                               |
-| `database`   | 端点、库名、用户名、连接池上限及等待预算     | `127.0.0.1:3306`、`appdb`、4 个连接、5000 ms 取得等待、3 秒锁等待 |
-| `test_user`  | 所有提交的归属用户 ID                        | `1`                                                               |
-| `scheduler`  | 状态地址列表、待接纳容量、Kafka 发布重试间隔 | 128 个名额，1000 ms                                               |
-| `grpc`       | 状态 RPC 的消息发送及接收上限                | 16 MiB / 1 MiB                                                    |
-| `request`    | 源码、用例、原始载荷及单用例资源上限         | 源码 64 KiB，最多 128 个用例                                      |
-| `results`    | 编译诊断、stdout、stderr 和故障说明保留上限  | 前三项各 64 KiB，故障说明 512 字节                                |
-| `health`     | 每轮采集后的间隔、单项探测超时               | 5000 / 1000 ms                                                    |
-| `llm_review` | 审查开关、模型地址、凭据、并发和预算         | 默认关闭；详见下文                                                |
-| `logging`    | 日志过滤级别                                 | `info`                                                            |
+| 配置节       | 主要设置                                                  | 示例值                                                              |
+| ------------ | --------------------------------------------------------- | ------------------------------------------------------------------- |
+| `http`       | 监听地址、外部 Origin、Secure Cookie、JSON 请求上限及页长 | `127.0.0.1:8080`，`http://127.0.0.1:8080`，false，512 KiB，20 / 100 |
+| `auth`       | 每用户及全局会话容量                                      | 10 / 10000                                                          |
+| `database`   | 端点、库名、用户名、连接池上限及等待预算                  | `127.0.0.1:3306`、`appdb`、4 个连接、5000 ms 取得等待、3 秒锁等待   |
+| `test_user`  | 所有提交的归属用户 ID                                     | `1`                                                                 |
+| `scheduler`  | 状态地址列表、待接纳容量、Kafka 发布重试间隔              | 128 个名额，1000 ms                                                 |
+| `grpc`       | 状态 RPC 的消息发送及接收上限                             | 16 MiB / 1 MiB                                                      |
+| `request`    | 源码、用例、原始载荷及单用例资源上限                      | 源码 64 KiB，最多 128 个用例                                        |
+| `results`    | 编译诊断、stdout、stderr 和故障说明保留上限               | 前三项各 64 KiB，故障说明 512 字节                                  |
+| `health`     | 每轮采集后的间隔、单项探测超时                            | 5000 / 1000 ms                                                      |
+| `llm_review` | 审查开关、模型地址、凭据、并发和预算                      | 默认关闭；详见下文                                                  |
+| `logging`    | 日志过滤级别                                              | `info`                                                              |
 
 数据库密码由进程环境变量 `MYSQL_PASSWORD` 提供，TOML 只保存非秘密连接字段；正式程序不自动加载 `.env`。MySQL SSL 显式禁用。API、Scheduler、审查与健康采集共用连接池，每条新连接设置 utf8mb4_0900_bin、READ COMMITTED、严格模式及两类锁等待。取得连接的等待预算与查询、锁等待分别计量；模型和 Worker 网络等待不借用数据库连接。
 
 后端的任务、执行及结果预算须与所有 Worker 对齐。待接纳容量包含已预留、已排队和正在等待 Worker 接纳的提交；Worker 接纳后释放该名额。
 
-HTTP 和 gRPC 的访问范围由部署端配置。后端使用配置中的预置用户作为提交归属；浏览器通过同源反向代理访问 API，静态页面由前端部署服务提供。
+`http.public_origin` 必填，必须为规范 HTTP(S) Origin，不带路径、末尾斜线、凭据、查询或片段；写请求必须发送与其精确相同的 `Origin`。Vite 开发访问通常填写 `http://localhost:5173`，直接使用下述 HTTP 示例则填写 `http://127.0.0.1:8080`。反向代理部署填写浏览器访问的外部 Origin。
+
+`http.cookie_secure` 可省略，默认 false，使用 `acorn_session`；外部 HTTPS 部署设为 true，改用 `__Host-acorn_session` 并添加 Secure，代理到后端的连接可以是 HTTP。Cookie 均带 Path=/、HttpOnly、SameSite=Lax、Max-Age=86400，不设 Domain。有效认证请求同步续期服务端的 24 小时闲置期限及 Cookie；退出清除当前会话，重启清空所有会话。
+
+`[auth]` 可省略；`max_sessions_per_user` 默认 10，`max_sessions` 默认 10000，均须为正。新登录先清理过期项，再按个人和全局 LRU 淘汰最旧会话；容量满不拒绝登录。
+
+浏览器通过同源反向代理访问 API，静态页面由前端部署服务提供；后端不开放跨域凭据 CORS。gRPC 的访问范围仍由部署端配置。
 
 ### Kafka 客户端配置
 
@@ -94,22 +102,44 @@ Kafka 4.3.1 单 broker 的启动、topic 及首次消费组位点初始化见[�
 
 ## HTTP API
 
-| 方法 | 路径                                          | 用途                     |
-| ---- | --------------------------------------------- | ------------------------ |
-| GET  | `/api/v1/problems`                            | 已发布题目列表           |
-| GET  | `/api/v1/problems/{id}`                       | 最新题面、语言及资源限额 |
-| GET  | `/api/v1/problems/{id}/versions/{version_no}` | 指定已发布版本           |
-| POST | `/api/v1/submissions`                         | 创建提交                 |
-| GET  | `/api/v1/submissions`                         | 提交历史                 |
-| GET  | `/api/v1/submissions/{id}`                    | 判题及审查快照           |
-| POST | `/api/v1/submissions/{id}/review`             | 启动或重新审查           |
-| GET  | `/api/v1/health`                              | 本地状态和最近组件观测   |
+| 方法 | 路径                                          | 用途                           |
+| ---- | --------------------------------------------- | ------------------------------ |
+| POST | `/api/v1/auth/register`                       | 注册，返回用户但不自动登录     |
+| POST | `/api/v1/auth/login`                          | 登录并设置 Cookie              |
+| GET  | `/api/v1/auth/me`                             | 当前用户，未登录返回 user=null |
+| POST | `/api/v1/auth/logout`                         | 退出当前会话，重复退出成功     |
+| GET  | `/api/v1/problems`                            | 已发布题目列表                 |
+| GET  | `/api/v1/problems/{id}`                       | 最新题面、语言及资源限额       |
+| GET  | `/api/v1/problems/{id}/versions/{version_no}` | 指定已发布版本                 |
+| POST | `/api/v1/submissions`                         | 创建提交                       |
+| GET  | `/api/v1/submissions`                         | 提交历史                       |
+| GET  | `/api/v1/submissions/{id}`                    | 判题及审查快照                 |
+| POST | `/api/v1/submissions/{id}/review`             | 启动或重新审查                 |
+| GET  | `/api/v1/health`                              | 本地状态和最近组件观测         |
+
+### 登录与请求边界
+
+注册和登录接受 `username`、`password`，注册还可提供 `display_name`；公共用户只包含 `id`、`username`、`display_name`。用户名去掉首尾 ASCII 空白后为 3–32 位 ASCII 字母数字或下划线，并统一小写；密码为 8–128 个 Unicode 标量值、最多 512 UTF-8 字节，禁止空白。完整输入规则见[用户设计](../../docs/11-user-authentication-design.md#31-users-与全新初始化)。
+
+以下示例沿用默认外部 Origin 和开发账号，返回 `user.id=1`：
+
+```sh
+ACORN_COOKIE_JAR=/tmp/acorn-cookies.txt
+curl --fail-with-body -c "$ACORN_COOKIE_JAR" http://127.0.0.1:8080/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -H 'Origin: http://127.0.0.1:8080' \
+  -d '{"username":"test","password":"Acorn-Test-Only-123!"}'
+curl --fail-with-body -b "$ACORN_COOKIE_JAR" -c "$ACORN_COOKIE_JAR" http://127.0.0.1:8080/api/v1/auth/me
+```
+
+所有提交路径要求 Cookie 和与当前会话用户一致的 `X-Acorn-User-Id`；健康查询只要求 Cookie。注册、登录、退出、提交和手动审查的 JSON POST 还要求精确匹配的 `Origin`。退出发送 `{}`，有效会话还须携带预期用户头。认证和受保护响应带 `Cache-Control: no-store`，命令行用 `-b` 读取、`-c` 保存续期 Cookie。
 
 列表使用 `limit`、`offset` 分页，返回 `items`、`limit`、`offset`。提交历史支持 `problem_id`、`state`、`verdict` 和 `review_status` 筛选，多个条件取交集：
 
 ```sh
 curl --fail-with-body 'http://127.0.0.1:8080/api/v1/problems?limit=20&offset=0'
-curl --fail-with-body 'http://127.0.0.1:8080/api/v1/submissions?problem_id=1&state=finished&verdict=AC'
+curl --fail-with-body -b "$ACORN_COOKIE_JAR" -c "$ACORN_COOKIE_JAR" \
+  -H 'X-Acorn-User-Id: 1' 'http://127.0.0.1:8080/api/v1/submissions?problem_id=1&state=finished&verdict=AC'
 ```
 
 创建提交需要 JSON 字段 `problem_id`、`language_id` 和 `source`，以及 UUID 格式的 `Idempotency-Key` 请求头。同键同内容返回原提交；同键不同内容返回 `409 IdempotencyConflict`。客户端丢失响应时，可用原键与原内容重传。
@@ -131,7 +161,9 @@ print(json.dumps({
 }))
 PY
 ACORN_REQUEST_KEY=$(python3 -c 'import uuid; print(uuid.uuid4())')
-curl --fail-with-body -i http://127.0.0.1:8080/api/v1/submissions \
+curl --fail-with-body -i -b "$ACORN_COOKIE_JAR" -c "$ACORN_COOKIE_JAR" http://127.0.0.1:8080/api/v1/submissions \
+  -H 'Origin: http://127.0.0.1:8080' \
+  -H 'X-Acorn-User-Id: 1' \
   -H 'Content-Type: application/json' \
   -H "Idempotency-Key: $ACORN_REQUEST_KEY" \
   --data-binary @/tmp/acorn-request.json
@@ -151,7 +183,7 @@ curl --fail-with-body -i http://127.0.0.1:8080/api/v1/submissions \
 
 ### 错误响应
 
-错误响应形如 `{"error":{"code":"QueueFull","message":"The submission queue is full."}}`。使用 `error.code` 区分错误；`QueueFull` 表示待接纳容量已满，`BackendStopping` 表示服务正在停止接纳。完整字段和错误码见 [HTTP 契约](../../docs/03-backend-design.md#5-http-接口)。
+错误响应形如 `{"error":{"code":"QueueFull","message":"The submission queue is full."}}`。使用 `error.code` 区分错误；`QueueFull` 表示待接纳容量已满，`BackendStopping` 表示服务正在停止接纳。`401 AuthenticationRequired` 表示会话无效，`401 InvalidCredentials` 表示登录凭据不匹配，均携带 `WWW-Authenticate: Session realm="acorn"`；`409 UsernameTaken` 表示重名，`409 SessionChanged` 表示预期用户头缺失或不符，`403 RequestOriginRejected` 表示写请求来源缺失或不符。完整字段和错误码见 [HTTP 契约](../../docs/03-backend-design.md#5-http-接口)。
 
 ## LLM 代码审查
 
@@ -184,9 +216,12 @@ max_response_bytes = 1_048_576
 
 ```sh
 ACORN_SUBMISSION_ID='<实际 submission_id>'
-curl --fail-with-body "http://127.0.0.1:8080/api/v1/submissions/$ACORN_SUBMISSION_ID"
-curl --fail-with-body -i \
+curl --fail-with-body -b "$ACORN_COOKIE_JAR" -c "$ACORN_COOKIE_JAR" \
+  -H 'X-Acorn-User-Id: 1' "http://127.0.0.1:8080/api/v1/submissions/$ACORN_SUBMISSION_ID"
+curl --fail-with-body -i -b "$ACORN_COOKIE_JAR" -c "$ACORN_COOKIE_JAR" \
   -X POST "http://127.0.0.1:8080/api/v1/submissions/$ACORN_SUBMISSION_ID/review" \
+  -H 'Origin: http://127.0.0.1:8080' \
+  -H 'X-Acorn-User-Id: 1' \
   -H 'Content-Type: application/json' \
   -d '{"expected_review_id":null}'
 ```
@@ -196,14 +231,21 @@ curl --fail-with-body -i \
 审查状态筛选示例：
 
 ```sh
-curl --fail-with-body 'http://127.0.0.1:8080/api/v1/submissions?review_status=DOUBTFUL&limit=20'
+curl --fail-with-body -b "$ACORN_COOKIE_JAR" -c "$ACORN_COOKIE_JAR" \
+  -H 'X-Acorn-User-Id: 1' 'http://127.0.0.1:8080/api/v1/submissions?review_status=DOUBTFUL&limit=20'
 ```
 
 策略、输出和预算细节见 [LLM 审查设计](../../docs/08-llm-code-review-design.md)。
 
 ## 健康观测与停机
 
-`GET /api/v1/health` 返回提交接纳条件、Scheduler 状态及名额、数据库读取、Kafka 两个 topic 的 metadata 和 Worker 最近探测结果。探测由后台共享采集执行，GET 读取缓存；默认每轮结束后等待 5 秒，单项超时 1 秒，观测达到 12 秒时标为 `stale`。
+`GET /api/v1/health` 要求有效会话，沿用登录示例的 Cookie jar 调用：
+
+```sh
+curl --fail-with-body -b "$ACORN_COOKIE_JAR" -c "$ACORN_COOKIE_JAR" http://127.0.0.1:8080/api/v1/health
+```
+
+响应返回提交接纳条件、Scheduler 状态及名额、数据库读取、Kafka 两个 topic 的 metadata 和 Worker 最近探测结果。探测由后台共享采集执行，GET 读取缓存；默认每轮结束后等待 5 秒，单项超时 1 秒，观测达到 12 秒时标为 `stale`。
 
 Ctrl-C 或 SIGTERM 停止新接纳、发布和审查，等待已登记创建交接后，在共同消息预算内收尾当前发送、事件持久化和消费者 RAII 释放，再关闭 HTTP、健康采集和数据库；独立成员观测在停止接纳后结束。停机期间查询继续可用，不等待远程 Worker 判题。重启只重交 queued，恢复 dispatching/running 等待；旧 PENDING 审查保存为 FAILED/ReviewInterrupted。SDK 析构在阻塞线程执行，超时不会取消底层析构，进程退出仍可能等待它。
 

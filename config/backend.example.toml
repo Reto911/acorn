@@ -1,8 +1,15 @@
 [http]
 listen = "127.0.0.1:8080"
+# Browser-facing Origin; use the external HTTPS Origin behind a TLS proxy.
+public_origin = "http://127.0.0.1:8080"
+cookie_secure = false
 max_request_bytes = 524_288
 default_page_size = 20
 max_page_size = 100
+
+[auth]
+max_sessions_per_user = 10
+max_sessions = 10_000
 
 [database]
 endpoint = "127.0.0.1:3306"

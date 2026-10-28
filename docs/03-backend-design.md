@@ -8,11 +8,11 @@ MySQL 的连接、配置、事务和故障合同以[迁移设计](09-mysql-migra
 
 后端是单个 Rust 进程，内含 HTTP API、Scheduler 和数据库访问模块。前端通过 HTTP JSON 查询题目、提交单文件源码并轮询结果；Scheduler 通过 Kafka 发布任务和消费 Worker 事件；gRPC 仅用于只读状态观测。
 
-LLM 增量在同一进程增加与 Scheduler 平行的 llm_review 模块，机器判题后按固定题目版本自动触发，或由页面手动启动、重跑。审查只保存最近一次意见，不改变机器判题状态、verdict 或终态详情；请求沿用配置测试用户和既有访问范围，不新增管理员角色校验。
+LLM 增量在同一进程增加与 Scheduler 平行的 llm_review 模块，机器判题后按固定题目版本自动触发，或由页面手动启动、重跑。审查只保存最近一次意见，不改变机器判题状态、verdict 或终态详情；HTTP 请求要求登录及预期用户校验，业务查询暂仍沿用配置测试用户和既有数据范围，不新增管理员角色校验。
 
-首版服务于 C 与 Python 3 判题闭环。题目、测试数据及一个测试用户由部署端本地预置；后端从配置读取该用户的 `user_id`，所有新提交归属于此用户。当前不启用登录、会话、角色鉴权或用户管理接口，请求不能覆盖提交归属。
+服务于 C 与 Python 3 判题闭环，并提供用户名密码注册、登录、当前身份和退出。题目及测试数据由部署端本地预置；题目 HTTP 查询公开，提交与手动审查要求会话及预期用户匹配，健康查询要求登录。所有账号功能一致，不启用角色或状态差异及用户管理。业务创建暂仍读取配置测试用户的 `user_id`，列表、详情和审查尚未实施个人归属过滤；该变更遵守[用户设计](11-user-authentication-design.md#52-对现有业务的改动)。
 
-前后端完全分离，后端仅提供 API，不托管前端静态文件，也不实现 CORS 中间件。HTTP 访问边界和浏览器跨域响应由部署端通过防火墙、反向代理及路由配置安排。
+前后端完全分离，后端仅提供 API，不托管前端静态文件，也不实现 CORS 中间件。浏览器与 API 通过同源代理部署；JSON POST 校验配置的外部 Origin，不开放跨域凭据 CORS。gRPC 和部署网络边界由防火墙、反向代理及路由配置安排。
 
 浏览器页面、Monaco 编辑、本地草稿和提交交互见[前端 GUI 设计](05-frontend-design.md)，实施见[前端开发计划](06-frontend-development-plan.md)。健康观测通过数据库读取、Kafka metadata、Worker 状态 RPC、后端共享采集及只读 HTTP 快照提供页面数据；入口监督、停机、健康页面和过期警告遵守[健康观测设计](07-health-observation-design.md)。
 
@@ -58,8 +58,8 @@ API 与 Scheduler 通过进程内调用交接任务；Kafka 负责跨进程任�
 
 | 模块                       | 职责                                                                                                                                                                                         |
 | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `http`                     | 路由、HTTP 请求与响应结构、请求大小限制、状态码和错误响应转换                                                                                                                                |
-| `auth`                     | 注册／登录共用的输入校验、公共用户身份和通过 spawn_blocking 执行的 Argon2id 哈希与验证；内存 Session 和认证接口遵守[用户设计](11-user-authentication-design.md)                              |
+| `http`                     | 路由、注册／登录接口、会话与预期用户／Origin 校验、HTTP DTO、请求大小限制、状态码和错误转换                                                                                                  |
+| `auth`                     | 注册／登录输入校验、公共用户身份、spawn_blocking Argon2id 哈希与验证、双 LRU 内存 Session 及统一 Cookie 策略；遵守[用户设计](11-user-authentication-design.md)                               |
 | `problems`                 | 查询已发布题目的最新版本、题面和语言限额                                                                                                                                                     |
 | `submissions`              | 创建幂等、固定版本、校验请求、保存源码、将任务交给 Scheduler、查询历史与结果                                                                                                                 |
 | `scheduler`                | 有界本地队列及许可、Kafka 任务发布、事件持久化和审查交接                                                                                                                                     |
@@ -94,7 +94,7 @@ llm_review 复用该共享池和 Tokio runtime。读取审查输入后先归还�
 
 服务连接 TOML 指定的端点、库名及用户，以进程环境变量 MYSQL_PASSWORD 提供密码，不自动加载 .env。启动只读取 schema_version 中 id=1 的版本 4，并检查配置用户存在；缺少密码、缺少版本行、版本不符或用户不存在均拒绝启动，已建立的池在检查失败后关闭。应用不建库、建表或自动升级。
 
-部署预置的测试用户必须存在，题目按数据库设计在事务内发布，包含至少一个用例和允许语言的正值预算。开发用户 test 的预置密码为 Acorn-Test-Only-123!，脚本保存由正式密码实现生成的 Argon2id PHC。database/users 提供账号创建和按用户名查询，auth 提供输入校验及密码计算；凭据查询返回后先释放连接，再进入密码验证。当前 HTTP 尚无认证路由，业务仍使用配置测试用户，完整登录与会话合同见[用户设计](11-user-authentication-design.md)。
+部署预置的测试用户必须存在，题目按数据库设计在事务内发布，包含至少一个用例和允许语言的正值预算。开发用户 test 的预置密码为 Acorn-Test-Only-123!，脚本保存由正式密码实现生成的 Argon2id PHC。database/users 提供账号创建和按用户名查询，auth 提供输入校验及密码计算；凭据查询返回后先释放连接，再进入密码验证。HTTP 认证接口复用这些能力；会话存储在同一 HTTP 路由实例共享的进程内存中，认证不逐请求查 users。业务归属仍使用配置测试用户，完整登录、会话及个人隔离合同见[用户设计](11-user-authentication-design.md)。
 
 后端仍验证语言、用例数量、数据大小和限额：源码按 UTF-8 编码后的长度计量；输入、期望输出及总载荷按原始字节计量。HTTP 请求体、Kafka 消息和原始任务载荷各有独立上限。
 
@@ -116,6 +116,10 @@ llm_review 复用该共享池和 Tokio runtime。读取审查输入后先归还�
 
 | 方法与路径                                        | 行为                                                                                                                                                                     |
 | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `POST /api/v1/auth/register`                      | 校验并创建账号，201 返回 user，不自动登录                                                                                                                                |
+| `POST /api/v1/auth/login`                         | 200 返回 user，替换浏览器旧会话并设置新 Cookie                                                                                                                           |
+| `GET /api/v1/auth/me`                             | 200 返回当前 user，未登录为 null                                                                                                                                         |
+| `POST /api/v1/auth/logout`                        | 接受 JSON 空对象，200 返回 user=null，清除当前会话，重复退出成功                                                                                                         |
 | `GET /api/v1/problems`                            | 返回已发布题目列表，只展示最新版本                                                                                                                                       |
 | `GET /api/v1/problems/{id}`                       | 返回最新版本的题号、版本号、标题、题面和可提交语言及限额                                                                                                                 |
 | `GET /api/v1/problems/{id}/versions/{version_no}` | 返回指定已发布版本的同类信息；GUI 结果页按提交固定版本查询，答题页仍取最新版本                                                                                           |
@@ -124,6 +128,10 @@ llm_review 复用该共享池和 Tokio runtime。读取审查输入后先归还�
 | `GET /api/v1/submissions/{id}`                    | 返回提交身份、固定版本、语言、业务状态、判题结论、终态详情与时间戳                                                                                                       |
 | `GET /api/v1/submissions`                         | 返回配置测试用户的提交历史，可按题号、机器状态和 verdict 筛选；LLM 增量新增 review_status 筛选                                                                           |
 | `GET /api/v1/health`                              | 读取本地接纳、Scheduler 及共享数据库与 Worker 观测缓存，返回 `200` 和 `Cache-Control: no-store`；字段见[健康契约](07-health-observation-design.md#5-http-契约与可见范围) |
+
+认证路由由[authentication 模块](../crates/backend/src/http/authentication.rs)组合明确的访问分组：题目公开；健康要求会话；所有 submissions 路径要求会话及单个 `X-Acorn-User-Id` 与当前 user.id 相同；有效会话退出也要求该头。认证、个人及健康响应使用 `Cache-Control: no-store`。会话检查、Origin 和预期用户校验先于业务参数提取、数据库查询或接纳；用户头仅表达页面预期身份，不授予身份。
+
+注册、登录、退出、提交及手动审查的 JSON POST 必须携带单个与 `http.public_origin` 精确匹配的 `Origin`，缺失、null 或不匹配拒绝。注册不创建 Session，登录失败保留原会话；auth/me 无需预期用户头。公共用户只返回 id、username、display_name。详细输入、Cookie、双 LRU、24 小时闲置续期及容量淘汰规则见[用户设计第 3–5 节](11-user-authentication-design.md#3-用户数据与密码)。
 
 健康 GET 不执行 SQL 或 Worker RPC；`failed`、`stale`、`full` 和 `stopping` 均作为响应中的组件状态，组装失败沿用 `500 InternalError`。返回后端 UTC 组装时间及各项实际完成时间，不包含内部地址、数据库路径或原始异常。
 
@@ -142,6 +150,9 @@ LLM 增量在最新及显式版本的题目详情新增 review_mode，提交历�
 ```http
 POST /api/v1/submissions
 Content-Type: application/json
+Origin: http://127.0.0.1:8080
+Cookie: acorn_session=<登录取得的 token>
+X-Acorn-User-Id: 1
 Idempotency-Key: 7b5f28d3-51a4-463c-98a4-0a11815d8d46
 ```
 
@@ -192,6 +203,11 @@ HTTP `error.code` 如下，LLM 新增项已由 L04 接入；增加错误码时�
 
 | `error.code`                | HTTP 状态码 | 条件                                                                                 |
 | --------------------------- | ----------- | ------------------------------------------------------------------------------------ |
+| `AuthenticationRequired`    | `401`       | 受保护请求没有有效会话                                                               |
+| `InvalidCredentials`        | `401`       | 登录用户名不存在或密码不匹配                                                         |
+| `UsernameTaken`             | `409`       | 规范化用户名已存在                                                                   |
+| `RequestOriginRejected`     | `403`       | JSON 写请求 Origin 缺失、重复或不匹配配置                                            |
+| `SessionChanged`            | `409`       | 个人请求或有效会话退出的预期用户头缺失、重复或不匹配                                 |
 | `InvalidRequest`            | `400`       | JSON、路径或查询参数格式错误，必填值缺失、源码为空、出现未允许字段或分页与筛选值无效 |
 | `InvalidIdempotencyKey`     | `400`       | 创建请求缺失 `Idempotency-Key`，或键不符合 UUID 格式                                 |
 | `UnsupportedMediaType`      | `415`       | POST 请求未使用 JSON Content-Type                                                    |
@@ -214,6 +230,8 @@ HTTP `error.code` 如下，LLM 新增项已由 L04 接入；增加错误码时�
 | `MethodNotAllowed`          | `405`       | 路径存在但不支持该 HTTP 方法                                                         |
 | `InternalError`             | `500`       | 数据库访问、预置任务数据或当前操作发生内部错误                                       |
 
+401 响应同时携带 `WWW-Authenticate: Session realm="acorn"`；凭据由 Cookie 提供。认证与受保护响应不缓存；已验证会话请求同步更新服务端最后活动时间并重设 24 小时 Cookie，登录和退出分别选择新建或删除 Cookie。
+
 已有排队提交因没有名额而无法再次交接时，`QueueFull` 的 `error` 对象额外携带 `submission_id`，指向原提交；其他错误省略该字段。内部 SQL、宿主路径和原始传输异常只写日志，不直接用作 `error.code` 或 `message`。框架及中间件的错误响应也遵守本节。
 
 数据库操作失败是否同时触发后端退出，按[第 8.3 节](#83-数据库及后台故障)区分普通只读失败、关键写入失败与严重存储故障。
@@ -228,7 +246,7 @@ llm_review 在短接纳操作开始时登记其生命周期，复用创建服务
 
 ## 6. 提交创建与进程内交接
 
-1. 校验 HTTP 请求、幂等键和源码大小，用配置中的测试用户确定归属。
+1. HTTP 层先校验会话、Origin 和预期用户，再校验幂等键和源码大小；当前创建服务仍用配置测试用户确定归属，个人归属接入遵守第 11 篇。
 2. 先查 `(user_id, create_request_key)`。已有记录按既定内容比较规则返回；只有仍为 `queued` 且未在内存中的记录需要重新交接。
 3. 新建前只读独立 Worker 组成员缓存；新鲜零成员或 unknown（尚无样本、查询失败、过期）返回 `503 WorkersUnavailable`，不创建 Submission。成员为正时原子预留一个待接纳名额，满时返回 `503 QueueFull`。已有同键记录的返回或 queued 重新交接不受成员限制。预留只在内存中记录，不是数据库记录或 Worker 执行资源。
 4. 在 READ COMMITTED 短事务中再次查重。确实为新提交时，选取最新版本，装配并验证测试数据和限额，生成 UUID，插入 `queued` 记录和源码；仅当 INSERT 返回 1062 时回滚并在新短事务读取同一用户和幂等键，共用已有记录的内容比较和固定版本装配。同内容返回原记录并释放多余预留，不同内容返回冲突；键不存在时仍报告原存储错误，不再次 INSERT。
@@ -318,7 +336,8 @@ Scheduler 后台任务意外退出交给程序入口记录错误并触发故障�
 
 | 类别         | 配置内容                                                                                                                                                                           |
 | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| HTTP         | 监听地址、请求体上限、列表默认及最大页长                                                                                                                                           |
+| HTTP         | 监听地址、必填规范外部 `public_origin`、默认 false 的 `cookie_secure`、请求体上限、列表默认及最大页长                                                                              |
+| 会话         | 可缺省的 `[auth]`：`max_sessions_per_user=10`、`max_sessions=10000`，均须为正；会话闲置期限固定 24 小时                                                                            |
 | 数据库       | 端点、库名、用户名、连接池上限、连接取得与锁等待预算；密码从进程 MYSQL_PASSWORD 读取                                                                                               |
 | 测试用户     | 已预置的 `user_id`                                                                                                                                                                 |
 | Scheduler    | 待接纳上限、状态观测地址列表、Kafka 发布重试间隔                                                                                                                                   |
@@ -328,9 +347,11 @@ Scheduler 后台任务意外退出交给程序入口记录错误并触发故障�
 | 任务校验     | 源码、用例数、单个输入和答案、合计字节、运行时间及内存的允许上限                                                                                                                   |
 | 结果与日志   | 有界诊断及输出约定、日志级别                                                                                                                                                       |
 
+`http.public_origin` 必须为规范 HTTP(S) Origin，不含路径、末尾斜线、凭据、查询或片段。按浏览器访问的外部地址配置，开发代理例如 `http://localhost:5173`；`cookie_secure` 按外部协议选择，反向代理以 HTTP 连接后端不影响其开启。默认 HTTP Cookie 名为 acorn_session，开启 Secure 后为 __Host-acorn_session；统一 Path=/、HttpOnly、SameSite=Lax，不设 Domain。后端退出或重启不保存和恢复 Session。
+
 API 上限与部署的 Worker 规约对齐，Base64 结果和 JSON 请求开销单独计量。配置不从 Worker 动态发现，不协商能力，不自动放宽限额。
 
-日志统一为英文、可读的单行文本，写入 stderr；终端自动启用 ANSI 颜色，重定向输出纯文本。记录提交 ID、topic/partition/offset、操作和错误原因。创建、分派、机器终态保存、成功审查和停机记录为 info，审查失败为 warn。HTTP 请求及响应访问记录统一为 debug，包含轮询和健康查询；HTTP 服务端失败仍为 error。正常状态观测为 debug，健康与成员观测、临时消息故障仅在首次失败或错误类别变化时记录 warn，恢复为 info，分别遵守第 07／10 篇。数据库业务操作与后台故障保留 error；周期性数据库健康读取的普通失败由健康缓存统一记录，严重存储错误仍立即报告并触发原有监督。日志不输出完整源码、测试数据或无界程序输出。
+日志统一为英文、可读的单行文本，写入 stderr；终端自动启用 ANSI 颜色，重定向输出纯文本。记录提交 ID、topic/partition/offset、操作和错误原因。创建、分派、机器终态保存、成功审查和停机记录为 info，审查失败为 warn。HTTP 请求及响应访问记录统一为 debug，包含轮询和健康查询；HTTP 服务端失败仍为 error。正常状态观测为 debug，健康与成员观测、临时消息故障仅在首次失败或错误类别变化时记录 warn，恢复为 info，分别遵守第 07／10 篇。数据库业务操作与后台故障保留 error；周期性数据库健康读取的普通失败由健康缓存统一记录，严重存储错误仍立即报告并触发原有监督。日志不输出密码、Cookie、认证正文、完整源码、测试数据或无界程序输出。
 
 LLM 配置已由 L02 接入后端 TOML 读取和启用校验，正式程序不加载开发用 .env。客户端构造不发启动探测；L03 已在入口创建和监督审查服务，enabled=true 时按题目固定版本策略自动审查，题目默认 DISABLED。配置 Debug 隐藏密钥和 endpoint，TOML 解析错误只报告字节位置，不回显配置原文。审查日志字段和保密边界遵守第 08 篇第 9、11 节；满足自动门槛但服务未启用时保存 FAILED/ReviewUnavailable，停机时优先使用 ReviewInterrupted；L04 的手动请求通过同一服务检查可用及停止边界。
 

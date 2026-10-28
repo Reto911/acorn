@@ -135,12 +135,19 @@ by_user: HashMap<UserId, LRU<Token, ()>>
 
 ### 4.2 Cookie、同源与 CSRF
 
-保持现有前端与 API 同源代理部署。增加布尔配置 http.cookie_secure，默认 false，省略时也按 false 处理：
+保持现有前端与 API 同源代理部署。http.public_origin 必填，必须为规范 HTTP(S) Origin，不含路径、末尾斜线、凭据、查询或片段；写请求按该字符串精确比较。布尔配置 http.cookie_secure 默认 false，省略时也按 false 处理：
 
 ```toml
 [http]
+public_origin = "http://127.0.0.1:8080"
 cookie_secure = false
+
+[auth]
+max_sessions_per_user = 10
+max_sessions = 10_000
 ```
+
+[auth] 及其中容量字段可省略，使用上述默认值；两个容量均须为正。经 Vite 访问时 public_origin 使用实际浏览器 Origin，例如 http://localhost:5173，主机名和端口须完全一致。HTTP 命令行示例按所选配置发送 Origin。
 
 使用有效期为 24 小时的持久 Cookie，Max-Age 为 86400 秒。默认配置下的示例如下：
 
@@ -193,7 +200,7 @@ HttpOnly 禁止页面脚本直接读取 Cookie，Secure 要求浏览器通过 HT
 | 提交详情         | HTTP 专用读取在同一 SQL 使用 id 与 user_id，避免查到其他用户详情再由页面隐藏                                         |
 | 手动审查         | 将 user_id 传入独立短操作；接纳事务的 SELECT FOR UPDATE 同时匹配 id 与 user_id，在读取已有审查和状态之前完成归属限制 |
 | Kafka 与自动审查 | 继续以提交 ID 处理可信内部任务，不依赖浏览器 Session；重启恢复覆盖全部用户，不按当前登录者筛选                       |
-| 健康查询         | 登录后可查；所有用户一致，不引入管理员检查                                                                           |
+| 健康查询         | 登录后可查，不要求 X-Acorn-User-Id；所有用户一致，不引入管理员检查                                                   |
 
 HTTP 的用户限定查询与内部 Scheduler／审查查询明确区分命名和调用入口。Worker、Kafka 消息和模型输入无需携带 Session、密码或新的用户信息。
 

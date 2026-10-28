@@ -1,5 +1,8 @@
 //! Shared account input rules and blocking Argon2id password operations.
 
+pub(crate) mod cookie;
+pub(crate) mod sessions;
+
 use argon2::{
     Algorithm, Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier, Version,
     password_hash::{self, SaltString},
@@ -14,6 +17,13 @@ pub struct User {
     pub username: String,
     /// Plain display name with no permission meaning.
     pub display_name: String,
+}
+
+/// Immutable identity accepted at the HTTP boundary, independent of later session changes.
+#[derive(Clone)]
+pub struct AuthenticatedUser {
+    /// Account resolved from a valid server-side session.
+    pub user: User,
 }
 
 /// Validated registration data; password contents are never formatted or serialized.

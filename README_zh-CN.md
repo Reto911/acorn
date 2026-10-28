@@ -6,12 +6,15 @@ Acorn 是支持 C 和 Python 3 的单文件源码判题系统，提供浏览器�
 
 ## 功能
 
-- 浏览题目，在 Monaco 编辑器中编写 C 或 Python 代码，按题目和语言保存本地草稿。
+- 公开浏览题目，在 Monaco 编辑器中编写 C 或 Python 代码，按题目和语言保存本地草稿。
+- 通过 HTTP 注册、登录、查询当前身份和退出，使用后端内存会话与持久 Cookie。
 - 在 Isolate 沙箱中编译、执行并比较输出，支持 CPU 时间、墙钟时间、内存、进程数、输出和磁盘限额。
 - 通过多个 Worker 并行处理不同提交，保存判题结果、编译诊断和首个失败用例的输出。
 - 查询提交历史，按题目、执行状态、判题结论和审查状态筛选；历史结果关联实际判题的题目版本。
 - 按题目策略自动调用 LLM，或手动启动、重新审查，查看针对硬编码、猜测和规避实现的审查意见。
-- 在系统状态页面查看后端接纳条件、调度队列、数据库和 Worker 的最近观测。
+- 登录后查询后端接纳条件、调度队列、数据库和 Worker 的最近观测。
+
+浏览器当前可公开浏览题目和编辑代码；登录交互接入前，受保护功能先通过 HTTP API 使用。创建提交仍使用配置测试用户，个人归属过滤属于下一步实施，因此当前登录只提供访问边界，尚未隔离不同账号的提交数据。
 
 ## 项目结构
 
@@ -103,7 +106,7 @@ cp config/worker.example.toml "$HOME/.config/acorn/worker.toml"
 cp config/backend.example.toml "$HOME/.config/acorn/backend.toml"
 ```
 
-编辑 `worker.toml`，核对 `sandbox.executable`、`languages.c.compiler` 和 `languages.python.interpreter`，为 `sandbox.box_id` 选择本机空闲且专用于该 Worker 的 ID。后端示例配置连接 `http://127.0.0.1:50051`，数据库由 `database.endpoint`、`name` 和 `username` 指定。
+编辑 `worker.toml`，核对 `sandbox.executable`、`languages.c.compiler` 和 `languages.python.interpreter`，为 `sandbox.box_id` 选择本机空闲且专用于该 Worker 的 ID。后端示例配置连接 `http://127.0.0.1:50051`，数据库由 `database.endpoint`、`name` 和 `username` 指定。下述 HTTP 直连示例保留 `http.public_origin="http://127.0.0.1:8080"`；若选择其他外部 Origin，每个写请求也须发送该精确值。浏览器经开发代理发送写请求时应改为实际浏览器 Origin，例如 `http://localhost:5173`，主机名及端口须完全一致。
 
 ### 初始化数据库
 
@@ -155,13 +158,23 @@ pnpm dev
 
 ### 提交第一份代码
 
-打开[题目列表](http://localhost:5173/problems)，进入“两数求和（A + B）”，选择 C 或 Python 3，粘贴 [C 样例](examples/submissions/a-plus-b.c)或 [Python 样例](examples/submissions/a-plus-b.py)，点击“提交代码”。结果页自动轮询，正确样例得到 `AC`；“提交历史”可以重新打开结果。
+打开[题目列表](http://localhost:5173/problems)，阅读“两数求和（A + B）”并编辑 [C 样例](examples/submissions/a-plus-b.c)或 [Python 样例](examples/submissions/a-plus-b.py)。浏览器登录及受保护请求尚待接入，当前先使用预置开发账号 `test` / `Acorn-Test-Only-123!` 通过 HTTP 登录，再用响应中的用户 ID 提交（预置用户为 `1`）：
 
-也可以通过 HTTP 提交：
+```sh
+ACORN_COOKIE_JAR=/tmp/acorn-cookies.txt
+curl --fail-with-body -c "$ACORN_COOKIE_JAR" http://127.0.0.1:8080/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -H 'Origin: http://127.0.0.1:8080' \
+  -d '{"username":"test","password":"Acorn-Test-Only-123!"}'
+```
+
+个人请求同时携带 Cookie 和页面预期用户身份：
 
 ```sh
 ACORN_REQUEST_KEY=$(python3 -c 'import uuid; print(uuid.uuid4())')
-curl -i http://127.0.0.1:8080/api/v1/submissions \
+curl -i -b "$ACORN_COOKIE_JAR" -c "$ACORN_COOKIE_JAR" http://127.0.0.1:8080/api/v1/submissions \
+  -H 'Origin: http://127.0.0.1:8080' \
+  -H 'X-Acorn-User-Id: 1' \
   -H 'Content-Type: application/json' \
   -H "Idempotency-Key: $ACORN_REQUEST_KEY" \
   -d '{"problem_id":1,"language_id":"python","source":"a,b=map(int,input().split());print(a+b)\n"}'
@@ -171,32 +184,39 @@ curl -i http://127.0.0.1:8080/api/v1/submissions \
 
 ```sh
 ACORN_SUBMISSION_ID='<响应中的 submission_id>'
-curl --fail-with-body "http://127.0.0.1:8080/api/v1/submissions/$ACORN_SUBMISSION_ID"
+curl --fail-with-body -b "$ACORN_COOKIE_JAR" -c "$ACORN_COOKIE_JAR" \
+  -H 'X-Acorn-User-Id: 1' "http://127.0.0.1:8080/api/v1/submissions/$ACORN_SUBMISSION_ID"
 ```
 
 重复发送同一次请求时保留原幂等键和内容，主动创建新提交时生成新键。更多调用示例见[后端说明](crates/backend/README.md#http-api)。
 
 ## 配置
 
-后端与 Worker 均通过 `--config <PATH>` 读取 TOML，修改后重启生效。所有提交归属于后端 `test_user.user_id` 指定的预置用户。HTTP 和 gRPC 未内置鉴权，部署时通过反向代理或防火墙限制访问。
+后端与 Worker 均通过 `--config <PATH>` 读取 TOML，修改后重启生效。题目 HTTP 接口公开；提交接口要求有效会话及匹配的 `X-Acorn-User-Id`，健康接口要求登录。JSON 写请求还要求 `Origin` 与 `http.public_origin` 精确匹配。个人隔离接入前，提交归属仍使用 `test_user.user_id`。gRPC 访问范围继续由部署端限制。
 
-| 配置项                                 | 示例值                       | 用途                        |
-| -------------------------------------- | ---------------------------- | --------------------------- |
-| Worker `server.listen`                 | `127.0.0.1:50051`            | gRPC 监听地址               |
-| Worker `sandbox.box_id`                | `0`                          | 本机独占的 Isolate box ID   |
-| 后端 `http.listen`                     | `127.0.0.1:8080`             | HTTP API 监听地址           |
-| 后端 `database.endpoint`               | `127.0.0.1:3306`             | MySQL 主机和 TCP 端口       |
-| 后端 `database.name`                   | `appdb`                      | 已初始化的结构版本 4 数据库 |
-| 后端 `database.username`               | `example_user`               | 业务读写账户                |
-| 后端 `MYSQL_PASSWORD`                  | 进程环境变量                 | 数据库密码                  |
-| 后端 `database.max_connections`        | `4`                          | 共享应用连接池上限          |
-| 后端 `database.acquire_timeout_ms`     | `5000`                       | 整个连接取得过程的预算      |
-| 后端 `database.lock_wait_timeout_secs` | `3`                          | 会话行锁与元数据锁等待      |
-| 后端 `scheduler.workers`               | `["http://127.0.0.1:50051"]` | Worker 地址列表             |
-| 后端 `scheduler.pending_max_count`     | `128`                        | 等待 Worker 接纳的提交容量  |
-| 后端 `llm_review.enabled`              | `false`                      | LLM 审查开关                |
-| 前端 `API_PROXY_TARGET`                | `http://127.0.0.1:8080`      | 开发服务的 API 代理目标     |
-| 前端 `VITE_SOURCE_MAX_BYTES`           | `65536`                      | 提交源码字节上限预检        |
+| 配置项                                 | 示例值                       | 用途                               |
+| -------------------------------------- | ---------------------------- | ---------------------------------- |
+| Worker `server.listen`                 | `127.0.0.1:50051`            | gRPC 监听地址                      |
+| Worker `sandbox.box_id`                | `0`                          | 本机独占的 Isolate box ID          |
+| 后端 `http.listen`                     | `127.0.0.1:8080`             | HTTP API 监听地址                  |
+| 后端 `http.public_origin`              | `http://127.0.0.1:8080`      | JSON 写请求必需的浏览器外部 Origin |
+| 后端 `http.cookie_secure`              | `false`                      | 按外部协议选择 Secure Cookie       |
+| 后端 `auth.max_sessions_per_user`      | `10`                         | 每用户会话容量                     |
+| 后端 `auth.max_sessions`               | `10000`                      | 全局会话容量                       |
+| 后端 `database.endpoint`               | `127.0.0.1:3306`             | MySQL 主机和 TCP 端口              |
+| 后端 `database.name`                   | `appdb`                      | 已初始化的结构版本 4 数据库        |
+| 后端 `database.username`               | `example_user`               | 业务读写账户                       |
+| 后端 `MYSQL_PASSWORD`                  | 进程环境变量                 | 数据库密码                         |
+| 后端 `database.max_connections`        | `4`                          | 共享应用连接池上限                 |
+| 后端 `database.acquire_timeout_ms`     | `5000`                       | 整个连接取得过程的预算             |
+| 后端 `database.lock_wait_timeout_secs` | `3`                          | 会话行锁与元数据锁等待             |
+| 后端 `scheduler.workers`               | `["http://127.0.0.1:50051"]` | Worker 地址列表                    |
+| 后端 `scheduler.pending_max_count`     | `128`                        | 等待 Worker 接纳的提交容量         |
+| 后端 `llm_review.enabled`              | `false`                      | LLM 审查开关                       |
+| 前端 `API_PROXY_TARGET`                | `http://127.0.0.1:8080`      | 开发服务的 API 代理目标            |
+| 前端 `VITE_SOURCE_MAX_BYTES`           | `65536`                      | 提交源码字节上限预检               |
+
+`http.public_origin` 必须为规范 HTTP(S) Origin，不含路径、末尾斜线、凭据、查询或片段。通过 Vite 发浏览器写请求时使用 `http://localhost:5173`，反向代理部署时填写外部 Origin。`http.cookie_secure` 默认 `false`；外部 HTTPS 部署设为 `true`，代理通过 HTTP 连接后端时也适用。可省略的 `[auth]` 默认每用户 10 条、全局 10000 条会话，两个容量均须为正；容量满时淘汰最久未使用的会话。会话在闲置 24 小时后过期，有效认证请求同步续期服务端与持久 Cookie；后端重启使全部会话失效。
 
 后端从进程环境读取 `MYSQL_PASSWORD`，MySQL SSL 显式禁用，程序不自动加载 `.env`。连接使用 utf8mb4_0900_bin、READ COMMITTED、严格 SQL 模式和有限锁等待。
 
@@ -221,13 +241,19 @@ retry_interval_ms = 1_000
 
 ### LLM 代码审查
 
-在后端 `[llm_review]` 中设置 `enabled = true`，填写完整的 Responses API `endpoint`、`api_key` 和 `model`。密钥保存在服务端 TOML 中。重启后，可在机器判题已完成的结果页点击“启动审查”或“重新审查”。
+在后端 `[llm_review]` 中设置 `enabled = true`，填写完整的 Responses API `endpoint`、`api_key` 和 `model`。密钥保存在服务端 TOML 中。重启后，对机器判题已完成的提交调用需认证的审查 HTTP 接口；浏览器登录接入后可在结果页使用“启动审查”或“重新审查”。
 
 自动审查由提交固定题目版本的 `review_mode` 决定：`DISABLED` 关闭，`ENABLE-ANY` 在至少一例通过时触发，`ENABLE-ALL` 在全部通过时触发。内置示例题默认关闭自动审查。审查意见单独保存，重新审查会替换上次意见。配置和 HTTP 操作见[后端审查说明](crates/backend/README.md#llm-代码审查)。
 
 ## 运行与部署
 
-“系统状态”页面位于 [/health](http://localhost:5173/health)，每 10 秒获取一次快照，也可手动刷新。命令行可读取 `GET /api/v1/health`。
+健康接口要求登录，沿用 Quick Start 保存的 Cookie jar：
+
+```sh
+curl --fail-with-body -b "$ACORN_COOKIE_JAR" -c "$ACORN_COOKIE_JAR" http://127.0.0.1:8080/api/v1/health
+```
+
+“系统状态”页面位于 [/health](http://localhost:5173/health)，提供轮询和手动刷新；需在浏览器登录接入后使用。
 
 快照包含数据库读取、Kafka 两个 topic 的元数据检查，以及 Worker 执行状态和待 MQ 交接结果数量。健康检查不参与接纳决策；独立 Worker 组观测在没有新鲜正成员数时以 `503 WorkersUnavailable` 暂拒新建，已有幂等键仍按原规则处理。`[worker_membership].tasks_group_id` 须与 Worker 的 `[kafka].group_id` 一致。
 

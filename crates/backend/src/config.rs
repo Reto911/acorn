@@ -37,6 +37,9 @@ pub struct Config {
     pub worker_membership: WorkerMembershipConfig,
     /// HTTP listener, request body and pagination settings.
     pub http: HttpConfig,
+    /// Fixed startup ceilings for process-local sessions.
+    #[serde(default)]
+    pub auth: AuthConfig,
     /// Existing MySQL database, bounded connection pool and finite lock waits.
     pub database: DatabaseConfig,
     /// Deployment-provided submission owner.
@@ -65,12 +68,37 @@ pub struct Config {
 pub struct HttpConfig {
     /// Listening address.
     pub listen: SocketAddr,
+    /// Exact browser-facing HTTP(S) Origin used for JSON write requests.
+    pub public_origin: String,
+    /// Select Secure and the __Host- cookie name, including behind an HTTPS proxy.
+    #[serde(default)]
+    pub cookie_secure: bool,
     /// Encoded JSON request body limit in bytes.
     pub max_request_bytes: usize,
     /// Default number of items per list page.
     pub default_page_size: u32,
     /// Maximum number of items per list page.
     pub max_page_size: u32,
+}
+
+/// Process-local session limits; capacity exhaustion evicts old sessions.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AuthConfig {
+    /// Maximum cached sessions belonging to one account.
+    pub max_sessions_per_user: usize,
+    /// Maximum cached sessions across all accounts.
+    pub max_sessions: usize,
+}
+
+impl Default for AuthConfig {
+    /// Preserve the agreed personal and global default ceilings.
+    fn default() -> Self {
+        Self {
+            max_sessions_per_user: 10,
+            max_sessions: 10_000,
+        }
+    }
 }
 
 /// MySQL startup settings; initialization belongs to the deployment account.
@@ -449,6 +477,18 @@ impl Config {
     /// Check the configured resource, pagination and endpoint requirements.
     pub fn validate(&self) -> Result<()> {
         self.kafka.validate()?;
+        let origin = reqwest::Url::parse(&self.http.public_origin)
+            .context("http.public_origin must be an HTTP(S) Origin")?;
+        ensure!(
+            matches!(origin.scheme(), "http" | "https")
+                && origin.host_str().is_some()
+                && origin.origin().ascii_serialization() == self.http.public_origin,
+            "http.public_origin must be a canonical HTTP(S) Origin without a path, credentials, query or fragment"
+        );
+        ensure!(
+            self.auth.max_sessions_per_user > 0 && self.auth.max_sessions > 0,
+            "auth session capacities must be positive"
+        );
         self.worker_membership.validate()?;
         self.llm_review.validate()?;
         ensure!(

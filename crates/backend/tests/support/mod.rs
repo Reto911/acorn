@@ -337,6 +337,8 @@ pub struct Harness {
     pub review: ReviewService,
     /// Production HTTP routes invoked as Tower requests.
     pub app: Router,
+    /// Undecorated production routes for explicit anonymous and multi-account auth checks.
+    pub raw_app: Router,
     /// Independently controlled Worker endpoints.
     pub servers: Vec<RpcServer>,
     /// Collector observed once, including tests that stop it before full teardown.
@@ -348,23 +350,33 @@ pub struct Harness {
 impl Harness {
     /// Assemble HTTP, storage, review and controlled status observations.
     pub async fn start(workers: usize, capacity: u32) -> Self {
-        Self::start_with_health(workers, capacity, HealthConfig::default()).await
+        Self::start_with_health(workers, capacity, HealthConfig::default(), |_, _| {}).await
     }
 
-    /// Assemble the same services with a test-selected collection cadence and budget.
+    /// Configure first-round observations synchronously before collector tasks can run.
     pub async fn start_with_health(
         workers: usize,
         capacity: u32,
         health_config: HealthConfig,
+        setup: impl FnOnce(&Health, &[RpcServer]),
     ) -> Self {
         let mut fixture = Fixture::new().await;
         fixture.config.health = health_config;
         fixture.config.scheduler.pending_max_count = capacity;
-        Self::start_fixture(fixture, workers).await
+        Self::start_fixture_with_health_setup(fixture, workers, setup).await
     }
 
     /// Assemble production services using a fixture with explicitly selected review settings.
-    pub async fn start_fixture(mut fixture: Fixture, workers: usize) -> Self {
+    pub async fn start_fixture(fixture: Fixture, workers: usize) -> Self {
+        Self::start_fixture_with_health_setup(fixture, workers, |_, _| {}).await
+    }
+
+    /// Finish synchronous health setup before asynchronous HTTP login yields to collection.
+    async fn start_fixture_with_health_setup(
+        mut fixture: Fixture,
+        workers: usize,
+        setup: impl FnOnce(&Health, &[RpcServer]),
+    ) -> Self {
         let mut servers = Vec::new();
         for _ in 0..workers {
             servers.push(RpcServer::start().await);
@@ -385,6 +397,7 @@ impl Harness {
         );
         let (health, health_task) =
             Health::start(&fixture.config.health, fixture.database.clone(), &scheduler).unwrap();
+        setup(&health, &servers);
         let app = http::router(
             &fixture.config,
             fixture.database.clone(),
@@ -393,6 +406,8 @@ impl Harness {
             health.clone(),
             review.clone(),
         );
+        let raw_app = app.clone();
+        let app = authenticated(app, &fixture.config.http.public_origin).await;
         Self {
             fixture,
             scheduler,
@@ -401,6 +416,7 @@ impl Harness {
             health,
             review,
             app,
+            raw_app,
             servers,
             health_task: Some(health_task),
             review_task,
@@ -486,6 +502,55 @@ impl Harness {
     }
 }
 
+/// Log in once and make existing Tower callers carry actual browser request headers.
+pub async fn authenticated(app: Router, origin: &str) -> Router {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/login")
+                .header("origin", origin)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"username":"test", "password":"Acorn-Test-Only-123!"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let cookie = response.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let origin = origin.to_owned();
+    app.layer(axum::middleware::from_fn(
+        move |mut request: axum::extract::Request, next: axum::middleware::Next| {
+            let cookie = cookie.clone();
+            let origin = origin.clone();
+            async move {
+                request
+                    .headers_mut()
+                    .entry("cookie")
+                    .or_insert(cookie.parse().unwrap());
+                request
+                    .headers_mut()
+                    .entry("x-acorn-user-id")
+                    .or_insert("1".parse().unwrap());
+                request
+                    .headers_mut()
+                    .entry("origin")
+                    .or_insert(origin.parse().unwrap());
+                next.run(request).await
+            }
+        },
+    ))
+}
+
 /// Make an HTTP request and decode the API response as JSON.
 pub async fn call(
     app: &Router,
@@ -494,7 +559,10 @@ pub async fn call(
     body: Option<Value>,
     key: Option<Uuid>,
 ) -> (StatusCode, axum::http::HeaderMap, Value) {
-    let mut builder = Request::builder().method(method).uri(path);
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("origin", "http://127.0.0.1:8080");
     if let Some(key) = key {
         builder = builder.header("idempotency-key", key.to_string());
     }
@@ -552,13 +620,57 @@ pub async fn network_call(
     body: Option<Value>,
     key: Option<Uuid>,
 ) -> (u16, Value) {
+    let cookie = if path.starts_with("/api/v1/submissions") || path == "/api/v1/health" {
+        let (status, headers, _) = network_request(
+            address,
+            "POST",
+            "/api/v1/auth/login",
+            Some(json!({"username":"test","password":"Acorn-Test-Only-123!"})),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, 200, "Fixture login must succeed");
+        Some(
+            headers
+                .lines()
+                .filter_map(|line| line.split_once(':'))
+                .find(|(name, _)| name.eq_ignore_ascii_case("set-cookie"))
+                .unwrap()
+                .1
+                .trim()
+                .split(';')
+                .next()
+                .unwrap()
+                .to_owned(),
+        )
+    } else {
+        None
+    };
+    let (status, _, body) =
+        network_request(address, method, path, body, key, cookie.as_deref()).await;
+    (status, body)
+}
+
+/// Send one actual HTTP request, preserving headers for the fixture's explicit login exchange.
+async fn network_request(
+    address: std::net::SocketAddr,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+    key: Option<Uuid>,
+    cookie: Option<&str>,
+) -> (u16, String, Value) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let payload = body.map(|body| body.to_string()).unwrap_or_default();
     let key = key
         .map(|key| format!("Idempotency-Key: {key}\r\n"))
         .unwrap_or_default();
+    let cookie = cookie
+        .map(|value| format!("Cookie: {value}\r\nX-Acorn-User-Id: 1\r\n"))
+        .unwrap_or_default();
     let request = format!(
-        "{method} {path} HTTP/1.0\r\nHost: localhost\r\nContent-Type: application/json\r\n{key}Content-Length: {}\r\n\r\n{payload}",
+        "{method} {path} HTTP/1.0\r\nHost: localhost\r\nOrigin: http://127.0.0.1:8080\r\nContent-Type: application/json\r\n{key}{cookie}Content-Length: {}\r\n\r\n{payload}",
         payload.len()
     );
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -574,6 +686,7 @@ pub async fn network_call(
         let status = headers.split_whitespace().nth(1).unwrap().parse().unwrap();
         (
             status,
+            headers.to_owned(),
             serde_json::from_slice(&bytes[boundary + 4..]).unwrap(),
         )
     })

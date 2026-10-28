@@ -3,7 +3,7 @@
 use axum::{
     Json,
     extract::rejection::JsonRejection,
-    http::StatusCode,
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
@@ -75,7 +75,17 @@ impl ApiError {
 impl IntoResponse for ApiError {
     /// Serialize all handler and framework errors through the same envelope.
     fn into_response(self) -> Response {
-        (self.status, Json(Envelope { error: self.body })).into_response()
+        let status = self.status;
+        let mut response = (status, Json(Envelope { error: self.body })).into_response();
+        if status == StatusCode::UNAUTHORIZED {
+            response.headers_mut().insert(
+                header::WWW_AUTHENTICATE,
+                "Session realm=\"acorn\""
+                    .parse()
+                    .expect("Static challenge is valid"),
+            );
+        }
+        response
     }
 }
 

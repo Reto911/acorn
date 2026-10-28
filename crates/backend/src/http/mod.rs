@@ -1,5 +1,6 @@
 //! Business and health JSON routes, bounded extraction and explicit public response DTOs.
 
+mod authentication;
 mod dto;
 mod error;
 
@@ -25,6 +26,7 @@ use tower_http::trace::{DefaultOnResponse, TraceLayer};
 use uuid::Uuid;
 
 use crate::{
+    auth::{cookie::CookiePolicy, sessions::Sessions},
     config::Config,
     database::Database,
     health::{self, Health},
@@ -39,7 +41,7 @@ use error::ApiError;
 struct AppState {
     /// Deployment settings, not request-controlled execution parameters.
     config: Arc<Config>,
-    /// The same SQLite handle used by Scheduler and creation.
+    /// The same MySQL handle used by Scheduler and creation.
     database: Database,
     /// Independently owned transaction-and-handoff service.
     creation: CreationService,
@@ -49,6 +51,10 @@ struct AppState {
     health: Health,
     /// Same independently supervised review service used by Scheduler automatic handoffs.
     review: ReviewService,
+    /// Unique process-local session store shared by all router clones.
+    sessions: Arc<Sessions>,
+    /// One consistent cookie strategy for this deployment.
+    cookies: CookiePolicy,
 }
 
 /// Build the API with common body limits, English JSON errors and request tracing.
@@ -67,15 +73,24 @@ pub fn router(
         scheduler,
         health,
         review,
+        sessions: Arc::new(Sessions::new(&config.auth)),
+        cookies: CookiePolicy::new(config.http.cookie_secure),
     };
+    let personal = Router::new()
+        .route(
+            "/api/v1/submissions",
+            get(list_submissions).post(create_submission),
+        )
+        .route("/api/v1/submissions/{id}", get(submission))
+        .route("/api/v1/submissions/{id}/review", post(start_review));
+    let health = Router::new().route("/api/v1/health", get(get_health));
     Router::new()
-        .route("/api/v1/health", get(get_health))
+        .merge(authentication::routes(&state))
+        .merge(authentication::guarded(personal, &state, authentication::Access::Personal))
+        .merge(authentication::guarded(health, &state, authentication::Access::Required))
         .route("/api/v1/problems", get(list_problems))
         .route("/api/v1/problems/{id}", get(problem))
         .route("/api/v1/problems/{id}/versions/{version_no}", get(problem_version))
-        .route("/api/v1/submissions", get(list_submissions).post(create_submission))
-        .route("/api/v1/submissions/{id}", get(submission))
-        .route("/api/v1/submissions/{id}/review", post(start_review))
         .fallback(route_not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(DefaultBodyLimit::max(config.http.max_request_bytes))

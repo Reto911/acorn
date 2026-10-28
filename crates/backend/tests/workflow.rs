@@ -76,6 +76,7 @@ async fn real_kafka_observation_and_admission() {
         health.clone(),
         review.clone(),
     );
+    let app = support::authenticated(app, &fixture.config.http.public_origin).await;
     wait_for(|| {
         membership.snapshot().members == Some(0) && health.snapshot().kafka.state == ProbeState::Ok
     })
@@ -310,22 +311,20 @@ async fn health_round_updates_independently_and_stops_pending_checks() {
         interval_ms: 60_000,
         timeout_ms: 60_000,
     };
-    let mut harness = Harness::start_with_health(2, 2, config).await;
-    *harness.servers[0].mock.status_reply.lock().unwrap() = None;
+    let mut harness = Harness::start_with_health(2, 2, config, |health, servers| {
+        *servers[0].mock.status_reply.lock().unwrap() = None;
+        let initial = health.snapshot();
+        assert_eq!(initial.database.state, ProbeState::Unknown);
+        assert!(
+            initial
+                .workers
+                .iter()
+                .all(|worker| worker.probe.state == ProbeState::Unknown)
+        );
+    })
+    .await;
     let health = harness.health.clone();
-    let initial = health.snapshot();
-    assert_eq!(initial.database.state, ProbeState::Unknown);
-    assert!(
-        initial
-            .workers
-            .iter()
-            .all(|worker| worker.probe.state == ProbeState::Unknown)
-    );
     let initial_http = health_response(&harness.app).await;
-    assert_eq!(
-        initial_http["database"],
-        json!({"state":"unknown", "checked_at_ms":null, "error_code":null})
-    );
     assert_eq!(
         initial_http["workers"][0],
         json!({"id":"worker-1", "state":"unknown", "checked_at_ms":null, "error_code":null, "status":null})
@@ -375,7 +374,7 @@ async fn health_status_failures_and_recovery_keep_admission_open() {
         interval_ms: 20,
         timeout_ms: 1_000,
     };
-    let mut harness = Harness::start_with_health(1, 2, config).await;
+    let mut harness = Harness::start_with_health(1, 2, config, |_, _| {}).await;
     let health = harness.health.clone();
     wait_for(|| health.snapshot().workers[0].probe.state == ProbeState::Ok).await;
     let valid = GetWorkerStatusReply {
@@ -465,8 +464,10 @@ async fn health_worker_timeout_and_stop_between_rounds() {
         interval_ms: 60_000,
         timeout_ms: 1_000,
     };
-    let mut harness = Harness::start_with_health(1, 2, config).await;
-    *harness.servers[0].mock.status_reply.lock().unwrap() = None;
+    let mut harness = Harness::start_with_health(1, 2, config, |_, servers| {
+        *servers[0].mock.status_reply.lock().unwrap() = None;
+    })
+    .await;
     let health = harness.health.clone();
     wait_for(|| harness.servers[0].mock.status_calls.load(Ordering::SeqCst) == 1).await;
     wait_for(|| {
@@ -522,6 +523,11 @@ async fn health_database_read_failure_and_timeout_recover() {
             scheduler.clone(),
             support::observed_membership(&fixture.config),
         );
+        // Establish the session before removing all accounts and exercising the table lock.
+        sqlx::raw_sql(include_str!("../../../examples/seed-user.sql"))
+            .execute(&mut connection)
+            .await
+            .unwrap();
         let app = http::router(
             &fixture.config,
             fixture.database.clone(),
@@ -530,6 +536,11 @@ async fn health_database_read_failure_and_timeout_recover() {
             health.clone(),
             review.clone(),
         );
+        let app = support::authenticated(app, &fixture.config.http.public_origin).await;
+        sqlx::query("DELETE FROM users")
+            .execute(&mut connection)
+            .await
+            .unwrap();
         wait_for(|| health.snapshot().database.state == ProbeState::Ok).await;
         sqlx::raw_sql("SET autocommit = 0; LOCK TABLES users WRITE")
             .execute(&mut connection)

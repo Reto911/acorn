@@ -6,12 +6,15 @@ Acorn is a programming judge for single-file C and Python 3 submissions, with a 
 
 ## Features
 
-- Browse problems, write C or Python code in Monaco, and save local drafts by problem and language.
+- Browse problems publicly, write C or Python code in Monaco, and save local drafts by problem and language.
+- Register and log in over HTTP, inspect the current identity, and log out with an in-memory session and a persistent Cookie.
 - Compile, execute, and compare output in Isolate sandboxes, with limits on CPU time, wall time, memory, process count, output, and disk usage.
 - Process different submissions in parallel across multiple Workers, saving verdicts, compiler diagnostics, and output from the first failing test case.
 - Filter submission history by problem, execution state, verdict, and review status. Historical results reference the problem version used for judging.
 - Trigger LLM reviews automatically according to a problem's policy, or start and rerun reviews manually to check for hardcoding, guessing, and attempts to bypass problem requirements.
-- View backend admission conditions, the scheduling queue, and recent database and Worker observations on the system status page.
+- Query backend admission conditions, the scheduling queue, and recent database and Worker observations after login.
+
+The browser currently supports public problem browsing and editing. Use the HTTP API for protected operations while browser login is being integrated. Submission creation still uses the configured test user; personal ownership filtering is the next implementation step, so login currently provides an access boundary without isolating different accounts’ submission data.
 
 ## Project Structure
 
@@ -103,7 +106,7 @@ cp config/worker.example.toml "$HOME/.config/acorn/worker.toml"
 cp config/backend.example.toml "$HOME/.config/acorn/backend.toml"
 ```
 
-Edit `worker.toml` to check `sandbox.executable`, `languages.c.compiler`, and `languages.python.interpreter`. Choose an available `sandbox.box_id` dedicated to this Worker on the host. The example backend configuration connects to `http://127.0.0.1:50051` and selects the MySQL database configured by `database.endpoint`, `name`, and `username`.
+Edit `worker.toml` to check `sandbox.executable`, `languages.c.compiler`, and `languages.python.interpreter`. Choose an available `sandbox.box_id` dedicated to this Worker on the host. The example backend configuration connects to `http://127.0.0.1:50051` and selects the MySQL database configured by `database.endpoint`, `name`, and `username`. Keep `http.public_origin="http://127.0.0.1:8080"` for the direct HTTP examples below; if you choose another external Origin, send that exact value in each write request. Browser writes through the development proxy will require the actual browser Origin, such as `http://localhost:5173`; host names and ports must match exactly.
 
 ### Initialize the Database
 
@@ -155,13 +158,23 @@ Worker group observation may still be pending immediately after startup. A `503 
 
 ### Submit Your First Program
 
-Open the [problem list](http://localhost:5173/problems), select the A + B problem (`两数求和（A + B）`), choose C or Python 3, paste the [C sample](examples/submissions/a-plus-b.c) or [Python sample](examples/submissions/a-plus-b.py), and click Submit code (`提交代码`). The result page polls automatically; the correct samples receive `AC`. Open Submission history (`提交历史`) to revisit results.
+Open the [problem list](http://localhost:5173/problems) to read the A + B problem (`两数求和（A + B）`) and edit the [C sample](examples/submissions/a-plus-b.c) or [Python sample](examples/submissions/a-plus-b.py). Browser login and protected requests are awaiting integration. For now, log in over HTTP with the seeded development account `test` / `Acorn-Test-Only-123!`, then submit using its returned user ID (`1` for the seed):
 
-You can also submit over HTTP:
+```sh
+ACORN_COOKIE_JAR=/tmp/acorn-cookies.txt
+curl --fail-with-body -c "$ACORN_COOKIE_JAR" http://127.0.0.1:8080/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -H 'Origin: http://127.0.0.1:8080' \
+  -d '{"username":"test","password":"Acorn-Test-Only-123!"}'
+```
+
+Send the Cookie and the page’s expected user identity with personal requests:
 
 ```sh
 ACORN_REQUEST_KEY=$(python3 -c 'import uuid; print(uuid.uuid4())')
-curl -i http://127.0.0.1:8080/api/v1/submissions \
+curl -i -b "$ACORN_COOKIE_JAR" -c "$ACORN_COOKIE_JAR" http://127.0.0.1:8080/api/v1/submissions \
+  -H 'Origin: http://127.0.0.1:8080' \
+  -H 'X-Acorn-User-Id: 1' \
   -H 'Content-Type: application/json' \
   -H "Idempotency-Key: $ACORN_REQUEST_KEY" \
   -d '{"problem_id":1,"language_id":"python","source":"a,b=map(int,input().split());print(a+b)\n"}'
@@ -171,20 +184,25 @@ The response returns `202`, a `submission_id`, and a query URL in `Location`. In
 
 ```sh
 ACORN_SUBMISSION_ID='<submission_id from the response>'
-curl --fail-with-body "http://127.0.0.1:8080/api/v1/submissions/$ACORN_SUBMISSION_ID"
+curl --fail-with-body -b "$ACORN_COOKIE_JAR" -c "$ACORN_COOKIE_JAR" \
+  -H 'X-Acorn-User-Id: 1' "http://127.0.0.1:8080/api/v1/submissions/$ACORN_SUBMISSION_ID"
 ```
 
 Keep the original idempotency key and content when resending the same request. Generate a new key to create a new submission. More examples are available in the [backend guide](crates/backend/README.md#http-api).
 
 ## Configuration
 
-Both the backend and Worker read TOML through `--config <PATH>`; restart the service after changes. All submissions belong to the preconfigured user selected by the backend's `test_user.user_id`. HTTP and gRPC have no built-in authentication; restrict access through a reverse proxy or firewall.
+Both the backend and Worker read TOML through `--config <PATH>`; restart the service after changes. Problem HTTP routes are public. Submission routes require a valid session and matching `X-Acorn-User-Id`; health requires a session. JSON writes also require an `Origin` that exactly matches `http.public_origin`. Submission ownership still uses `test_user.user_id` until personal isolation is integrated. gRPC access remains controlled by the deployment.
 
 | Setting                                   | Example value                | Purpose                                            |
 | ----------------------------------------- | ---------------------------- | -------------------------------------------------- |
 | Worker `server.listen`                    | `127.0.0.1:50051`            | gRPC listening address                             |
 | Worker `sandbox.box_id`                   | `0`                          | Isolate box ID reserved on this host               |
 | Backend `http.listen`                     | `127.0.0.1:8080`             | HTTP API listening address                         |
+| Backend `http.public_origin`              | `http://127.0.0.1:8080`      | Required browser-facing Origin for JSON writes     |
+| Backend `http.cookie_secure`              | `false`                      | Secure Cookie setting for the external protocol    |
+| Backend `auth.max_sessions_per_user`      | `10`                         | Per-user session capacity                          |
+| Backend `auth.max_sessions`               | `10000`                      | Global session capacity                            |
 | Backend `database.endpoint`               | `127.0.0.1:3306`             | MySQL host and TCP port                            |
 | Backend `database.name`                   | `appdb`                      | Initialized schema version 4 database              |
 | Backend `database.username`               | `example_user`               | Business read/write account                        |
@@ -197,6 +215,8 @@ Both the backend and Worker read TOML through `--config <PATH>`; restart the ser
 | Backend `llm_review.enabled`              | `false`                      | Enable LLM reviews                                 |
 | Frontend `API_PROXY_TARGET`               | `http://127.0.0.1:8080`      | API proxy target for the development server        |
 | Frontend `VITE_SOURCE_MAX_BYTES`          | `65536`                      | Source byte limit checked before submission        |
+
+`http.public_origin` must be a canonical HTTP(S) Origin, with no path, trailing slash, credentials, query, or fragment. For browser writes through Vite, use `http://localhost:5173`; behind a reverse proxy, use the external Origin. `http.cookie_secure` defaults to `false`; set it to `true` for external HTTPS, including when the proxy connects to the backend over HTTP. The optional `[auth]` section defaults to 10 sessions per user and 10000 globally; both limits must be positive. Full capacity evicts the least recently used session. Sessions expire after 24 hours of inactivity; authenticated requests renew the server expiry and persistent Cookie. Backend restarts invalidate all sessions.
 
 The backend reads `MYSQL_PASSWORD` from its process environment and uses MySQL with SSL disabled. It does not load `.env` automatically. Connections use utf8mb4_0900_bin, READ COMMITTED, strict SQL mode, and finite lock waits.
 
@@ -221,13 +241,19 @@ Each Worker executes one submission at a time. Multiple Workers process differen
 
 ### LLM Code Review
 
-Set `enabled = true` in the backend's `[llm_review]` section and provide the complete Responses API `endpoint`, `api_key`, and `model`. Store the key in the server-side TOML file. After restarting, use Start review (`启动审查`) or Rerun review (`重新审查`) on the result page of a completed judging run.
+Set `enabled = true` in the backend's `[llm_review]` section and provide the complete Responses API `endpoint`, `api_key`, and `model`. Store the key in the server-side TOML file. After restarting, use the authenticated review HTTP endpoint for a completed judging run; browser login integration will enable Start review (`启动审查`) and Rerun review (`重新审查`) in the result page.
 
 Automatic reviews follow the `review_mode` of the submission's fixed problem version: `DISABLED` turns them off, `ENABLE-ANY` triggers after at least one test case passes, and `ENABLE-ALL` triggers when all cases pass. The built-in example problem disables automatic reviews by default. Review opinions are saved separately; rerunning replaces the previous opinion. See the [backend review guide](crates/backend/README.md#llm-代码审查) for configuration and HTTP operations.
 
 ## Operation and Deployment
 
-The System status (`系统状态`) page at [/health](http://localhost:5173/health) fetches a snapshot every 10 seconds and supports manual refresh. From the command line, use `GET /api/v1/health`.
+The health endpoint requires login. Reuse the Cookie jar from Quick Start:
+
+```sh
+curl --fail-with-body -b "$ACORN_COOKIE_JAR" -c "$ACORN_COOKIE_JAR" http://127.0.0.1:8080/api/v1/health
+```
+
+The System status (`系统状态`) page at [/health](http://localhost:5173/health) provides polling and manual refresh; authenticated browser access awaits login integration.
 
 The snapshot includes database reads, metadata checks for both Kafka topics, and Worker execution and pending MQ handoff counts. Health checks do not gate admission. Independent Worker group observation rejects new records with `503 WorkersUnavailable` until a fresh positive member count is available; existing idempotency keys retain their normal behavior. Configure `[worker_membership].tasks_group_id` to match the Workers’ `[kafka].group_id`.
 

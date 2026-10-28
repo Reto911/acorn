@@ -4,6 +4,56 @@ use acorn_backend::scheduler::kafka;
 use acorn_backend::{config::Config, database::Error, submissions::TerminalOutcome};
 use acorn_protocol::worker::v1::{FailedCase, JudgeResult, Verdict};
 
+/// Cookie deployment settings and session ceilings enforce the documented startup contract.
+#[test]
+fn authentication_configuration_contract() {
+    let example = include_str!("../../../config/backend.example.toml");
+    let defaulted = Config::parse(&example.replace("cookie_secure = false\n", "").replace(
+        "[auth]\nmax_sessions_per_user = 10\nmax_sessions = 10_000\n",
+        "",
+    ))
+    .unwrap();
+    assert!(!defaulted.http.cookie_secure);
+    assert_eq!(defaulted.auth.max_sessions_per_user, 10);
+    assert_eq!(defaulted.auth.max_sessions, 10_000);
+    let https = example
+        .replace(
+            "public_origin = \"http://127.0.0.1:8080\"",
+            "public_origin = \"https://acorn.example\"",
+        )
+        .replace("cookie_secure = false", "cookie_secure = true");
+    assert!(Config::parse(&https).unwrap().http.cookie_secure);
+    for origin in [
+        "null",
+        "file:///tmp/page",
+        "https://user@acorn.example",
+        "https://acorn.example/",
+        "https://acorn.example/path",
+        "https://acorn.example?x=1",
+        "https://acorn.example#fragment",
+    ] {
+        assert!(
+            Config::parse(&example.replace(
+                "public_origin = \"http://127.0.0.1:8080\"",
+                &format!("public_origin = {origin:?}")
+            ))
+            .is_err()
+        );
+    }
+    for field in ["max_sessions_per_user = 10", "max_sessions = 10_000"] {
+        assert!(
+            Config::parse(&example.replace(
+                field,
+                &format!("{} = 0", field.split_once(" = ").unwrap().0)
+            ))
+            .is_err()
+        );
+    }
+    assert!(
+        Config::parse(&example.replace("public_origin = \"http://127.0.0.1:8080\"\n", "")).is_err()
+    );
+}
+
 /// Membership freshness is configured independently from health and has finite SDK budgets.
 #[test]
 fn worker_membership_defaults_and_bounds() {
