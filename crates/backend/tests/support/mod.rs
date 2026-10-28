@@ -81,6 +81,7 @@ impl Fixture {
     pub async fn queued(&self, language: &str) -> String {
         self.database
             .create_submission(CreateSubmission {
+                user_id: 1,
                 problem_id: 1,
                 language_id: language.into(),
                 source: b"ac".to_vec(),
@@ -430,6 +431,7 @@ impl Harness {
             .fixture
             .database
             .create_submission(CreateSubmission {
+                user_id: 1,
                 problem_id: 1,
                 language_id: language.into(),
                 source: source.as_bytes().to_vec(),
@@ -504,6 +506,11 @@ impl Harness {
 
 /// Log in once and make existing Tower callers carry actual browser request headers.
 pub async fn authenticated(app: Router, origin: &str) -> Router {
+    authenticated_as(app, origin, "test").await
+}
+
+/// Log in as a selected fixture account and attach its actual immutable expected identity.
+pub async fn authenticated_as(app: Router, origin: &str, username: &str) -> Router {
     let response = app
         .clone()
         .oneshot(
@@ -513,7 +520,7 @@ pub async fn authenticated(app: Router, origin: &str) -> Router {
                 .header("origin", origin)
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    json!({"username":"test", "password":"Acorn-Test-Only-123!"}).to_string(),
+                    json!({"username":username, "password":"Acorn-Test-Only-123!"}).to_string(),
                 ))
                 .unwrap(),
         )
@@ -527,11 +534,19 @@ pub async fn authenticated(app: Router, origin: &str) -> Router {
         .next()
         .unwrap()
         .to_owned();
+    let body: Value = serde_json::from_slice(
+        &to_bytes(response.into_body(), 2 * 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let expected = body["user"]["id"].as_i64().unwrap().to_string();
     let origin = origin.to_owned();
     app.layer(axum::middleware::from_fn(
         move |mut request: axum::extract::Request, next: axum::middleware::Next| {
             let cookie = cookie.clone();
             let origin = origin.clone();
+            let expected = expected.clone();
             async move {
                 request
                     .headers_mut()
@@ -540,7 +555,7 @@ pub async fn authenticated(app: Router, origin: &str) -> Router {
                 request
                     .headers_mut()
                     .entry("x-acorn-user-id")
-                    .or_insert("1".parse().unwrap());
+                    .or_insert(expected.parse().unwrap());
                 request
                     .headers_mut()
                     .entry("origin")

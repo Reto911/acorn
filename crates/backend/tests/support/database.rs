@@ -93,6 +93,21 @@ impl Fixture {
         connection
     }
 
+    /// Create another account with the shipped development password for ownership checks.
+    pub async fn user(&self, username: &str) -> i64 {
+        let credentials = self
+            .database
+            .user_by_username("test")
+            .await
+            .unwrap()
+            .unwrap();
+        self.database
+            .create_user(username, username, &credentials.password_hash)
+            .await
+            .unwrap()
+            .id
+    }
+
     /// Wait for this fixture's concurrent statements while a control transaction holds a row lock.
     ///
     /// SHOW lists the development account's own sessions without PROCESS privileges.

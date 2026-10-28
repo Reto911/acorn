@@ -14,11 +14,11 @@
 
 使用一个 MySQL 8.4 数据库，业务表采用 InnoDB，保存用户、题库、提交历史、业务状态和有界结果。[Worker 设计](01-worker-design.md)规定执行与结果契约。仅支持全新初始化，应用不建表或自动升级；后端共享有界 MySQL 连接池，以进程环境变量提供密码，连接合同见[后端设计](03-backend-design.md#4-数据库访问与预置数据)。
 
-API、Scheduler 与 llm_review 属于同一后端进程，见[后端设计](03-backend-design.md)。账号通过注册持久化到现有 users，登录读取凭据后在后端内存建立 Session，题目由本地预置。HTTP 对提交和审查实施登录及预期用户校验；业务归属暂仍使用配置测试用户，列表、详情及手动审查的用户过滤按[用户设计第 5.2 节](11-user-authentication-design.md#52-对现有业务的改动)接入。
+API、Scheduler 与 llm_review 属于同一后端进程，见[后端设计](03-backend-design.md)。账号通过注册持久化到现有 users，登录读取凭据后在后端内存建立 Session，题目由本地预置。HTTP 对提交和审查实施登录及预期用户校验；创建、历史、详情及手动审查按认证用户限定，遵守[用户设计第 5.2 节](11-user-authentication-design.md#52-对现有业务的改动)。
 
 | 组件       | 数据职责                                                                                                                           |
 | ---------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| API        | 注册和登录访问 users；认证后创建和历史仍用配置测试用户，详情及手动审查尚无用户过滤；审查交给 llm_review                            |
+| API        | 注册和登录访问 users；创建携带认证用户，历史、详情及手动审查按该身份限定；审查交给 llm_review                                      |
 | Scheduler  | 维护内存队列与 Worker 路由，持久化重要业务状态与机器终态；启动时读取排队任务；按固定题目版本判断自动门槛并原子保存审查初态后交接   |
 | llm_review | 使用独立内存队列，读取固定源码、题面及 verdict，条件保存最近一次意见或失败；自动与手动接纳共用停止边界，手动短操作独立于 HTTP 连接 |
 | Worker     | 通过 Kafka 接收任务及回传事件，gRPC 只读状态，不访问数据库                                                                         |
@@ -68,7 +68,7 @@ MySQL 不允许对自增列使用原有的正值 CHECK，显式用户／题目 I
 
 [auth 模块](../crates/backend/src/auth.rs)使用 RustCrypto Argon2 生成和验证密码，固定初始基线 m=19456 KiB、t=2、p=1，随机盐为 16 字节、摘要为 32 字节。操作系统随机源生成盐，算法、版本、参数、盐和摘要随 PHC 保存；验证使用存储参数。不保存明文或可逆密文，不单独维护盐列，不增加密码参数配置。哈希与验证通过 Tokio spawn_blocking 执行，密码不匹配与损坏哈希或执行失败分别返回。基线依据见 [OWASP 密码存储建议](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)。
 
-认证接口复用以上账号读写能力，公共响应只包含 id、username 和 display_name；role、status 暂不产生权限差异。会话及 Cookie 校验由 auth 和 HTTP 层执行，不保存到 MySQL。业务创建仍从配置取得测试用户 `user_id`，启动时检查其存在；按认证用户提供归属及过滤查询由个人隔离任务接入，不允许客户端提交 user_id 覆盖归属。
+认证接口复用以上账号读写能力，公共响应只包含 id、username 和 display_name；role、status 暂不产生权限差异。会话及 Cookie 校验由 auth 和 HTTP 层执行，不保存到 MySQL。HTTP 将认证用户的不可变 `user_id` 传入创建服务，客户端请求体不能覆盖归属。启动不要求用户表非空，账号由注册或可选开发预置创建。
 
 ### 3.2 problems
 
@@ -168,7 +168,7 @@ JSON 使用应用侧固定类型，字节字段编码为 Base64。保存前验�
 
 ### 3.7 schema_version
 
-固定主键 `id=1` 保存一行 `version=4`，两列使用有符号 BIGINT。CHECK 限制主键为 1、版本为正值；全部表、外键及索引创建成功后才插入版本行。后端启动只检查版本及预置用户，不逐项扫描结构，检查失败关闭池并报错。
+固定主键 `id=1` 保存一行 `version=4`，两列使用有符号 BIGINT。CHECK 限制主键为 1、版本为正值；全部表、外键及索引创建成功后才插入版本行。后端启动只检查版本，不要求预置用户存在，不逐项扫描结构，检查失败关闭池并报错。
 
 ## 4. 创建与内存队列
 
@@ -178,7 +178,7 @@ JSON 使用应用侧固定类型，字节字段编码为 Base64。保存前验�
 
 创建接口从 HTTP 请求头 `Idempotency-Key` 读取 `create_request_key`。客户端为一次独立提交生成随机 UUID；同一提交的网络重传复用键，下一次主动提交生成新键。该键由客户端生成，Submission ID 由 API 生成，两者用途不同。
 
-API 使用配置中的测试用户归属，校验 UTF-8 源码编码后的大小及请求键基本格式。新建前预留进程内待接纳名额，队列满时不创建记录；已有提交的幂等查询不要求新名额。创建使用 READ COMMITTED 短事务：
+API 使用认证用户归属，校验 UTF-8 源码编码后的大小及请求键基本格式。不可变 user_id 随请求贯穿预查询、事务内查重、INSERT 和竞争重读，不同用户可独立使用相同请求键。新建前预留进程内待接纳名额，队列满时不创建记录；已有提交的幂等查询不要求新名额。创建使用 READ COMMITTED 短事务：
 
 1. 按 `(user_id, create_request_key)` 查找 Submission。
 2. 存在时，直接比较请求的题目 ID、语言和源码字节；相同则返回原 Submission ID，内容不同则返回 `409 IdempotencyConflict`。不根据当前发布指针重选旧提交的版本。
@@ -207,13 +207,13 @@ Scheduler 使用内存队列保存待执行任务，以 Submission ID 合并重�
 
 ### 4.4 手动审查接纳
 
-审查服务先持有独立名额的预留结果，在 READ COMMITTED 短事务内按主键执行 SELECT FOR UPDATE 锁定提交行，再读取机器状态与最新审查。不存在、非 finished 分别拒绝；已有 PENDING 返回同次审查；其余先检查 expected_review_id，再检查是否取得名额，满足时写新的 ID 和 PENDING。失败分支不替换旧意见，复用和新接纳均在事务提交并归还连接后才返回并交接。
+审查服务先持有独立名额的预留结果，将认证 user_id 传入独立短操作，在 READ COMMITTED 短事务内以提交 id 和 user_id 执行 SELECT FOR UPDATE 锁定归属行，再读取机器状态与最新审查。不存在或不属于该用户统一返回 SubmissionNotFound；非 finished 拒绝；已有 PENDING 返回同次审查；其余先检查 expected_review_id，再检查是否取得名额，满足时写新的 ID 和 PENDING。失败分支不替换旧意见，复用和新接纳均在事务提交并归还连接后才返回并交接。
 
 队列名额与短操作生命周期由审查服务持有，数据库不等待队列，也不持有资源许可。公共条件 start_review 复用该事务流程，只返回是否新接纳；HTTP 服务使用明确的业务结果区分复用、过期快照、容量和未完成状态。完成仍使用 review_id 条件写入，不改变机器终态。详细行为见[手动接口合同](08-llm-code-review-design.md#81-接口)。
 
 ## 5. Scheduler 启动
 
-Scheduler 只有一个活动实例，随后端进程启动。`judging_recovery` 按 created_at_ms、id 装配 queued 的固定版本完整任务，仅读取 dispatching/running 的 ID；queued 与 dispatching 合计超出待接纳容量时报错，由部署端调整配置。
+Scheduler 只有一个活动实例，随后端进程启动。`judging_recovery` 面向所有用户，按 created_at_ms、id 装配 queued 的固定版本完整任务，仅读取 dispatching/running 的 ID；queued 与 dispatching 合计超出待接纳容量时报错，由部署端调整配置。Scheduler、Kafka 和自动审查继续按提交 ID 访问可信内部任务；HTTP 详情专用查询以同一 SQL 的 id 和 user_id 条件读取，历史始终以 user_id 过滤，两类读取入口明确区分。
 
 `Scheduler::restore` 为 queued、dispatching 分别恢复待接纳许可及去重记录；只将 queued 放入待发队列，dispatching 不重发；running 保留等待 ID 而不占待接纳名额。恢复读取不改写机器状态，不把后端重启当作 Worker 执行失败。消费组从 broker 已保存的事件位点继续，数据库已保存但位点落后的记录按幂等合同重读。
 
@@ -258,7 +258,7 @@ SQL 同时约束审查枚举、JSON 对象格式和基本空值关系；详情�
 
 ## 7. 最小实施验证
 
-验证单库发布与提交引用、最新版本选择和历史版本固定、配置测试用户的归属、并发同键只创建一个提交、API 直接交接与重复交接合并、明确忙时退回内存队列、AC/CE/首个失败用例的结果存储，以及按 verdict 检索。用户数据与密码能力验证账号创建／读取、同名并发的唯一索引裁决、重名不通知致命故障及预置密码；HTTP 登录、会话及来源校验按[用户设计](11-user-authentication-design.md)验收，个人提交隔离另行接入。
+验证单库发布与提交引用、最新版本选择和历史版本固定、认证用户归属与两用户数据隔离、并发同键只创建一个提交、API 直接交接与重复交接合并、明确忙时退回内存队列、AC/CE/首个失败用例的结果存储，以及按 verdict 检索。用户数据与密码能力验证账号创建／读取、同名并发的唯一索引裁决、重名不通知致命故障及预置密码；HTTP 登录、会话、来源校验、个人归属和空用户表启动按[用户设计](11-user-authentication-design.md)验收。
 
 Scheduler 重启验证 queued 装入内存、dispatching/running 恢复等待及正确许可；重读事件不覆盖首个有效终态。位点请求入队晚于业务提交，入队失败仍完成已保存审查交接；字节往返不损坏，未知统计保持缺失。
 

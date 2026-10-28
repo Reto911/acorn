@@ -62,6 +62,8 @@ pub struct ManualReview {
 
 /// Short transaction-and-handoff operation owned by the review service, not the HTTP connection.
 struct ManualRequest {
+    /// Immutable authenticated owner retained throughout this independent operation.
+    user_id: i64,
     /// Submission selected by the validated HTTP path.
     submission_id: String,
     /// Latest identity observed by the caller, or none for a first review.
@@ -169,6 +171,7 @@ impl ReviewService {
     /// Register a manual operation that completes independently of its HTTP waiter's lifetime.
     pub async fn start_manual(
         &self,
+        user_id: i64,
         submission_id: String,
         expected_review_id: Option<String>,
     ) -> std::result::Result<ManualReview, ManualReviewError> {
@@ -187,6 +190,7 @@ impl ReviewService {
             }
             tracing::info!(submission = %submission_id, trigger = "manual", "Manual review admission registered");
             state.manual.push_back(ManualRequest {
+                user_id,
                 submission_id,
                 expected_review_id,
                 reply,
@@ -201,6 +205,7 @@ impl ReviewService {
     /// Reserve independently, decide in one transaction, and hand off only after commit.
     async fn manual_owned(
         &self,
+        user_id: i64,
         submission_id: String,
         expected_review_id: Option<String>,
     ) -> std::result::Result<ManualReview, ManualReviewError> {
@@ -213,6 +218,7 @@ impl ReviewService {
         let admission = self
             .database
             .admit_review(
+                user_id,
                 &submission_id,
                 expected_review_id.as_deref(),
                 &pending,
@@ -402,7 +408,11 @@ async fn run(service: ReviewService) -> anyhow::Result<()> {
                 let service = service.clone();
                 admissions.spawn(async move {
                     let result = service
-                        .manual_owned(request.submission_id, request.expected_review_id)
+                        .manual_owned(
+                            request.user_id,
+                            request.submission_id,
+                            request.expected_review_id,
+                        )
                         .await;
                     let _ = request.reply.send(result);
                 });

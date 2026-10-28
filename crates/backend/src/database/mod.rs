@@ -68,14 +68,14 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct Database {
     /// Shared MySQL pool; connections are never held across RPC or queue handoff.
     pool: MySqlPool,
-    /// Fixed owner and deployment resource ceilings.
+    /// Deployment resource ceilings.
     config: Arc<Config>,
     /// First fatal storage error, retained for process supervision beyond HTTP disconnects.
     failure: watch::Sender<Option<String>>,
 }
 
 impl Database {
-    /// Open an existing database, checking schema version and configured test user.
+    /// Open an existing database and check schema version, allowing an empty users table.
     pub async fn open(config: &Config) -> Result<Self> {
         let pool = connect_pool(&config.database).await?;
         let checked = async {
@@ -90,17 +90,6 @@ impl Database {
                     "Expected schema version 4, got {version}"
                 )));
             }
-            let exists: bool =
-                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id = ?)")
-                    .bind(config.test_user.user_id)
-                    .fetch_one(&pool)
-                    .await?;
-            if !exists {
-                return Err(Error::Data(anyhow::anyhow!(
-                    "Configured test user {} does not exist",
-                    config.test_user.user_id
-                )));
-            }
             Ok(())
         }
         .await;
@@ -108,10 +97,7 @@ impl Database {
             pool.close().await;
             return Err(error);
         }
-        tracing::info!(
-            user_id = config.test_user.user_id,
-            "Backend database validated"
-        );
+        tracing::info!("Backend database validated");
         Ok(Self {
             pool,
             config: Arc::new(config.clone()),

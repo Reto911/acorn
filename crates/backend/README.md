@@ -21,7 +21,7 @@ acorn-backend 是 Acorn 的 HTTP 后端，使用 Axum、Tokio 和 SQLx。它管�
 
 ## 启动
 
-先准备可互通的 Kafka、按[部署合同](../../docs/10-kafka-judging-design.md#10-整体部署)创建 topic 并初始化两端消费组位点，再按 [初始化说明](../../docs/09-mysql-migration-design.md#7-sql-改写与全新初始化)初始化数据库并预置用户、题目，再按 [Worker 说明](../worker/README.md#启动)启动节点。在仓库根目录执行：
+先准备可互通的 Kafka、按[部署合同](../../docs/10-kafka-judging-design.md#10-整体部署)创建 topic 并初始化两端消费组位点，再按 [初始化说明](../../docs/09-mysql-migration-design.md#7-sql-改写与全新初始化)初始化数据库和题目，按需预置开发用户，再按 [Worker 说明](../worker/README.md#启动)启动节点。在仓库根目录执行：
 
 ```sh
 cargo build -p acorn-backend --locked
@@ -29,7 +29,7 @@ mkdir -p "$HOME/.config/acorn"
 cp config/backend.example.toml "$HOME/.config/acorn/backend.toml"
 ```
 
-编辑配置，核对 MySQL 端点、库名、账户、用户 ID、外部 `http.public_origin`、`http.cookie_secure` 和 Worker 地址，然后启动：
+编辑配置，核对 MySQL 端点、库名、账户、外部 `http.public_origin`、`http.cookie_secure` 和 Worker 地址，然后启动：
 
 ```sh
 read -r -s -p 'MySQL 密码：' MYSQL_PASSWORD
@@ -38,9 +38,9 @@ export MYSQL_PASSWORD
 target/debug/acorn-backend --config "$HOME/.config/acorn/backend.toml"
 ```
 
-应用连接已初始化的 MySQL 8.4／InnoDB 数据库，只接受结构版本 4。启动检查版本及预置用户，缺少密码时明确失败。命令行也支持 `--help` 和 `--version`。
+应用连接已初始化的 MySQL 8.4／InnoDB 数据库，只接受结构版本 4。启动检查版本，缺少数据库密码时明确失败；空用户表可启动并开放注册，正式程序不自动创建账号。命令行也支持 `--help` 和 `--version`。
 
-预置开发账号为 `test`，显示名 `Test User`，密码为 `Acorn-Test-Only-123!`，SQL 保存对应 Argon2id 哈希。HTTP 提供注册、登录、当前身份和退出，注册成功后须手动登录。题目接口公开，提交及审查接口要求登录并匹配预期用户头，健康接口要求登录。提交归属仍由 `test_user.user_id` 指定；列表、详情和审查尚未按认证用户隔离，使用多个账号不会获得个人数据隔离。浏览器登录交互尚未接入，受保护操作先使用下述 HTTP 示例。
+可选预置开发账号为 `test`，显示名 `Test User`，密码为 `Acorn-Test-Only-123!`，SQL 保存对应 Argon2id 哈希。HTTP 提供注册、登录、当前身份和退出，注册成功后须手动登录。题目接口公开，提交及审查接口要求登录并匹配预期用户头，健康接口要求登录。提交归属认证用户，历史、详情和手动审查均按该身份限定；不存在或属于他人的提交统一返回 `404 SubmissionNotFound`。浏览器登录交互尚未接入，受保护操作先使用下述 HTTP 示例。
 
 ## 配置
 
@@ -51,7 +51,6 @@ target/debug/acorn-backend --config "$HOME/.config/acorn/backend.toml"
 | `http`       | 监听地址、外部 Origin、Secure Cookie、JSON 请求上限及页长 | `127.0.0.1:8080`，`http://127.0.0.1:8080`，false，512 KiB，20 / 100 |
 | `auth`       | 每用户及全局会话容量                                      | 10 / 10000                                                          |
 | `database`   | 端点、库名、用户名、连接池上限及等待预算                  | `127.0.0.1:3306`、`appdb`、4 个连接、5000 ms 取得等待、3 秒锁等待   |
-| `test_user`  | 所有提交的归属用户 ID                                     | `1`                                                                 |
 | `scheduler`  | 状态地址列表、待接纳容量、Kafka 发布重试间隔              | 128 个名额，1000 ms                                                 |
 | `grpc`       | 状态 RPC 的消息发送及接收上限                             | 16 MiB / 1 MiB                                                      |
 | `request`    | 源码、用例、原始载荷及单用例资源上限                      | 源码 64 KiB，最多 128 个用例                                        |
@@ -121,7 +120,7 @@ Kafka 4.3.1 单 broker 的启动、topic 及首次消费组位点初始化见[�
 
 注册和登录接受 `username`、`password`，注册还可提供 `display_name`；公共用户只包含 `id`、`username`、`display_name`。用户名去掉首尾 ASCII 空白后为 3–32 位 ASCII 字母数字或下划线，并统一小写；密码为 8–128 个 Unicode 标量值、最多 512 UTF-8 字节，禁止空白。完整输入规则见[用户设计](../../docs/11-user-authentication-design.md#31-users-与全新初始化)。
 
-以下示例沿用默认外部 Origin 和开发账号，返回 `user.id=1`：
+以下示例沿用默认外部 Origin 和开发账号，返回 `user.id=1`；使用其他账号时，请将示例中的预期用户头改为登录响应返回的 `user.id`：
 
 ```sh
 ACORN_COOKIE_JAR=/tmp/acorn-cookies.txt
@@ -142,7 +141,7 @@ curl --fail-with-body -b "$ACORN_COOKIE_JAR" -c "$ACORN_COOKIE_JAR" \
   -H 'X-Acorn-User-Id: 1' 'http://127.0.0.1:8080/api/v1/submissions?problem_id=1&state=finished&verdict=AC'
 ```
 
-创建提交需要 JSON 字段 `problem_id`、`language_id` 和 `source`，以及 UUID 格式的 `Idempotency-Key` 请求头。同键同内容返回原提交；同键不同内容返回 `409 IdempotencyConflict`。客户端丢失响应时，可用原键与原内容重传。
+创建提交需要 JSON 字段 `problem_id`、`language_id` 和 `source`，以及 UUID 格式的 `Idempotency-Key` 请求头。同一用户同键同内容返回原提交；同键不同内容返回 `409 IdempotencyConflict`。不同用户可独立使用相同键。客户端丢失响应时，可用原键与原内容重传。
 
 ### 从源码文件提交
 

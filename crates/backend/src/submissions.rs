@@ -134,7 +134,7 @@ pub struct SubmissionInfo {
 pub struct Submission {
     /// Identity, fixed target, business state and timestamps.
     pub info: SubmissionInfo,
-    /// Original owner, determined by backend configuration at creation.
+    /// Original authenticated owner retained when the creation operation was admitted.
     pub user_id: i64,
     /// Original nonempty source bytes.
     pub source: Vec<u8>,
@@ -146,9 +146,11 @@ pub struct Submission {
     pub review: Option<ReviewAttempt>,
 }
 
-/// Caller-provided content for a short, idempotent creation transaction.
+/// Authenticated owner and content for a short, idempotent creation transaction.
 #[derive(Clone, Debug)]
 pub struct CreateSubmission {
+    /// Immutable owner accepted at the authenticated request boundary.
+    pub user_id: i64,
     /// Problem whose current published version must be selected.
     pub problem_id: i64,
     /// Requested built-in language.
@@ -207,7 +209,7 @@ pub struct CreatedSubmission {
     pub task: Option<JudgingTask>,
 }
 
-/// Optional historical filters; ownership always comes from backend configuration.
+/// Optional historical filters; ownership comes from the authenticated request separately.
 #[derive(Clone, Debug, Default)]
 pub struct SubmissionFilter {
     /// Optional problem number.

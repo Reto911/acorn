@@ -139,6 +139,7 @@ async fn real_kafka_backend_publication_and_events() -> Result<()> {
         );
         let created = creation
             .create(CreateSubmission {
+                user_id: 1,
                 problem_id: 1,
                 language_id: "python".into(),
                 source: b"raw source\r\n\t\n".to_vec(),

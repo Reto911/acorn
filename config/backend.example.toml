@@ -20,9 +20,6 @@ max_connections = 4
 acquire_timeout_ms = 5_000
 lock_wait_timeout_secs = 3
 
-[test_user]
-user_id = 1
-
 [scheduler]
 pending_max_count = 128
 workers = ["http://127.0.0.1:50051"]

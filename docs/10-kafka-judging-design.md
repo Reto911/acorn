@@ -9,7 +9,7 @@
 | 对象     | 复用的组件与合同                                                                                                                          |
 | -------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | 数据库   | MySQL 8.4、InnoDB、结构版本 4；SQLx 0.9.0、READ COMMITTED 及现有共享连接池。见[MySQL 设计](09-mysql-migration-design.md#3-连接配置与启动) |
-| 后端     | Tokio、HTTP、Scheduler 和[创建服务](../crates/backend/src/submissions/creation.rs)；保留配置用户归属、幂等键、固定题目版本及接纳上限      |
+| 后端     | Tokio、HTTP、Scheduler 和[创建服务](../crates/backend/src/submissions/creation.rs)；保留认证用户归属、幂等键、固定题目版本及接纳上限      |
 | Worker   | C/Python 执行器、Isolate、单执行位置及安全停止合同。见[Worker 设计](01-worker-design.md)                                                  |
 | 健康观测 | 后台采集、缓存及只读 HTTP。见[健康观测设计](07-health-observation-design.md)                                                              |
 | 自动审查 | 既有内存队列、模型客户端及持久化流程。见[审查设计](08-llm-code-review-design.md#7-接纳持久化与生命周期)                                   |
@@ -354,7 +354,7 @@ Worker 若因 Kafka 通信失败而不能发出终态，后端无法立即得知
 
 ### 9.1 后端启动与停止
 
-启动检查 MySQL 结构版本 4 和配置用户，按第 5.3–5.4 节恢复本地任务及许可，再组织审查服务、Scheduler、Kafka 消费、成员观测、健康采集及 HTTP。旧审查 PENDING 按原规则中断。
+启动检查 MySQL 结构版本 4，允许空用户表启动，按第 5.3–5.4 节恢复所有用户的本地任务及许可，再组织审查服务、Scheduler、Kafka 消费、成员观测、健康采集及 HTTP。旧审查 PENDING 按原规则中断；内部任务读取不依赖浏览器会话或当前登录用户。
 
 事件消费组从 broker 最后保存的位点继续：数据库成功但位点未保存的事件会重读，按状态条件更新处理；尚未保存的终态正常保存。请求入队不作为位点已保存的证据，不为减少重放自动重置组位点。Worker 执行独立于后端重启。
 

@@ -55,21 +55,18 @@ impl Database {
         }).await
     }
 
-    /// Look up a creation key scoped to the deployment-configured test user.
-    pub async fn submission_by_key(&self, key: Uuid) -> Result<Option<Submission>> {
+    /// Look up a creation key scoped to the authenticated owner.
+    pub async fn submission_by_key(&self, user_id: i64, key: Uuid) -> Result<Option<Submission>> {
         self.observe("Read creation key", false, async {
             let mut connection = self.pool.acquire().await?;
-            by_key(
-                &mut connection,
-                self.config.test_user.user_id,
-                &key.to_string(),
-            )
-            .await
+            by_key(&mut connection, user_id, &key.to_string()).await
         })
         .await
     }
 
-    /// Read one stored submission and its parsed terminal details.
+    /// Read any submission for trusted internal processing without a browser-owner condition.
+    ///
+    /// HTTP detail reads must use `submission_for_user` instead.
     pub async fn submission(&self, id: &str) -> Result<Option<Submission>> {
         self.observe("Read submission", false, async {
             let row = sqlx::query(AssertSqlSafe(format!("SELECT {INFO_COLUMNS}, user_id, source, create_request_key, terminal_details_json, review_id, review_details_json FROM submissions WHERE id = ?")))
@@ -79,9 +76,20 @@ impl Database {
         .await
     }
 
-    /// Read configured-user history without source or terminal diagnostic payloads.
+    /// Read one authenticated owner's submission and parsed terminal details in the same query.
+    pub async fn submission_for_user(&self, user_id: i64, id: &str) -> Result<Option<Submission>> {
+        self.observe("Read personal submission", false, async {
+            let row = sqlx::query(AssertSqlSafe(format!("SELECT {INFO_COLUMNS}, user_id, source, create_request_key, terminal_details_json, review_id, review_details_json FROM submissions WHERE id = ? AND user_id = ?")))
+                .bind(id).bind(user_id).fetch_optional(&self.pool).await?;
+            row.as_ref().map(stored_submission).transpose()
+        })
+        .await
+    }
+
+    /// Read authenticated-owner history without source or terminal diagnostic payloads.
     pub async fn list_submissions(
         &self,
+        user_id: i64,
         filter: &SubmissionFilter,
         limit: u32,
         offset: u64,
@@ -92,7 +100,7 @@ impl Database {
             let verdict = filter.verdict.map(Verdict::as_str);
             let review_status = filter.review_status.map(ReviewStatus::as_str);
             let rows = sqlx::query(AssertSqlSafe(format!("SELECT {INFO_COLUMNS} FROM submissions WHERE user_id = ? AND (? IS NULL OR problem_id = ?) AND (? IS NULL OR state = ?) AND (? IS NULL OR verdict = ?) AND (? IS NULL OR review_status = ?) ORDER BY created_at_ms DESC, id DESC LIMIT ? OFFSET ?")))
-                .bind(self.config.test_user.user_id).bind(filter.problem_id).bind(filter.problem_id)
+                .bind(user_id).bind(filter.problem_id).bind(filter.problem_id)
                 .bind(state).bind(state).bind(verdict).bind(verdict).bind(review_status).bind(review_status).bind(limit).bind(offset)
                 .fetch_all(&self.pool).await?;
             rows.iter().map(info).collect()
@@ -110,7 +118,7 @@ impl Database {
             let key = request.request_key.to_string();
             let mut transaction = self.pool.begin().await?;
             if let Some(existing) =
-                by_key(&mut transaction, self.config.test_user.user_id, &key).await?
+                by_key(&mut transaction, request.user_id, &key).await?
             {
                 return reuse_submission(transaction, existing, request.problem_id,
                     &request.language_id, &request.source, &self.config).await;
@@ -134,7 +142,7 @@ impl Database {
             };
             let task = load_task(&mut transaction, &info, request.source, &self.config).await?;
             let inserted = sqlx::query("INSERT INTO submissions (id, user_id, problem_id, version_no, language_id, source, create_request_key, state, created_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?)")
-                .bind(&info.id).bind(self.config.test_user.user_id).bind(info.problem_id).bind(info.version_no)
+                .bind(&info.id).bind(request.user_id).bind(info.problem_id).bind(info.version_no)
                 .bind(&info.language_id).bind(&task.request.source).bind(&key).bind(info.created_at_ms)
                 .execute(&mut *transaction).await;
             if let Err(error) = inserted {
@@ -143,7 +151,7 @@ impl Database {
                 }
                 transaction.rollback().await?;
                 let mut transaction = self.pool.begin().await?;
-                if let Some(existing) = by_key(&mut transaction, self.config.test_user.user_id, &key).await? {
+                if let Some(existing) = by_key(&mut transaction, request.user_id, &key).await? {
                     return reuse_submission(transaction, existing, info.problem_id,
                         &info.language_id, &task.request.source, &self.config).await;
                 }

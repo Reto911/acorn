@@ -114,7 +114,7 @@ LLM 网络等待不进入 Worker、Kafka 事件持久化或数据库事务，不
 
 仅 `state=finished` 可手动审查，包括 CE、首例失败、未达到自动门槛和题目禁用自动审查的情况。`queued`、`dispatching`、`running`、`failed` 均拒绝手动触发。
 
-`DISABLED` 可手动启动；`PASS`、`DOUBTFUL`、`FAILED` 可手动重新审查。同一提交已有 `PENDING` 时复用该活动审查，不启动并行请求。手动触发不检查管理员角色，提交归属和访问范围继续采用当前后端契约。
+`DISABLED` 可手动启动；`PASS`、`DOUBTFUL`、`FAILED` 可手动重新审查。同一提交已有 `PENDING` 时复用该活动审查，不启动并行请求。手动触发限认证用户自己的提交，不检查管理员角色。
 
 只保存最近一次意味着：重跑接纳后，用新的审查 ID、时间及 `PENDING` 元数据替换上次意见；新一次失败也以 `FAILED` 保存，不恢复上次结果。按钮需明确说明重跑会替换上次结果。
 
@@ -305,7 +305,7 @@ LLM 网络等待不进入 Worker、Kafka 事件持久化或数据库事务，不
 
 ### 8.1 接口
 
-沿用现有 `/api/v1`。提交快照与历史 HTTP 查询及手动审查先校验会话和 `X-Acorn-User-Id`；手动 JSON POST 还须精确匹配配置的 Origin。业务归属过滤按[用户设计第 5.2 节](11-user-authentication-design.md#52-对现有业务的改动)接入，当前查询与手动接纳仍沿用配置测试用户及原有数据范围。题目版本详情新增 `review_mode`；提交历史摘要新增 `review_status`；提交详情新增 `review_status` 和可空的 `review` 对象，返回审查 ID、触发来源、时间、模型、有效意见或稳定错误码。`prompt_version` 和 `raw_output_json` 留在后端，不放入前端 DTO；不公开 endpoint、密钥、完整 API 正文或思考链。
+沿用现有 `/api/v1`。提交快照与历史 HTTP 查询及手动审查先校验会话和 `X-Acorn-User-Id`；手动 JSON POST 还须精确匹配配置的 Origin。业务归属过滤遵守[用户设计第 5.2 节](11-user-authentication-design.md#52-对现有业务的改动)：历史按认证 user_id 过滤，详情同时匹配 id 和 user_id，手动接纳在锁行事务内限定归属。题目版本详情新增 `review_mode`；提交历史摘要新增 `review_status`；提交详情新增 `review_status` 和可空的 `review` 对象，返回审查 ID、触发来源、时间、模型、有效意见或稳定错误码。`prompt_version` 和 `raw_output_json` 留在后端，不放入前端 DTO；不公开 endpoint、密钥、完整 API 正文或思考链。
 
 GET 详情和手动接纳响应共用同一 public review 对象，固定包含以下七个键；不存在意见、错误或完成时间时保留显式 null。DISABLED 的 GET 返回 review=null，历史摘要不携带 review 对象。
 
@@ -331,7 +331,7 @@ reasoning_effort、response_id、usage、prompt_version 和 raw_output_json 均�
 
 | 情况                                 | 行为                                                                        |
 | ------------------------------------ | --------------------------------------------------------------------------- |
-| 提交不存在                           | `404 SubmissionNotFound`                                                    |
+| 提交不存在或属于其他用户             | `404 SubmissionNotFound`                                                    |
 | 机器判题不是 `finished`              | `409 JudgingNotFinished`                                                    |
 | 服务未启用或正在停止                 | `503 ReviewUnavailable` / `503 BackendStopping`，不覆盖原审查               |
 | 已有活动 `PENDING`                   | `200`，返回同一次审查，不重新调用模型                                       |
@@ -341,11 +341,11 @@ reasoning_effort、response_id、usage、prompt_version 和 raw_output_json 均�
 
 预期 ID 的用途是避免旧操作覆盖后来结果。例如页面看到审查 A，请求重跑后创建 B；B 很快结束，延迟到达的同一页面请求仍携带 A，服务器发现当前已是 B 就返回 ReviewChanged，而不会再次付费创建 C。仅检查 PENDING 可以阻止同时审查，不能阻止这一类先后重跑；使用已有 review_id 即可处理，不增加长期请求幂等表。
 
-新接纳在 READ COMMITTED 短事务中按提交主键执行 SELECT FOR UPDATE，再检查机器状态、当前审查状态和预期 ID。并发接纳请求取得行锁后读取最新 PENDING 并复用，多余许可由审查服务释放；写入新的 PENDING 后提交并归还连接，再交接队列。停止接纳后到达的新 POST 返回 BackendStopping；已登记短操作按第 7.3 节结束。POST 响应不明时先 GET 当前状态，不自动再次 POST。
+新接纳将认证 user_id 传入独立短操作，在 READ COMMITTED 短事务中以提交 id 和 user_id 执行 SELECT FOR UPDATE，再检查机器状态、当前审查状态和预期 ID；不存在或不属于该用户统一视为 SubmissionNotFound。并发接纳请求取得行锁后读取最新 PENDING 并复用，多余许可由审查服务释放；写入新的 PENDING 后提交并归还连接，再交接队列。停止接纳后到达的新 POST 返回 BackendStopping；已登记短操作按第 7.3 节结束。POST 响应不明时先 GET 当前状态，不自动再次 POST。
 
 expected_review_id 是必填可空键，省略、非 UUID 字符串、错误类型或未知字段均返回 InvalidRequest；UUID 按现有路径规则规范化。会话、Origin 和预期用户边界先于业务参数提取及查询；通过 HTTP 格式校验后先检查服务停止及可用边界，再在同一事务中按不存在、非 finished、已有 PENDING、预期 ID 不符、名额不足、新接纳的顺序决定结果。已有 PENDING 的复用优先于 ID 比较和容量检查。200 与 202 均携带指向提交详情的 Location；返回值是该短操作取得的持久化快照，随后可能由后台完成更新。
 
-llm_review 在短接纳操作开始时登记其生命周期，HTTP 处理器只等待操作结果。浏览器超时、取消请求、关页或连接断开不取消已登记的操作；该操作仍须完成事务处理、提交后的本地交接或按停止及错误合同收尾。已交接的后台审查同样独立于浏览器连接。接纳生命周期复用现有创建服务的组织方式，不因客户端断开留下无人处理的 PENDING。
+llm_review 在短接纳操作开始时登记其生命周期，HTTP 处理器只等待操作结果。浏览器超时、取消请求、关页、连接断开或会话失效不取消已登记的操作，也不改变其不可变 user_id；该操作仍须完成事务处理、提交后的本地交接或按停止及错误合同收尾。已交接的后台审查同样独立于浏览器连接。自动审查及后台执行继续按提交 ID 读取所有用户的可信内部任务。接纳生命周期复用现有创建服务的组织方式，不因客户端断开留下无人处理的 PENDING。
 
 GET 只读持久化快照，不触发审查；只要查询本身成功，`DOUBTFUL` 或审查 `FAILED` 都作为正常业务数据返回 `200`。
 

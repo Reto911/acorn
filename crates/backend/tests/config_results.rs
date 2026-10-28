@@ -8,6 +8,7 @@ use acorn_protocol::worker::v1::{FailedCase, JudgeResult, Verdict};
 #[test]
 fn authentication_configuration_contract() {
     let example = include_str!("../../../config/backend.example.toml");
+    assert!(Config::parse(&format!("{example}\n[test_user]\nuser_id = 1\n")).is_err());
     let defaulted = Config::parse(&example.replace("cookie_secure = false\n", "").replace(
         "[auth]\nmax_sessions_per_user = 10\nmax_sessions = 10_000\n",
         "",

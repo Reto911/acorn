@@ -179,7 +179,10 @@ impl CreationService {
         if request.source.len() > self.config.request.source_max_bytes {
             return Err(database::Error::SourceTooLarge.into());
         }
-        let existing = self.database.submission_by_key(request.request_key).await?;
+        let existing = self
+            .database
+            .submission_by_key(request.user_id, request.request_key)
+            .await?;
         if let Some(existing) = &existing {
             if existing.info.problem_id != request.problem_id
                 || existing.info.language_id != request.language_id

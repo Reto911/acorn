@@ -14,7 +14,7 @@ Acorn is a programming judge for single-file C and Python 3 submissions, with a 
 - Trigger LLM reviews automatically according to a problem's policy, or start and rerun reviews manually to check for hardcoding, guessing, and attempts to bypass problem requirements.
 - Query backend admission conditions, the scheduling queue, and recent database and Worker observations after login.
 
-The browser currently supports public problem browsing and editing. Use the HTTP API for protected operations while browser login is being integrated. Submission creation still uses the configured test user; personal ownership filtering is the next implementation step, so login currently provides an access boundary without isolating different accounts’ submission data.
+The browser currently supports public problem browsing and editing. Use the HTTP API for protected operations while browser login is being integrated. Submissions belong to the authenticated user; history, details, and manual reviews are limited to that user's submissions.
 
 ## Project Structure
 
@@ -118,7 +118,7 @@ mysql --host=127.0.0.1 --port=3306 --user=example_initializer --password --ssl-m
 mysql --host=127.0.0.1 --port=3306 --user=example_initializer --password --ssl-mode=DISABLED --database=appdb < sql/002-example-problem.sql
 ```
 
-This creates schema version 4, user 1, and the A + B problem with ID 1, C/Python resource limits, and 104 test cases. Reuse this database on subsequent starts. Initialize an empty database and stop at the first SQL error. The backend validates the schema version and configured user at startup. The initialization scripts use MySQL syntax; the application does not import old databases or upgrade them automatically.
+This creates schema version 4, user 1, and the A + B problem with ID 1, C/Python resource limits, and 104 test cases. Reuse this database on subsequent starts. Initialize an empty database and stop at the first SQL error. The backend validates the schema version at startup and accepts an empty users table for registration. The development seed is optional when initializing manually; the deployment script includes it. The application does not create accounts automatically, import old databases, or upgrade them automatically.
 
 See the [SQL guide](sql/README.md) for script contents, account responsibilities, and handling partial initialization.
 
@@ -192,7 +192,7 @@ Keep the original idempotency key and content when resending the same request. G
 
 ## Configuration
 
-Both the backend and Worker read TOML through `--config <PATH>`; restart the service after changes. Problem HTTP routes are public. Submission routes require a valid session and matching `X-Acorn-User-Id`; health requires a session. JSON writes also require an `Origin` that exactly matches `http.public_origin`. Submission ownership still uses `test_user.user_id` until personal isolation is integrated. gRPC access remains controlled by the deployment.
+Both the backend and Worker read TOML through `--config <PATH>`; restart the service after changes. Problem HTTP routes are public. Submission routes require a valid session and matching `X-Acorn-User-Id`; health requires a session. JSON writes also require an `Origin` that exactly matches `http.public_origin`. The session determines submission ownership, and missing or other users' submissions return `404 SubmissionNotFound`. gRPC access remains controlled by the deployment.
 
 | Setting                                   | Example value                | Purpose                                            |
 | ----------------------------------------- | ---------------------------- | -------------------------------------------------- |

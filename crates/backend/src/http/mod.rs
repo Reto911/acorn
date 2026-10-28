@@ -12,7 +12,7 @@ use std::{
 };
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{
         DefaultBodyLimit, Path, Query, State,
         rejection::{JsonRejection, PathRejection, QueryRejection},
@@ -26,7 +26,7 @@ use tower_http::trace::{DefaultOnResponse, TraceLayer};
 use uuid::Uuid;
 
 use crate::{
-    auth::{cookie::CookiePolicy, sessions::Sessions},
+    auth::{AuthenticatedUser, cookie::CookiePolicy, sessions::Sessions},
     config::Config,
     database::Database,
     health::{self, Health},
@@ -201,9 +201,10 @@ async fn problem_version(
     Ok(Json(problem.into()))
 }
 
-/// Return configured-user history with typed filters and bounded pagination.
+/// Return the authenticated owner's history with typed filters and bounded pagination.
 async fn list_submissions(
     State(state): State<AppState>,
+    Extension(authenticated): Extension<AuthenticatedUser>,
     query: Result<Query<dto::HistoryQuery>, QueryRejection>,
 ) -> Result<Json<dto::Page<dto::SubmissionSummary>>, ApiError> {
     let Query(query) = query.map_err(|_| ApiError::invalid())?;
@@ -219,7 +220,7 @@ async fn list_submissions(
     };
     let items = state
         .database
-        .list_submissions(&filter, limit, offset)
+        .list_submissions(authenticated.user.id, &filter, limit, offset)
         .await?
         .into_iter()
         .map(Into::into)
@@ -231,28 +232,34 @@ async fn list_submissions(
     }))
 }
 
-/// Query only persisted state and parsed terminal details, never the Worker.
+/// Query the authenticated owner's persisted state and parsed terminal details.
 async fn submission(
     State(state): State<AppState>,
+    Extension(authenticated): Extension<AuthenticatedUser>,
     path: Result<Path<String>, PathRejection>,
 ) -> Result<Json<dto::Submission>, ApiError> {
     let Path(id) = path.map_err(|_| ApiError::invalid())?;
     let id = Uuid::parse_str(&id)
         .map_err(|_| ApiError::invalid())?
         .to_string();
-    let submission = state.database.submission(&id).await?.ok_or_else(|| {
-        ApiError::new(
-            StatusCode::NOT_FOUND,
-            "SubmissionNotFound",
-            "The submission was not found.",
-        )
-    })?;
+    let submission = state
+        .database
+        .submission_for_user(authenticated.user.id, &id)
+        .await?
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::NOT_FOUND,
+                "SubmissionNotFound",
+                "The submission was not found.",
+            )
+        })?;
     Ok(Json(submission.into()))
 }
 
 /// Validate the HTTP boundary and await a creation service that survives disconnects.
 async fn create_submission(
     State(state): State<AppState>,
+    Extension(authenticated): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     body: Result<Json<dto::CreateRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
@@ -275,6 +282,7 @@ async fn create_submission(
     let created = state
         .creation
         .create(CreateSubmission {
+            user_id: authenticated.user.id,
             problem_id: body.problem_id,
             language_id: body.language_id,
             source: body.source.into_bytes(),
@@ -301,6 +309,7 @@ async fn create_submission(
 /// Start or reuse a manual review through an operation owned independently of the HTTP waiter.
 async fn start_review(
     State(state): State<AppState>,
+    Extension(authenticated): Extension<AuthenticatedUser>,
     path: Result<Path<String>, PathRejection>,
     body: Result<Json<dto::ReviewRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
@@ -311,7 +320,7 @@ async fn start_review(
     let Json(body) = body?;
     let admitted = state
         .review
-        .start_manual(id, body.expected_review_id)
+        .start_manual(authenticated.user.id, id, body.expected_review_id)
         .await?;
     let status = if admitted.created {
         StatusCode::ACCEPTED

@@ -59,26 +59,28 @@ impl Database {
         }).await
     }
 
-    /// Replace the latest finished submission's review only when its expected identity matches.
+    /// Replace an owner's latest finished submission review when its expected identity matches.
     ///
     /// This storage operation owns no queue capacity; its caller must reserve capacity
     /// and own the operation's lifetime before calling it.
     pub async fn start_review(
         &self,
+        user_id: i64,
         id: &str,
         expected_review_id: Option<&str>,
         review: &ReviewAttempt,
     ) -> Result<bool> {
         Ok(matches!(
-            self.admit_review(id, expected_review_id, review, true)
+            self.admit_review(user_id, id, expected_review_id, review, true)
                 .await?,
             ReviewAdmission::Started
         ))
     }
 
-    /// Check and replace one latest review in the same short transaction, releasing before handoff.
+    /// Lock an owner's submission before reading or changing review state, releasing before handoff.
     pub(crate) async fn admit_review(
         &self,
+        user_id: i64,
         id: &str,
         expected_review_id: Option<&str>,
         review: &ReviewAttempt,
@@ -90,8 +92,8 @@ impl Database {
             }
             let json = review.encode(0)?;
             let mut transaction = self.pool.begin().await?;
-            let row = sqlx::query("SELECT state, review_status, review_id, review_details_json FROM submissions WHERE id = ? FOR UPDATE")
-                .bind(id).fetch_optional(&mut *transaction).await?;
+            let row = sqlx::query("SELECT state, review_status, review_id, review_details_json FROM submissions WHERE id = ? AND user_id = ? FOR UPDATE")
+                .bind(id).bind(user_id).fetch_optional(&mut *transaction).await?;
             let admission = match row {
                 None => ReviewAdmission::NotFound,
                 Some(row) if row.try_get::<String, _>("state")? != "finished" => ReviewAdmission::NotFinished,

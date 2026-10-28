@@ -96,7 +96,7 @@ async fn real_kafka_observation_and_admission() {
     assert!(
         fixture
             .database
-            .submission_by_key(rejected_key)
+            .submission_by_key(1, rejected_key)
             .await
             .unwrap()
             .is_none()
@@ -616,7 +616,7 @@ async fn queue_full_and_idempotency_preserve_identity_and_version() {
             harness
                 .fixture
                 .database
-                .submission_by_key(rejected_key)
+                .submission_by_key(1, rejected_key)
                 .await
                 .unwrap()
                 .is_none()
@@ -672,7 +672,7 @@ async fn queue_full_and_idempotency_preserve_identity_and_version() {
         harness
             .fixture
             .database
-            .submission_by_key(new_key)
+            .submission_by_key(1, new_key)
             .await
             .unwrap()
             .is_none()
@@ -682,6 +682,7 @@ async fn queue_full_and_idempotency_preserve_identity_and_version() {
         .fixture
         .database
         .create_submission(CreateSubmission {
+            user_id: 1,
             problem_id: 1,
             language_id: "c".into(),
             source: body["source"].as_str().unwrap().as_bytes().to_vec(),
@@ -711,6 +712,7 @@ async fn queued_rehandoff_keeps_original_version() {
         .fixture
         .database
         .create_submission(CreateSubmission {
+            user_id: 1,
             problem_id: 1,
             language_id: "python".into(),
             source: b"ac".to_vec(),
@@ -838,15 +840,28 @@ async fn disconnected_create_finishes_transaction_and_handoff() {
     ));
     waiting.abort();
     assert!(waiting.await.unwrap_err().is_cancelled());
+    assert_eq!(
+        call(
+            &harness.app,
+            "POST",
+            "/api/v1/auth/logout",
+            Some(json!({})),
+            None
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
     gate.commit().await.unwrap();
     harness.creation.wait_idle().await;
     let saved = harness
         .fixture
         .database
-        .submission_by_key(key)
+        .submission_by_key(1, key)
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(saved.user_id, 1);
     assert_eq!(
         harness.terminal(&saved.info.id).await.info.verdict,
         Some(Verdict::AC)
@@ -1192,7 +1207,7 @@ async fn process_creation_failure_exits_without_draining_workers() {
     assert!(
         fixture
             .database
-            .submission_by_key(key)
+            .submission_by_key(1, key)
             .await
             .unwrap()
             .is_none()
@@ -1223,6 +1238,7 @@ async fn stopping_preserves_creation_started_before_preflight() {
     let harness = Harness::start(1, 1).await;
     let creation = harness.creation.clone();
     let creating = creation.create(CreateSubmission {
+        user_id: 1,
         problem_id: 1,
         language_id: "python".into(),
         source: b"ac".to_vec(),
@@ -1355,6 +1371,7 @@ async fn real_two_workers_overlap() {
             .fixture
             .database
             .create_submission(CreateSubmission {
+                user_id: 1,
                 problem_id: 1,
                 language_id: "python".into(),
                 source: b"import time\na,b=map(int,input().split())\nif (a,b)==(1,2): time.sleep(1)\nprint(a+b)\n".to_vec(),

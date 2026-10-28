@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use sqlx::{Connection, Row};
 use tower::ServiceExt;
 
-use crate::support::{Fixture, Harness};
+use crate::support::{Fixture, Harness, authenticated_as, call};
 
 /// Browser-facing Origin used by the ordinary fixture configuration.
 const ORIGIN: &str = "http://127.0.0.1:8080";
@@ -488,5 +488,132 @@ async fn secure_cookie_and_session_capacity() {
             .unwrap()
             .contains("Max-Age=86400")
     );
+    harness.close().await;
+}
+
+/// Authenticated account snapshots own independent request keys, histories and detail queries.
+#[tokio::test]
+async fn personal_submission_ownership_and_queries() {
+    let harness = Harness::start(1, 8).await;
+    let other_user = harness.fixture.user("other").await;
+    let other_app = authenticated_as(harness.raw_app.clone(), ORIGIN, "other").await;
+    let key = uuid::Uuid::new_v4();
+    let body = json!({"problem_id":1,"language_id":"python","source":"ac"});
+    let mut forbidden = body.clone();
+    forbidden["user_id"] = json!(other_user);
+    let (status, _, _) = call(
+        &harness.app,
+        "POST",
+        "/api/v1/submissions",
+        Some(forbidden),
+        Some(key),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        harness
+            .fixture
+            .database
+            .submission_by_key(1, key)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        harness
+            .fixture
+            .database
+            .submission_by_key(other_user, key)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let mut created = Vec::new();
+    for (app, owner) in [(&harness.app, 1), (&other_app, other_user)] {
+        let (status, _, result) = call(
+            app,
+            "POST",
+            "/api/v1/submissions",
+            Some(body.clone()),
+            Some(key),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{result}");
+        let id = result["submission_id"].as_str().unwrap().to_owned();
+        assert_eq!(
+            harness
+                .fixture
+                .database
+                .submission(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .user_id,
+            owner
+        );
+        let (status, _, repeated) = call(
+            app,
+            "POST",
+            "/api/v1/submissions",
+            Some(body.clone()),
+            Some(key),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(repeated["submission_id"], id);
+        created.push(id);
+    }
+    assert_ne!(created[0], created[1]);
+    let nonexistent = uuid::Uuid::new_v4().to_string();
+    for (index, app) in [&harness.app, &other_app].into_iter().enumerate() {
+        let id = &created[index];
+        let other_id = &created[1 - index];
+        let (status, _, history) = call(
+            app,
+            "GET",
+            "/api/v1/submissions?problem_id=1&state=queued&limit=1",
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(history["items"].as_array().unwrap().len(), 1);
+        assert_eq!(history["items"][0]["submission_id"], *id);
+        let (status, _, detail) =
+            call(app, "GET", &format!("/api/v1/submissions/{id}"), None, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(detail["submission_id"], *id);
+        assert!(detail.get("source").is_none());
+        let mut missing = Vec::new();
+        for hidden in [other_id, &nonexistent] {
+            let (status, _, body) = call(
+                app,
+                "GET",
+                &format!("/api/v1/submissions/{hidden}"),
+                None,
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert_eq!(body["error"]["code"], "SubmissionNotFound");
+            missing.push(body);
+        }
+        assert_eq!(missing[0], missing[1]);
+        assert!(
+            call(
+                app,
+                "GET",
+                "/api/v1/submissions?limit=1&offset=1",
+                None,
+                None
+            )
+            .await
+            .2["items"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
     harness.close().await;
 }

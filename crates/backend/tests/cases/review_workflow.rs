@@ -37,7 +37,8 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::support::{
-    BackendProcess, Fixture, Harness, broker::Broker, call, network_call, terminal_reply, wait_for,
+    BackendProcess, Fixture, Harness, authenticated_as, broker::Broker, call, network_call,
+    terminal_reply, wait_for,
 };
 
 /// Controlled request captures and an explicit response gate, with no model credentials.
@@ -437,6 +438,68 @@ async fn manual_http_rejections_preserve_records() {
     endpoint.close().await;
 }
 
+/// Other accounts cannot observe machine state, reuse pending work or replace an existing opinion.
+#[tokio::test]
+async fn manual_review_hides_other_users_in_all_states() {
+    let endpoint = Endpoint::start(true).await;
+    let harness = Harness::start_fixture(endpoint.fixture("DISABLED").await, 1).await;
+    harness.fixture.user("other").await;
+    let other_app = authenticated_as(
+        harness.raw_app.clone(),
+        &harness.fixture.config.http.public_origin,
+        "other",
+    )
+    .await;
+    let id = harness.fixture.queued("python").await;
+    let stale_review = Uuid::new_v4().to_string();
+    for phase in 0..4 {
+        match phase {
+            1 => {
+                harness.terminal(&id).await;
+            }
+            2 => {
+                assert_eq!(
+                    manual(&harness.app, &id, None).await.0,
+                    StatusCode::ACCEPTED
+                );
+                wait_for(|| endpoint.count() == 1).await;
+            }
+            3 => {
+                endpoint.state.release.send_replace(true);
+                review_state(&harness.fixture.database, &id, ReviewStatus::Pass).await;
+            }
+            _ => {}
+        }
+        let before = harness
+            .fixture
+            .database
+            .submission(&id)
+            .await
+            .unwrap()
+            .unwrap();
+        let requests = endpoint.count();
+        for expected in [None, Some(stale_review.as_str())] {
+            let (status, body) = manual(&other_app, &id, expected).await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert_eq!(body["error"]["code"], "SubmissionNotFound");
+            assert_eq!(
+                harness
+                    .fixture
+                    .database
+                    .submission(&id)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                before
+            );
+            assert_eq!(endpoint.count(), requests);
+        }
+    }
+    harness.close().await;
+    assert_eq!(endpoint.count(), 1);
+    endpoint.close().await;
+}
+
 /// Reruns replace only the latest review, reject delayed snapshots and preserve old opinions on full.
 #[tokio::test]
 async fn manual_rerun_expected_identity_and_preservation() {
@@ -602,7 +665,7 @@ async fn review_query_projection_and_history_filters() {
             harness
                 .fixture
                 .database
-                .start_review(&id, None, &pending)
+                .start_review(1, &id, None, &pending)
                 .await
                 .unwrap();
             let completed = match status {
@@ -731,8 +794,21 @@ async fn disconnected_manual_http_finishes_admission() {
             "SELECT state, review_status, review_id, review_details_json FROM submissions WHERE id = ",
             1).await;
     }
+    assert_eq!(
+        call(
+            &harness.app,
+            "POST",
+            "/api/v1/auth/logout",
+            Some(json!({})),
+            None
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
     gate.commit().await.unwrap();
-    review_state(&harness.fixture.database, &id, ReviewStatus::Pass).await;
+    let completed = review_state(&harness.fixture.database, &id, ReviewStatus::Pass).await;
+    assert_eq!(completed.user_id, 1);
     assert_eq!(endpoint.count(), 1);
     connection.close().await.unwrap();
     harness.close().await;
@@ -837,6 +913,7 @@ async fn automatic_fifo_capacity_and_worker_release() {
         .fixture
         .database
         .create_submission(CreateSubmission {
+            user_id: 1,
             problem_id: 1,
             language_id: "python".into(),
             source: b"first".to_vec(),
@@ -924,6 +1001,7 @@ async fn kafka_commit_errors_preserve_automatic_handoff() {
     let created = fixture
         .database
         .create_submission(CreateSubmission {
+            user_id: 1,
             problem_id: 1,
             language_id: "python".into(),
             source: b"review after commit enqueue failure".to_vec(),
@@ -1126,7 +1204,7 @@ async fn process_review_startup_interrupts_without_reposting() {
     .unwrap();
     fixture
         .database
-        .start_review(&old, None, &pending)
+        .start_review(1, &old, None, &pending)
         .await
         .unwrap();
     let queued = fixture.queued("python").await;

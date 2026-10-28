@@ -42,8 +42,6 @@ pub struct Config {
     pub auth: AuthConfig,
     /// Existing MySQL database, bounded connection pool and finite lock waits.
     pub database: DatabaseConfig,
-    /// Deployment-provided submission owner.
-    pub test_user: TestUserConfig,
     /// In-memory admission and Worker selection settings.
     pub scheduler: SchedulerConfig,
     /// Per-call deadlines and binary message ceilings.
@@ -181,14 +179,6 @@ impl DatabaseConfig {
             .collation("utf8mb4_0900_bin")
             .ssl_mode(MySqlSslMode::Disabled))
     }
-}
-
-/// The pre-existing user assigned to all new submissions.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TestUserConfig {
-    /// Positive users primary key; clients cannot override it.
-    pub user_id: i64,
 }
 
 /// Waiting-admission capacity, status endpoints and publication retry settings.
@@ -594,10 +584,6 @@ impl Config {
         ensure!(
             (1..=31_536_000).contains(&self.database.lock_wait_timeout_secs),
             "database.lock_wait_timeout_secs must be between 1 and 31536000"
-        );
-        ensure!(
-            self.test_user.user_id > 0,
-            "test_user.user_id must be positive"
         );
         ensure!(
             self.http.default_page_size <= self.http.max_page_size,

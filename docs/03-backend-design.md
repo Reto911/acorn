@@ -8,9 +8,9 @@ MySQL 的连接、配置、事务和故障合同以[迁移设计](09-mysql-migra
 
 后端是单个 Rust 进程，内含 HTTP API、Scheduler 和数据库访问模块。前端通过 HTTP JSON 查询题目、提交单文件源码并轮询结果；Scheduler 通过 Kafka 发布任务和消费 Worker 事件；gRPC 仅用于只读状态观测。
 
-LLM 增量在同一进程增加与 Scheduler 平行的 llm_review 模块，机器判题后按固定题目版本自动触发，或由页面手动启动、重跑。审查只保存最近一次意见，不改变机器判题状态、verdict 或终态详情；HTTP 请求要求登录及预期用户校验，业务查询暂仍沿用配置测试用户和既有数据范围，不新增管理员角色校验。
+LLM 增量在同一进程增加与 Scheduler 平行的 llm_review 模块，机器判题后按固定题目版本自动触发，或由页面手动启动、重跑。审查只保存最近一次意见，不改变机器判题状态、verdict 或终态详情；HTTP 请求要求登录及预期用户校验，个人查询和手动接纳均限定认证用户归属，不新增管理员角色校验。
 
-服务于 C 与 Python 3 判题闭环，并提供用户名密码注册、登录、当前身份和退出。题目及测试数据由部署端本地预置；题目 HTTP 查询公开，提交与手动审查要求会话及预期用户匹配，健康查询要求登录。所有账号功能一致，不启用角色或状态差异及用户管理。业务创建暂仍读取配置测试用户的 `user_id`，列表、详情和审查尚未实施个人归属过滤；该变更遵守[用户设计](11-user-authentication-design.md#52-对现有业务的改动)。
+服务于 C 与 Python 3 判题闭环，并提供用户名密码注册、登录、当前身份和退出。题目及测试数据由部署端本地预置；题目 HTTP 查询公开，提交与手动审查要求会话及预期用户匹配，健康查询要求登录。所有账号功能一致，不启用角色或状态差异及用户管理。业务创建使用认证用户的 `user_id`，历史、详情和手动审查实施个人归属过滤，遵守[用户设计](11-user-authentication-design.md#52-对现有业务的改动)。
 
 前后端完全分离，后端仅提供 API，不托管前端静态文件，也不实现 CORS 中间件。浏览器与 API 通过同源代理部署；JSON POST 校验配置的外部 Origin，不开放跨域凭据 CORS。gRPC 和部署网络边界由防火墙、反向代理及路由配置安排。
 
@@ -92,9 +92,9 @@ llm_review 复用该共享池和 Tokio runtime。读取审查输入后先归还�
 
 一个数据库操作使用一个连接，完成一次查询或一个短事务后归还；占用连接和事务均不能跨越 gRPC、模型 HTTP 调用或等待内存队列交接。应用每条新连接设置 READ COMMITTED、严格 SQL 模式及有限锁等待，SQL 使用参数绑定。同键 INSERT 竞争先回滚再按用户和幂等键读取一次；手动审查在事务内锁定提交行，具体顺序见[迁移事务合同](09-mysql-migration-design.md#5-运行期提交和审查事务)。
 
-服务连接 TOML 指定的端点、库名及用户，以进程环境变量 MYSQL_PASSWORD 提供密码，不自动加载 .env。启动只读取 schema_version 中 id=1 的版本 4，并检查配置用户存在；缺少密码、缺少版本行、版本不符或用户不存在均拒绝启动，已建立的池在检查失败后关闭。应用不建库、建表或自动升级。
+服务连接 TOML 指定的端点、库名及用户，以进程环境变量 MYSQL_PASSWORD 提供密码，不自动加载 .env。启动只读取 schema_version 中 id=1 的版本 4；缺少密码、缺少版本行或版本不符均拒绝启动，已建立的池在检查失败后关闭。空用户表允许启动并开放注册，应用不建库、建表或自动升级。
 
-部署预置的测试用户必须存在，题目按数据库设计在事务内发布，包含至少一个用例和允许语言的正值预算。开发用户 test 的预置密码为 Acorn-Test-Only-123!，脚本保存由正式密码实现生成的 Argon2id PHC。database/users 提供账号创建和按用户名查询，auth 提供输入校验及密码计算；凭据查询返回后先释放连接，再进入密码验证。HTTP 认证接口复用这些能力；会话存储在同一 HTTP 路由实例共享的进程内存中，认证不逐请求查 users。业务归属仍使用配置测试用户，完整登录、会话及个人隔离合同见[用户设计](11-user-authentication-design.md)。
+题目按数据库设计在事务内发布，包含至少一个用例和允许语言的正值预算。开发用户 test 可按需预置，密码为 Acorn-Test-Only-123!，脚本保存由正式密码实现生成的 Argon2id PHC；正式程序不自动创建账号。database/users 提供账号创建和按用户名查询，auth 提供输入校验及密码计算；凭据查询返回后先释放连接，再进入密码验证。HTTP 认证接口复用这些能力；会话存储在同一 HTTP 路由实例共享的进程内存中，认证不逐请求查 users。业务归属来自认证用户，完整登录、会话及个人隔离合同见[用户设计](11-user-authentication-design.md)。
 
 后端仍验证语言、用例数量、数据大小和限额：源码按 UTF-8 编码后的长度计量；输入、期望输出及总载荷按原始字节计量。HTTP 请求体、Kafka 消息和原始任务载荷各有独立上限。
 
@@ -106,7 +106,7 @@ llm_review 复用该共享池和 Tokio runtime。读取审查输入后先归还�
 
 终态先由 [`TerminalOutcome`](../crates/backend/src/submissions.rs) 按已知用例数和原始字节预算校验结果形状，再执行单条条件 UPDATE，同时原子提交状态、独立 verdict、JSON 详情和终态时间。Worker 客户端校验完整响应的 Job ID、运行状态、阶段及进度与终态消息对应关系。数据库错误保留 SQLx 原始原因，业务查重与校验错误使用独立类型；数据库操作边界区分普通只读、关键写入与严重存储故障，通过共享通知保留首个致命错误并交给入口监督，通知不依赖 HTTP 等待者的生命周期。
 
-配置示例见 [backend.example.toml](../config/backend.example.toml)。`scheduler.workers` 使用 Tonic endpoint URI；MySQL endpoint 使用 host:port，IPv6 为 [address]:port，配置和日志不包含数据库密码。HTTP 体积按源码最坏 JSON 转义开销预留，Kafka 门限按原始任务／结果另加协议空间校验，Base64 JSON 长度不复用二进制消息门限。入口完成配置、结构版本、预置用户检查和启动任务处理后，启动 Scheduler、共享健康采集及 HTTP 服务，不要求 Worker 启动时即可连接；任务发布和事件错误按第 7 节处理。
+配置示例见 [backend.example.toml](../config/backend.example.toml)。`scheduler.workers` 使用 Tonic endpoint URI；MySQL endpoint 使用 host:port，IPv6 为 [address]:port，配置和日志不包含数据库密码。HTTP 体积按源码最坏 JSON 转义开销预留，Kafka 门限按原始任务／结果另加协议空间校验，Base64 JSON 长度不复用二进制消息门限。入口完成配置、结构版本检查和启动任务处理后，启动 Scheduler、共享健康采集及 HTTP 服务，不要求 Worker 启动时即可连接；任务发布和事件错误按第 7 节处理。
 
 ## 5. HTTP 接口
 
@@ -126,10 +126,12 @@ llm_review 复用该共享池和 Tokio runtime。读取审查输入后先归还�
 | `POST /api/v1/submissions`                        | 创建提交，或取得同键的已有提交                                                                                                                                           |
 | `POST /api/v1/submissions/{id}/review`            | 手动启动或重跑最近一次 LLM 审查，不重新执行 Worker                                                                                                                       |
 | `GET /api/v1/submissions/{id}`                    | 返回提交身份、固定版本、语言、业务状态、判题结论、终态详情与时间戳                                                                                                       |
-| `GET /api/v1/submissions`                         | 返回配置测试用户的提交历史，可按题号、机器状态和 verdict 筛选；LLM 增量新增 review_status 筛选                                                                           |
+| `GET /api/v1/submissions`                         | 返回认证用户的提交历史，可按题号、机器状态、verdict 和 review_status 筛选                                                                                                |
 | `GET /api/v1/health`                              | 读取本地接纳、Scheduler 及共享数据库与 Worker 观测缓存，返回 `200` 和 `Cache-Control: no-store`；字段见[健康契约](07-health-observation-design.md#5-http-契约与可见范围) |
 
 认证路由由[authentication 模块](../crates/backend/src/http/authentication.rs)组合明确的访问分组：题目公开；健康要求会话；所有 submissions 路径要求会话及单个 `X-Acorn-User-Id` 与当前 user.id 相同；有效会话退出也要求该头。认证、个人及健康响应使用 `Cache-Control: no-store`。会话检查、Origin 和预期用户校验先于业务参数提取、数据库查询或接纳；用户头仅表达页面预期身份，不授予身份。
+
+创建请求从 AuthenticatedUser 提取不可变 user_id 并传入 CreationService；历史 SQL 按该用户过滤，详情使用同一 SQL 同时匹配 id 和 user_id。手动审查将同一身份传入独立短操作，在 SELECT FOR UPDATE 读取机器及审查状态前限定归属。不存在或属于其他用户的提交统一返回 404 SubmissionNotFound。Scheduler、Kafka、自动审查及重启恢复使用可信内部读取，按提交 ID 处理所有用户的任务，不依赖浏览器会话。
 
 注册、登录、退出、提交及手动审查的 JSON POST 必须携带单个与 `http.public_origin` 精确匹配的 `Origin`，缺失、null 或不匹配拒绝。注册不创建 Session，登录失败保留原会话；auth/me 无需预期用户头。公共用户只返回 id、username、display_name。详细输入、Cookie、双 LRU、24 小时闲置续期及容量淘汰规则见[用户设计第 3–5 节](11-user-authentication-design.md#3-用户数据与密码)。
 
@@ -217,7 +219,7 @@ HTTP `error.code` 如下，LLM 新增项已由 L04 接入；增加错误码时�
 | `LanguageNotAllowed`        | `422`       | 题目最新版本未允许请求语言                                                           |
 | `ProblemNotFound`           | `404`       | 题目不存在或尚无已发布版本                                                           |
 | `ProblemVersionNotFound`    | `404`       | 指定题目下不存在该已发布版本                                                         |
-| `SubmissionNotFound`        | `404`       | 提交不存在                                                                           |
+| `SubmissionNotFound`        | `404`       | 提交不存在或不属于认证用户                                                           |
 | `IdempotencyConflict`       | `409`       | 同一用户的同一幂等键携带不同题目、语言或源码                                         |
 | `WorkersUnavailable`        | `503`       | 新建前没有可用的新鲜正成员数；此次不创建记录，同键已有记录沿用原规则                 |
 | `QueueFull`                 | `503`       | 当前没有待接纳名额                                                                   |
@@ -246,7 +248,7 @@ llm_review 在短接纳操作开始时登记其生命周期，复用创建服务
 
 ## 6. 提交创建与进程内交接
 
-1. HTTP 层先校验会话、Origin 和预期用户，再校验幂等键和源码大小；当前创建服务仍用配置测试用户确定归属，个人归属接入遵守第 11 篇。
+1. HTTP 层先校验会话、Origin 和预期用户，再校验幂等键和源码大小；从 AuthenticatedUser 提取不可变 user_id，随创建请求贯穿预查询、事务内查重、INSERT 和竞争重读。
 2. 先查 `(user_id, create_request_key)`。已有记录按既定内容比较规则返回；只有仍为 `queued` 且未在内存中的记录需要重新交接。
 3. 新建前只读独立 Worker 组成员缓存；新鲜零成员或 unknown（尚无样本、查询失败、过期）返回 `503 WorkersUnavailable`，不创建 Submission。成员为正时原子预留一个待接纳名额，满时返回 `503 QueueFull`。已有同键记录的返回或 queued 重新交接不受成员限制。预留只在内存中记录，不是数据库记录或 Worker 执行资源。
 4. 在 READ COMMITTED 短事务中再次查重。确实为新提交时，选取最新版本，装配并验证测试数据和限额，生成 UUID，插入 `queued` 记录和源码；仅当 INSERT 返回 1062 时回滚并在新短事务读取同一用户和幂等键，共用已有记录的内容比较和固定版本装配。同内容返回原记录并释放多余预留，不同内容返回冲突；键不存在时仍报告原存储错误，不再次 INSERT。
@@ -296,7 +298,7 @@ EventConsumer 按事件组串行读取。Database::judging_context 仅查询当�
 
 ### 8.1 启动
 
-1. 加载并校验 TOML，初始化日志，读取进程 MYSQL_PASSWORD，连接 MySQL 并检查结构版本 4 和配置用户。
+1. 加载并校验 TOML，初始化日志，读取进程 MYSQL_PASSWORD，连接 MySQL 并检查结构版本 4；空用户表可启动并开放注册。
 2. 中断遗留 PENDING 审查，保持原机器终态；通过 judging_recovery 装入 queued 任务及 dispatching/running 等待 ID，校验合计待接纳容量。
 3. 恢复本地许可及去重状态，创建审查服务、Kafka Publisher 和 EventConsumer，启动状态健康采集及 HTTP。状态缓存初始可为 unknown。
 
@@ -339,7 +341,6 @@ Scheduler 后台任务意外退出交给程序入口记录错误并触发故障�
 | HTTP         | 监听地址、必填规范外部 `public_origin`、默认 false 的 `cookie_secure`、请求体上限、列表默认及最大页长                                                                              |
 | 会话         | 可缺省的 `[auth]`：`max_sessions_per_user=10`、`max_sessions=10000`，均须为正；会话闲置期限固定 24 小时                                                                            |
 | 数据库       | 端点、库名、用户名、连接池上限、连接取得与锁等待预算；密码从进程 MYSQL_PASSWORD 读取                                                                                               |
-| 测试用户     | 已预置的 `user_id`                                                                                                                                                                 |
 | Scheduler    | 待接纳上限、状态观测地址列表、Kafka 发布重试间隔                                                                                                                                   |
 | gRPC         | 只读状态 RPC 的发送与接收消息上限，deadline 使用健康预算                                                                                                                           |
 | 健康观测     | `[health]` 的 `interval_ms` 和 `timeout_ms`，缺省分别为 5_000 和 1_000；均为正值，派生过期阈值 `2 * (interval_ms + timeout_ms)` 必须不溢出                                         |

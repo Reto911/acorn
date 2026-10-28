@@ -79,6 +79,7 @@ async fn mysql_pool_sessions_and_acquisition() {
 /// Create raw source without trimming or newline normalization.
 fn request(language: &str) -> CreateSubmission {
     CreateSubmission {
+        user_id: 1,
         problem_id: 1,
         language_id: language.into(),
         source: b"// source\r\n\t\n".to_vec(),
@@ -254,6 +255,7 @@ async fn published_queries_and_fixed_version_creation() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_idempotency_and_conflict() {
     let fixture = Fixture::new().await;
+    let other_user = fixture.user("other").await;
     assert!(fixture.config.database.max_connections >= 2);
     let mut connection = fixture.connection().await;
     let mut gate = connection.begin().await.unwrap();
@@ -301,11 +303,66 @@ async fn concurrent_idempotency_and_conflict() {
     assert!(ids.iter().all(|id| id == &ids[0]));
     let stored = fixture
         .database
-        .submission_by_key(submitted.request_key)
+        .submission_by_key(1, submitted.request_key)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(stored.info.id, ids[0]);
+    let mut other_request = submitted.clone();
+    other_request.user_id = other_user;
+    other_request.source.push(b'z');
+    let other = fixture
+        .database
+        .create_submission(other_request.clone())
+        .await
+        .unwrap();
+    assert!(other.created);
+    assert_ne!(other.info.id, stored.info.id);
+    let repeated = fixture
+        .database
+        .create_submission(other_request)
+        .await
+        .unwrap();
+    assert!(!repeated.created);
+    assert_eq!(repeated.info.id, other.info.id);
+    assert_eq!(
+        fixture
+            .database
+            .submission_by_key(other_user, submitted.request_key)
+            .await
+            .unwrap()
+            .unwrap()
+            .info
+            .id,
+        other.info.id
+    );
+    assert!(
+        fixture
+            .database
+            .submission_for_user(other_user, &stored.info.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        fixture
+            .database
+            .submission_for_user(other_user, &other.info.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .user_id,
+        other_user
+    );
+    assert_eq!(
+        fixture
+            .database
+            .list_submissions(other_user, &SubmissionFilter::default(), 100, 0)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     let mut conflict = submitted;
     conflict.source = stored.source;
     conflict.source.push(b'x');
@@ -316,7 +373,7 @@ async fn concurrent_idempotency_and_conflict() {
     assert_eq!(
         fixture
             .database
-            .list_submissions(&SubmissionFilter::default(), 100, 0)
+            .list_submissions(1, &SubmissionFilter::default(), 100, 0)
             .await
             .unwrap()
             .len(),
@@ -368,7 +425,7 @@ async fn unrelated_unique_conflict_remains_fatal() {
     .unwrap();
     let stored = fixture
         .database
-        .list_submissions(&SubmissionFilter::default(), 100, 0)
+        .list_submissions(1, &SubmissionFilter::default(), 100, 0)
         .await
         .unwrap();
     assert_eq!(stored.len(), 1);
@@ -521,6 +578,7 @@ async fn terminal_storage_and_immutability() {
     assert_eq!(
         database
             .list_submissions(
+                1,
                 &SubmissionFilter {
                     verdict: Some(Verdict::CE),
                     ..Default::default()
@@ -540,14 +598,17 @@ async fn terminal_storage_and_immutability() {
 #[tokio::test]
 async fn judging_recovery_and_once_only_permit_release() {
     let fixture = Fixture::new().await;
+    let other_user = fixture.user("recovered_user").await;
     let queued = fixture
         .database
         .create_submission(request("c"))
         .await
         .unwrap();
+    let mut other_request = request("python");
+    other_request.user_id = other_user;
     let dispatching = fixture
         .database
-        .create_submission(request("python"))
+        .create_submission(other_request)
         .await
         .unwrap();
     let running = fixture
@@ -831,7 +892,7 @@ async fn invalid_task_data_and_foreign_keys() {
     fixture.close().await;
 }
 
-/// Existing-database, schema, user and finite-lock-wait requirements report actual errors.
+/// Empty account tables permit registration; schema and finite-lock-wait checks remain enforced.
 #[tokio::test]
 async fn startup_checks_and_finite_lock_wait() {
     let fixture = Fixture::new().await;
@@ -847,12 +908,19 @@ async fn startup_checks_and_finite_lock_wait() {
     .await
     .unwrap();
     assert!(absent.is_none());
-    missing.database.name = fixture.config.database.name.clone();
-    missing.test_user.user_id = 999;
-    assert!(matches!(
-        Database::open(&missing).await,
-        Err(Error::Data(_))
-    ));
+    sqlx::query("DELETE FROM users")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    let empty = Database::open(&fixture.config).await.unwrap();
+    assert!(empty.user_by_username("test").await.unwrap().is_none());
+    let password_hash = hash_password("Acorn-Test-Only-123!".into()).await.unwrap();
+    let registered = empty
+        .create_user("test", "Test User", &password_hash)
+        .await
+        .unwrap();
+    assert!(registered.id > 0);
+    empty.close().await;
     sqlx::query("UPDATE schema_version SET version = 1 WHERE id = 1")
         .execute(&mut connection)
         .await
@@ -881,17 +949,20 @@ async fn startup_checks_and_finite_lock_wait() {
     let mut fast = fixture.config.clone();
     fast.database.lock_wait_timeout_secs = 1;
     let database = Database::open(&fast).await.unwrap();
+    let mut submitted = request("c");
+    submitted.user_id = registered.id;
     sqlx::raw_sql("START TRANSACTION")
         .execute(&mut connection)
         .await
         .unwrap();
-    sqlx::query("SELECT id FROM users WHERE id = 1 FOR UPDATE")
+    sqlx::query("SELECT id FROM users WHERE id = ? FOR UPDATE")
+        .bind(registered.id)
         .execute(&mut connection)
         .await
         .unwrap();
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(3),
-        database.create_submission(request("c")),
+        database.create_submission(submitted.clone()),
     )
     .await
     .unwrap();
@@ -913,13 +984,7 @@ async fn startup_checks_and_finite_lock_wait() {
         .execute(&mut connection)
         .await
         .unwrap();
-    assert!(
-        database
-            .create_submission(request("c"))
-            .await
-            .unwrap()
-            .created
-    );
+    assert!(database.create_submission(submitted).await.unwrap().created);
     database.close().await;
     connection.close().await.unwrap();
     fixture.close().await;
@@ -1126,16 +1191,21 @@ async fn latest_review_persistence_and_rerun() {
     assert!(database.finish_review(id, &first_done).await.unwrap());
     assert!(!database.finish_review(id, &first_done).await.unwrap());
     let second = pending_review(ReviewTrigger::Manual);
-    assert!(!database.start_review(id, None, &second).await.unwrap());
+    assert!(!database.start_review(1, id, None, &second).await.unwrap());
     assert!(
         database
-            .start_review(id, Some(&first.id), &second)
+            .start_review(1, id, Some(&first.id), &second)
             .await
             .unwrap()
     );
     assert!(
         !database
-            .start_review(id, Some(&second.id), &pending_review(ReviewTrigger::Manual))
+            .start_review(
+                1,
+                id,
+                Some(&second.id),
+                &pending_review(ReviewTrigger::Manual)
+            )
             .await
             .unwrap()
     );
@@ -1174,7 +1244,7 @@ async fn latest_review_persistence_and_rerun() {
     };
     assert_eq!(
         database
-            .list_submissions(&filter, 20, 0)
+            .list_submissions(1, &filter, 20, 0)
             .await
             .unwrap()
             .len(),
@@ -1183,6 +1253,7 @@ async fn latest_review_persistence_and_rerun() {
     assert!(
         database
             .list_submissions(
+                1,
                 &SubmissionFilter {
                     verdict: Some(Verdict::CE),
                     ..filter
@@ -1197,7 +1268,7 @@ async fn latest_review_persistence_and_rerun() {
     let third = pending_review(ReviewTrigger::Manual);
     assert!(
         database
-            .start_review(id, Some(&failed.id), &third)
+            .start_review(1, id, Some(&failed.id), &third)
             .await
             .unwrap()
     );
@@ -1242,6 +1313,7 @@ async fn review_policy_interruption_and_constraints() {
         DETAILS_MAX_BYTES, ReviewErrorCode, ReviewMode, ReviewStatus, ReviewTrigger,
     };
     let fixture = Fixture::new().await;
+    let other_user = fixture.user("interrupted_user").await;
     let database = &fixture.database;
     let original = database.create_submission(request("c")).await.unwrap();
     assert_eq!(
@@ -1270,7 +1342,12 @@ async fn review_policy_interruption_and_constraints() {
     let pending = pending_review(ReviewTrigger::Auto);
     assert!(
         !database
-            .start_review(&newer.info.id, None, &pending_review(ReviewTrigger::Manual))
+            .start_review(
+                1,
+                &newer.info.id,
+                None,
+                &pending_review(ReviewTrigger::Manual)
+            )
             .await
             .unwrap()
     );
@@ -1316,8 +1393,37 @@ async fn review_policy_interruption_and_constraints() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(database.interrupt_pending_reviews().await.unwrap(), 1);
+    let mut other_request = request("python");
+    other_request.user_id = other_user;
+    let other = database.create_submission(other_request).await.unwrap();
+    let other_pending = pending_review(ReviewTrigger::Auto);
+    assert!(
+        database
+            .save_terminal(
+                &other.info.id,
+                &accepted(&fixture.config),
+                Some(&other_pending)
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        database
+            .review_input(&other.info.id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(database.interrupt_pending_reviews().await.unwrap(), 2);
     assert_eq!(database.interrupt_pending_reviews().await.unwrap(), 0);
+    let other_stored = database.submission(&other.info.id).await.unwrap().unwrap();
+    assert_eq!(other_stored.user_id, other_user);
+    let other_interrupted = other_stored.review.unwrap();
+    assert_eq!(other_interrupted.id, other_pending.id);
+    assert_eq!(
+        other_interrupted.details.error.unwrap().code,
+        ReviewErrorCode::ReviewInterrupted
+    );
     let stored = database
         .submission(&original.info.id)
         .await
