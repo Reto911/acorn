@@ -8,6 +8,8 @@
 
 构建部署脚本及独立数据库初始化模式的交付与检查见[第 15 节](#15-构建部署脚本与独立数据库初始化)。
 
+用户已确认当前 MySQL／Kafka 版本的真实外部模型审查链路验证通过，此前的对应验证缺口已关闭，见[LLM 实施记录](08-llm-code-review-execution.md#127-mysqlkafka-版本的用户验证反馈)。第 14 节保留当时使用受控 Responses 的实际检查范围。
+
 Safe 接口修复的 S01–S06 已完成，两端均异步提交位点；Worker 保留 StreamConsumer，通过 SDK RAII 释放消费者。共享原生确认模块及 commit_timeout_ms 已移除，S06 已补齐动态／静态构建和静态 Worker 定向验证，safe 修复全部收口。按[修复步骤](../10-kafka-judging-design.md#12-safe-接口修复计划)在[第 10 节](#10-safe-接口修复跟踪)单独跟踪，不改变原 K01–K07 任务编号或历史完成记录。
 
 ## 2. 文档工作
