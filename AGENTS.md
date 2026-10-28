@@ -12,6 +12,10 @@ not merely because project progress changes.
 - Aim for a clear, runnable initial judging workflow and prioritize agreed
   functions. Do not impose commercial production reliability, exhaustive
   hardening or recovery requirements.
+- Treat this as a personal hobby project. Do not overdesign or add design
+  details beyond explicit requirements and concrete functional needs.
+- Develop for a fresh redeployment. Unless explicitly requested, do not add
+  backward compatibility, data migration, hotfix or live-upgrade mechanisms.
 - Reuse existing components. Add abstractions, dependencies and fallback paths
   only for a concrete functional need or an observed problem.
 - Tie runtime checks to a documented input, resource, concurrency or
@@ -74,6 +78,9 @@ in the relevant design documents and must not be maintained here in duplicate.
 - Choose checks for the changed behavior and prefer existing tests. Add regression
   coverage only for a concrete requirement or failure. Do not require a full test
   suite, fault matrix or repeated runs for every subtask.
+- Keep validation minimal. Before adding a test case or a new check, explicitly
+  tell the user what it covers and why it is needed. This is a disclosure
+  requirement, not an additional approval gate.
 - For code changes, check formatting, run Clippy, compile affected modules and
   run relevant tests using the implementation language and build tools adopted.
   Use only validation commands already present in the project or actually

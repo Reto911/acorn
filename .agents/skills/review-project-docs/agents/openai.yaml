@@ -1,0 +1,3 @@
+interface:
+  display_name: "项目文档评审"
+  short_description: "评审项目设计与实施文档，定位合同冲突、明显缺陷、过度设计及冗余表述"
