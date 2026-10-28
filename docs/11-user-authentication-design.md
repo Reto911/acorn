@@ -1,6 +1,6 @@
 # 用户注册、登录与会话设计
 
-版本：v7。本文定义注册、登录和内存 Session 的精简方案，用户已批准本计划，并要求前后端共同执行输入限制，见[审核记录](d01-review/11-user-authentication-review.md)。本文尚未实施，现行行为仍以[后端设计](03-backend-design.md)、[数据库设计](02-database-design.md)和[前端设计](05-frontend-design.md)为准。
+版本：v7。本文定义注册、登录和内存 Session 的精简方案，用户已批准本计划，并要求前后端共同执行输入限制，见[审核记录](d01-review/11-user-authentication-review.md)。分阶段实施任务及实际检查结果见[实施记录](d02-execution/11-user-authentication-execution.md)；现行接口与使用范围见[后端设计](03-backend-design.md)、[数据库设计](02-database-design.md)和[前端设计](05-frontend-design.md)。
 
 ## 1. 目标与已确认范围
 

@@ -5,6 +5,8 @@ mod reviews;
 pub(crate) use reviews::ReviewAdmission;
 pub use reviews::ReviewInput;
 mod submissions;
+mod users;
+pub use users::UserCredentials;
 
 use std::{
     future::Future,
@@ -23,6 +25,9 @@ use crate::config::{Config, DatabaseConfig};
 /// Database and business errors remain distinguishable at the HTTP boundary.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// The normalized username already belongs to an existing account.
+    #[error("Username is already taken")]
+    UsernameTaken,
     /// The requested problem has no current published version.
     #[error("Problem has no published version")]
     ProblemNotFound,

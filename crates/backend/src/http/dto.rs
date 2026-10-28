@@ -1,7 +1,7 @@
 //! Public JSON shapes; private source, test data and Worker progress never appear.
 
 use crate::{
-    health,
+    auth, health,
     llm_review::{
         ManualReview, ReviewAttempt, ReviewError, ReviewMode, ReviewResult, ReviewStatus,
         ReviewTrigger,
@@ -11,6 +11,92 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+/// Registration JSON input; identity and permission fields are exclusively server-owned.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterRequest {
+    /// User-supplied login name before shared normalization.
+    pub username: String,
+    /// Exact password, never serialized or debug-formatted.
+    pub password: String,
+    /// Optional display name, defaulting to the normalized login name.
+    pub display_name: Option<String>,
+}
+
+impl RegisterRequest {
+    /// Apply the common account rules once at the request boundary.
+    pub fn validate(self) -> Result<auth::Registration, auth::InputError> {
+        let username = auth::normalize_username(&self.username)?;
+        let display_name = auth::normalize_display_name(self.display_name.as_deref(), &username)?;
+        auth::validate_password(&self.password)?;
+        Ok(auth::Registration {
+            username,
+            display_name,
+            password: self.password,
+        })
+    }
+}
+
+/// Login JSON input sharing registration's username and password restrictions.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoginRequest {
+    /// User-supplied login name before shared normalization.
+    pub username: String,
+    /// Exact password, never serialized or debug-formatted.
+    pub password: String,
+}
+
+impl LoginRequest {
+    /// Resolve the same login name and password rules used by registration.
+    pub fn validate(self) -> Result<auth::Login, auth::InputError> {
+        let username = auth::normalize_username(&self.username)?;
+        auth::validate_password(&self.password)?;
+        Ok(auth::Login {
+            username,
+            password: self.password,
+        })
+    }
+}
+
+/// Explicit browser-visible account fields, excluding all stored credentials and roles.
+#[derive(Serialize)]
+pub struct PublicUser {
+    /// Server-assigned signed account identity.
+    pub id: i64,
+    /// Normalized login name.
+    pub username: String,
+    /// Plain display name.
+    pub display_name: String,
+}
+
+impl From<auth::User> for PublicUser {
+    /// Select the public account contract without serializing a database record.
+    fn from(user: auth::User) -> Self {
+        Self {
+            id: user.id,
+            username: user.username,
+            display_name: user.display_name,
+        }
+    }
+}
+
+/// Shared authentication response, whose absent user is an explicit JSON null.
+#[derive(Serialize)]
+pub struct AuthResponse {
+    /// Current or newly registered public account; null for an anonymous response.
+    pub user: Option<PublicUser>,
+}
+
+impl From<Option<auth::User>> for AuthResponse {
+    /// Preserve anonymous responses and project present accounts to public fields.
+    fn from(user: Option<auth::User>) -> Self {
+        Self {
+            user: user.map(Into::into),
+        }
+    }
+}
 
 /// Manual start or rerun input; the nullable expected identity must be explicitly present.
 #[derive(Deserialize)]
@@ -434,6 +520,89 @@ mod tests {
 
     use super::*;
     use serde_json::json;
+
+    /// Auth input accepts only the documented fields and both flows apply the same rules.
+    #[test]
+    fn auth_requests_validate_and_reject_unknown_fields() {
+        let input = json!({"username":" \tTeST_1\r\n", "password":"Acorn-密码-😀"});
+        let registration = serde_json::from_value::<RegisterRequest>(input.clone())
+            .unwrap()
+            .validate()
+            .unwrap();
+        let login = serde_json::from_value::<LoginRequest>(input.clone())
+            .unwrap()
+            .validate()
+            .unwrap();
+        assert_eq!(registration.username, "test_1");
+        assert_eq!(registration.display_name, "test_1");
+        assert_eq!(registration.username, login.username);
+        assert_eq!(registration.password, login.password);
+        assert_eq!(login.password, "Acorn-密码-😀");
+        for field in ["user_id", "role", "status", "unexpected"] {
+            let mut extra = input.clone();
+            extra[field] = json!(1);
+            assert!(serde_json::from_value::<RegisterRequest>(extra.clone()).is_err());
+            assert!(serde_json::from_value::<LoginRequest>(extra).is_err());
+        }
+        for input in [
+            json!({}),
+            json!({"username":"test"}),
+            json!({"username":42,"password":"12345678"}),
+        ] {
+            assert!(serde_json::from_value::<RegisterRequest>(input.clone()).is_err());
+            assert!(serde_json::from_value::<LoginRequest>(input).is_err());
+        }
+        for input in [
+            json!({"username":"ab","password":"12345678"}),
+            json!({"username":"test","password":"1234 678"}),
+        ] {
+            assert!(
+                serde_json::from_value::<RegisterRequest>(input.clone())
+                    .unwrap()
+                    .validate()
+                    .is_err()
+            );
+            assert!(
+                serde_json::from_value::<LoginRequest>(input)
+                    .unwrap()
+                    .validate()
+                    .is_err()
+            );
+        }
+        assert!(
+            serde_json::from_value::<RegisterRequest>(
+                json!({"username":"test", "password":"12345678", "display_name":" "})
+            )
+            .unwrap()
+            .validate()
+            .is_err()
+        );
+        let registration = serde_json::from_value::<RegisterRequest>(
+            json!({"username":"test", "password":"12345678", "display_name":" 张三 "}),
+        )
+        .unwrap()
+        .validate()
+        .unwrap();
+        assert_eq!(registration.display_name, "张三");
+    }
+
+    /// Public responses have exactly three user fields or an explicit anonymous null.
+    #[test]
+    fn auth_response_contains_only_public_identity() {
+        let response = AuthResponse::from(Some(auth::User {
+            id: 1,
+            username: "test".into(),
+            display_name: "Test User".into(),
+        }));
+        assert_eq!(
+            serde_json::to_value(response).unwrap(),
+            json!({"user":{"id":1,"username":"test","display_name":"Test User"}})
+        );
+        assert_eq!(
+            serde_json::to_value(AuthResponse::from(None)).unwrap(),
+            json!({"user":null})
+        );
+    }
 
     /// Manual requests distinguish an explicit null from omission and reject unallowed input.
     #[test]

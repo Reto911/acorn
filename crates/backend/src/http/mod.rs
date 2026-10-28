@@ -3,6 +3,8 @@
 mod dto;
 mod error;
 
+pub use dto::{AuthResponse, LoginRequest, PublicUser, RegisterRequest};
+
 use std::{
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},

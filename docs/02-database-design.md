@@ -64,7 +64,9 @@ MySQL 不允许对自增列使用原有的正值 CHECK，显式用户／题目 I
 | `status`              | `active` / `disabled`；停用保留历史归属               |
 | `created_at_ms`       | 账号创建时间                                          |
 
-用户表与密码哈希字段保留，当前后端不提供账号创建或密码验证。启用账号功能时，使用成熟库生成带随机盐的 Argon2id 哈希并验证，不保存明文或可逆密文，也不单独维护盐列。参数从 API 配置读取；基线至少使用 19 MiB 内存、2 次迭代、并行度 1，见 [OWASP 密码存储建议](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)。哈希的算法和参数随编码保存。
+[用户数据模块](../crates/backend/src/database/users.rs)提供按规范化用户名读取凭据和创建账号的内部能力；注册输入与密码合同见[用户设计第 3 节](11-user-authentication-design.md#3-用户数据与密码)。创建只接收已校验的用户名、显示名及已计算的 PHC 哈希，ID 自增，创建时间由服务端生成，role／status 固定为 student／active。该 INSERT 不接收主键，用户名是唯一可能冲突的输入；1062 在数据库故障观察之前转换为 UsernameTaken，其他写入错误沿用关键写入边界。读取返回自有用户数据和哈希后即释放连接，密码计算不占用连接或事务。
+
+[auth 模块](../crates/backend/src/auth.rs)使用 RustCrypto Argon2 生成和验证密码，固定初始基线 m=19456 KiB、t=2、p=1，随机盐为 16 字节、摘要为 32 字节。操作系统随机源生成盐，算法、版本、参数、盐和摘要随 PHC 保存；验证使用存储参数。不保存明文或可逆密文，不单独维护盐列，不增加密码参数配置。哈希与验证通过 Tokio spawn_blocking 执行，密码不匹配与损坏哈希或执行失败分别返回。基线依据见 [OWASP 密码存储建议](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)。
 
 当前 API 从后端配置取得预置测试用户的 `user_id`，启动时检查其存在，不接受客户端指定身份覆盖提交归属。后续启用登录时再由已验证的登录上下文提供归属；登录会话形式不由 Worker 或本表决定。
 
@@ -256,7 +258,7 @@ SQL 同时约束审查枚举、JSON 对象格式和基本空值关系；详情�
 
 ## 7. 最小实施验证
 
-验证单库发布与提交引用、最新版本选择和历史版本固定、配置测试用户的归属、并发同键只创建一个提交、API 直接交接与重复交接合并、明确忙时退回内存队列、AC/CE/首个失败用例的结果存储，以及按 verdict 检索。当前不验证尚未启用的登录和密码功能。
+验证单库发布与提交引用、最新版本选择和历史版本固定、配置测试用户的归属、并发同键只创建一个提交、API 直接交接与重复交接合并、明确忙时退回内存队列、AC/CE/首个失败用例的结果存储，以及按 verdict 检索。用户数据与密码能力验证账号创建／读取、同名并发的唯一索引裁决、重名不通知致命故障及预置密码；HTTP 登录与会话按[用户设计](11-user-authentication-design.md)另行实施和验收。
 
 Scheduler 重启验证 queued 装入内存、dispatching/running 恢复等待及正确许可；重读事件不覆盖首个有效终态。位点请求入队晚于业务提交，入队失败仍完成已保存审查交接；字节往返不损坏，未知统计保持缺失。
 

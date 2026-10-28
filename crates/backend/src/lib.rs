@@ -1,5 +1,6 @@
 //! Backend entry point configuration and Scheduler interface.
 
+pub mod auth;
 pub mod config;
 pub mod database;
 pub mod health;

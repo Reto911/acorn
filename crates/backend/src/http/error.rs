@@ -84,6 +84,11 @@ impl From<database::Error> for ApiError {
     fn from(error: database::Error) -> Self {
         use database::Error;
         match error {
+            Error::UsernameTaken => Self::new(
+                StatusCode::CONFLICT,
+                "UsernameTaken",
+                "The username is already taken.",
+            ),
             Error::ProblemNotFound => Self::new(
                 StatusCode::NOT_FOUND,
                 "ProblemNotFound",

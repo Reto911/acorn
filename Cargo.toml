@@ -18,9 +18,11 @@ missing_docs_in_private_items = "deny"
 acorn-kafka = { path = "crates/kafka", default-features = false }
 acorn-protocol = { path = "crates/protocol" }
 anyhow = "1"
+argon2 = { version = "0.5.3", default-features = false, features = ["std"] }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio", "tracing"] }
 base64 = "0.22"
 clap = { version = "4.6", features = ["derive"] }
+getrandom = { version = "0.4.3", features = ["std"] }
 nix = { version = "0.30", features = ["signal", "fs"] }
 prost = "0.14"
 rdkafka = { version = "0.39.0", default-features = false, features = ["tokio"] }

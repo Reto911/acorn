@@ -39,6 +39,8 @@ target/debug/acorn-backend --config "$HOME/.config/acorn/backend.toml"
 
 应用连接已初始化的 MySQL 8.4／InnoDB 数据库，只接受结构版本 4。启动检查版本及预置用户，缺少密码时明确失败。命令行也支持 `--help` 和 `--version`。
 
+预置开发账号为 `test`，显示名 `Test User`，密码为 `Acorn-Test-Only-123!`，SQL 保存对应 Argon2id 哈希。后端库提供账号读写、输入校验及密码哈希／验证能力；当前 HTTP 尚无注册、登录或会话接口，提交归属仍由 `test_user.user_id` 指定。
+
 ## 配置
 
 完整字段见 [backend.example.toml](../../config/backend.example.toml)。已有部署配置须删除 `scheduler.poll_interval_ms` 及 `grpc.submit_timeout_ms/get_timeout_ms/ack_timeout_ms`。

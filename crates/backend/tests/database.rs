@@ -1,6 +1,7 @@
 //! P06 acceptance using the shipped schema, seed user and example problem in real MySQL.
 
 use acorn_backend::{
+    auth::{hash_password, verify_password},
     config::Config,
     database::{Database, Error},
     llm_review::{ReviewMode, ReviewService},
@@ -952,6 +953,88 @@ async fn seed_user_password_hash() {
         32
     );
     connection.close().await.unwrap();
+    assert!(
+        verify_password("Acorn-Test-Only-123!".into(), hash.clone())
+            .await
+            .unwrap()
+    );
+    assert!(
+        !verify_password("Wrong-Test-Password".into(), hash)
+            .await
+            .unwrap()
+    );
+    fixture.close().await;
+}
+
+/// MySQL assigns account fields and decides concurrent registration without reporting a fatal write.
+#[tokio::test]
+async fn user_creation_lookup_and_username_competition() {
+    let fixture = Fixture::new().await;
+    let database = &fixture.database;
+    assert!(
+        database
+            .user_by_username("missing_user")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let seed = database.user_by_username("test").await.unwrap().unwrap();
+    assert_eq!(seed.user.id, 1);
+    assert_eq!(seed.user.display_name, "Test User");
+
+    let registration = acorn_backend::http::RegisterRequest {
+        username: " \tNew_User ".into(),
+        display_name: Some(" 新用户 ".into()),
+        password: "Acorn-New-User-123!".into(),
+    }
+    .validate()
+    .unwrap();
+    let hash = hash_password(registration.password).await.unwrap();
+    let create = || database.create_user(&registration.username, &registration.display_name, &hash);
+    let (first, second, third) = tokio::join!(create(), create(), create());
+    let results = [first, second, third];
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, Err(Error::UsernameTaken)))
+            .count(),
+        2
+    );
+    let user = results.into_iter().find_map(Result::ok).unwrap();
+    assert!(user.id > 1);
+    assert_eq!(user.username, "new_user");
+    assert_eq!(user.display_name, "新用户");
+    let credentials = database
+        .user_by_username("new_user")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(credentials.user, user);
+    assert_eq!(credentials.password_hash, hash);
+
+    let mut connection = fixture.connection().await;
+    let row = sqlx::query("SELECT role, status, created_at_ms FROM users WHERE id = ?")
+        .bind(user.id)
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(row.try_get::<String, _>("role").unwrap(), "student");
+    assert_eq!(row.try_get::<String, _>("status").unwrap(), "active");
+    assert!(row.try_get::<i64, _>("created_at_ms").unwrap() > 0);
+    let count: i64 = sqlx::query_scalar(
+        "SELECT CAST(COUNT(*) AS SIGNED) FROM users WHERE username_normalized = 'new_user'",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
+    connection.close().await.unwrap();
+    tokio::select! {
+        biased;
+        error = database.failure() => panic!("Username conflict must not notify fatal failure: {error}"),
+        () = std::future::ready(()) => {}
+    }
     fixture.close().await;
 }
 
