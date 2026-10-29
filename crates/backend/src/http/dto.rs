@@ -1,4 +1,5 @@
-//! Public JSON shapes; private source, test data and Worker progress never appear.
+//! Public JSON shapes; only the personal source response exposes stored source.
+//! Test data and transient Worker progress never appear.
 
 use crate::{
     auth, health,
@@ -471,6 +472,28 @@ impl From<submissions::Submission> for Submission {
             summary: value.info.into(),
             terminal_details: value.terminal_details,
             review: value.review.map(Into::into),
+        }
+    }
+}
+
+/// Original source exposed only through the authenticated owner's source route.
+#[derive(Serialize)]
+pub(super) struct SubmissionSource {
+    /// UUID exposed with the HTTP contract's field name.
+    submission_id: String,
+    /// Language fixed when the submission was created.
+    language_id: String,
+    /// Original UTF-8 source without trimming or newline changes.
+    source: String,
+}
+
+impl From<submissions::SubmissionSource> for SubmissionSource {
+    /// Map the minimal owner-scoped record without exposing other stored fields.
+    fn from(value: submissions::SubmissionSource) -> Self {
+        Self {
+            submission_id: value.id,
+            language_id: value.language_id,
+            source: value.source,
         }
     }
 }

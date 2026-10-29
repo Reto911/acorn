@@ -1,5 +1,7 @@
 //! Real-MySQL auth exchanges and request guards over the production Tower router.
 
+use acorn_backend::submissions::{SubmissionState, TerminalOutcome};
+use acorn_protocol::worker::v1::{JudgeResult, Verdict};
 use axum::{
     Router,
     body::{Body, to_bytes},
@@ -79,6 +81,7 @@ async fn authentication_routes_and_request_guards() {
         "/api/v1/health",
         "/api/v1/submissions",
         "/api/v1/submissions/bad-id",
+        "/api/v1/submissions/bad-id/source",
     ] {
         let (status, headers, body) = request(app, "GET", path, None, None, None, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -197,6 +200,7 @@ async fn authentication_routes_and_request_guards() {
     }
     for (method, path, body) in [
         ("GET", "/api/v1/submissions/bad-id", None),
+        ("GET", "/api/v1/submissions/bad-id/source", None),
         ("POST", "/api/v1/submissions", Some(json!({}))),
         ("POST", "/api/v1/submissions/bad-id/review", Some(json!({}))),
         ("POST", "/api/v1/auth/logout", Some(json!({}))),
@@ -213,6 +217,23 @@ async fn authentication_routes_and_request_guards() {
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body["error"]["code"], "SessionChanged");
+    }
+    for (expected, expected_status, expected_code) in [
+        (None, StatusCode::CONFLICT, "SessionChanged"),
+        (Some(id), StatusCode::BAD_REQUEST, "InvalidRequest"),
+    ] {
+        let (status, _, body) = request(
+            app,
+            "GET",
+            "/api/v1/submissions/bad-id/source",
+            None,
+            Some(&first),
+            expected,
+            None,
+        )
+        .await;
+        assert_eq!(status, expected_status);
+        assert_eq!(body["error"]["code"], expected_code);
     }
     assert_eq!(
         request(app, "GET", "/api/v1/health", None, Some(&first), None, None)
@@ -580,26 +601,44 @@ async fn personal_submission_ownership_and_queries() {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(history["items"].as_array().unwrap().len(), 1);
         assert_eq!(history["items"][0]["submission_id"], *id);
+        assert!(history["items"][0].get("source").is_none());
         let (status, _, detail) =
             call(app, "GET", &format!("/api/v1/submissions/{id}"), None, None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(detail["submission_id"], *id);
         assert!(detail.get("source").is_none());
-        let mut missing = Vec::new();
-        for hidden in [other_id, &nonexistent] {
-            let (status, _, body) = call(
-                app,
-                "GET",
-                &format!("/api/v1/submissions/{hidden}"),
-                None,
-                None,
-            )
-            .await;
-            assert_eq!(status, StatusCode::NOT_FOUND);
-            assert_eq!(body["error"]["code"], "SubmissionNotFound");
-            missing.push(body);
+        let (status, headers, source) = call(
+            app,
+            "GET",
+            &format!("/api/v1/submissions/{id}/source"),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers["cache-control"], "no-store");
+        assert_eq!(
+            source,
+            json!({"submission_id":id,"language_id":"python","source":"ac"})
+        );
+        for suffix in ["", "/source"] {
+            let mut missing = Vec::new();
+            for hidden in [other_id, &nonexistent] {
+                let (status, headers, body) = call(
+                    app,
+                    "GET",
+                    &format!("/api/v1/submissions/{hidden}{suffix}"),
+                    None,
+                    None,
+                )
+                .await;
+                assert_eq!(status, StatusCode::NOT_FOUND);
+                assert_eq!(headers["cache-control"], "no-store");
+                assert_eq!(body["error"]["code"], "SubmissionNotFound");
+                missing.push(body);
+            }
+            assert_eq!(missing[0], missing[1]);
         }
-        assert_eq!(missing[0], missing[1]);
         assert!(
             call(
                 app,
@@ -615,5 +654,77 @@ async fn personal_submission_ownership_and_queries() {
                 .is_empty()
         );
     }
+    harness.close().await;
+}
+
+/// Source reads preserve UTF-8 bytes across judging states and reject invalid stored encoding.
+#[tokio::test]
+async fn personal_submission_source_preserves_original_bytes() {
+    let harness = Harness::start(1, 8).await;
+    let original = " \t# 中文\r\n\nprint('甲')\rprint('乙')\n";
+    let (status, _, created) = call(
+        &harness.app,
+        "POST",
+        "/api/v1/submissions",
+        Some(json!({"problem_id":1,"language_id":"python","source":original})),
+        Some(uuid::Uuid::new_v4()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{created}");
+    let id = created["submission_id"].as_str().unwrap();
+    let path = format!("/api/v1/submissions/{id}/source");
+    let context = harness
+        .fixture
+        .database
+        .judging_context(id)
+        .await
+        .unwrap()
+        .unwrap();
+    let terminal = TerminalOutcome::judged(
+        &JudgeResult {
+            verdict: Verdict::Accepted as i32,
+            ..Default::default()
+        },
+        context.total_cases,
+        &harness.fixture.config.results,
+    )
+    .unwrap();
+    for state in [SubmissionState::Queued, SubmissionState::Finished] {
+        if state == SubmissionState::Finished {
+            assert!(
+                harness
+                    .fixture
+                    .database
+                    .save_terminal(id, &terminal, None)
+                    .await
+                    .unwrap()
+            );
+        }
+        assert_eq!(
+            harness.fixture.database.submission_state(id).await.unwrap(),
+            Some(state)
+        );
+        let (status, headers, source) = call(&harness.app, "GET", &path, None, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers["cache-control"], "no-store");
+        assert_eq!(source["submission_id"], id);
+        assert_eq!(source["language_id"], "python");
+        assert_eq!(
+            source["source"].as_str().unwrap().as_bytes(),
+            original.as_bytes()
+        );
+    }
+    let mut connection = harness.fixture.connection().await;
+    sqlx::query("UPDATE submissions SET source = ? WHERE id = ?")
+        .bind(vec![0xff_u8])
+        .bind(id)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    connection.close().await.unwrap();
+    let (status, headers, body) = call(&harness.app, "GET", &path, None, None).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(headers["cache-control"], "no-store");
+    assert_eq!(body["error"]["code"], "InternalError");
     harness.close().await;
 }

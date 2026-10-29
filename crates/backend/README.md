@@ -40,7 +40,7 @@ target/debug/acorn-backend --config "$HOME/.config/acorn/backend.toml"
 
 应用连接已初始化的 MySQL 8.4／InnoDB 数据库，只接受结构版本 4。启动检查版本，缺少数据库密码时明确失败；空用户表可启动并开放注册，正式程序不自动创建账号。命令行也支持 `--help` 和 `--version`。
 
-可选预置开发账号为 `test`，显示名 `Test User`，密码为 `Acorn-Test-Only-123!`，SQL 保存对应 Argon2id 哈希。HTTP 提供注册、登录、当前身份和退出，注册成功后须手动登录。题目接口公开，提交及审查接口要求登录并匹配预期用户头，健康接口要求登录。提交归属认证用户，历史、详情和手动审查均按该身份限定；不存在或属于他人的提交统一返回 `404 SubmissionNotFound`。浏览器操作见[前端说明](../../web/README.md#快速使用)，HTTP 操作见下述示例。
+可选预置开发账号为 `test`，显示名 `Test User`，密码为 `Acorn-Test-Only-123!`，SQL 保存对应 Argon2id 哈希。HTTP 提供注册、登录、当前身份和退出，注册成功后须手动登录。题目接口公开，提交及审查接口要求登录并匹配预期用户头，健康接口要求登录。提交归属认证用户，历史、详情、源码和手动审查均按该身份限定；不存在或属于他人的提交统一返回 `404 SubmissionNotFound`。浏览器操作见[前端说明](../../web/README.md#快速使用)，HTTP 操作见下述示例。
 
 ## 配置
 
@@ -113,6 +113,7 @@ Kafka 4.3.1 单 broker 的启动、topic 及首次消费组位点初始化见[�
 | POST | `/api/v1/submissions`                         | 创建提交                       |
 | GET  | `/api/v1/submissions`                         | 提交历史                       |
 | GET  | `/api/v1/submissions/{id}`                    | 判题及审查快照                 |
+| GET  | `/api/v1/submissions/{id}/source`             | 本人提交的原始源码             |
 | POST | `/api/v1/submissions/{id}/review`             | 启动或重新审查                 |
 | GET  | `/api/v1/health`                              | 本地状态和最近组件观测         |
 
@@ -179,6 +180,18 @@ curl --fail-with-body -i -b "$ACORN_COOKIE_JAR" -c "$ACORN_COOKIE_JAR" http://12
 | [time-limit.c](../../examples/submissions/time-limit.c)       | `c`           | TLE      |
 
 提交状态依次为 `queued`、`dispatching`、`running`，最终为 `finished` 或 `failed`。`finished` 携带 AC、WA、CE、RE、TLE、MLE、OLE 之一；`failed` 携带执行或消息协议错误。CE 返回编译诊断，用例失败返回首个失败用例的输出及可用资源统计。HTTP 中的字节字段使用 Base64；资源统计使用微秒和字节。
+
+### 读取本人提交源码
+
+源码由独立接口返回，提交列表和判题详情不携带源码。使用登录时的 Cookie jar 和预期用户头读取：
+
+```sh
+ACORN_SUBMISSION_ID='<实际 submission_id>'
+curl --fail-with-body -b "$ACORN_COOKIE_JAR" -c "$ACORN_COOKIE_JAR" \
+  -H 'X-Acorn-User-Id: 1' "http://127.0.0.1:8080/api/v1/submissions/$ACORN_SUBMISSION_ID/source"
+```
+
+成功返回 `200`，JSON 仅含 `submission_id`、`language_id` 和 `source`。`source` 是原始 UTF-8 字符串，保留空白、换行和末尾换行；存储内容不是有效 UTF-8 时返回 `500 InternalError`，不替换或截断内容。本人提交持久化后即可读取，不受判题或审查状态限制，也不触发新的判题或审查。权限、响应及编码合同见[源码查看设计](../../docs/12-submission-source-design.md#3-http-与数据库合同)。
 
 ### 错误响应
 

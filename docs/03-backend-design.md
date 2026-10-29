@@ -126,12 +126,13 @@ llm_review 复用该共享池和 Tokio runtime。读取审查输入后先归还�
 | `POST /api/v1/submissions`                        | 创建提交，或取得同键的已有提交                                                                                                                                           |
 | `POST /api/v1/submissions/{id}/review`            | 手动启动或重跑最近一次 LLM 审查，不重新执行 Worker                                                                                                                       |
 | `GET /api/v1/submissions/{id}`                    | 返回提交身份、固定版本、语言、业务状态、判题结论、终态详情与时间戳                                                                                                       |
+| `GET /api/v1/submissions/{id}/source`             | 返回本人提交的固定语言和原始源码；合同见[源码查看设计](12-submission-source-design.md#3-http-与数据库合同)                                                               |
 | `GET /api/v1/submissions`                         | 返回认证用户的提交历史，可按题号、机器状态、verdict 和 review_status 筛选                                                                                                |
 | `GET /api/v1/health`                              | 读取本地接纳、Scheduler 及共享数据库与 Worker 观测缓存，返回 `200` 和 `Cache-Control: no-store`；字段见[健康契约](07-health-observation-design.md#5-http-契约与可见范围) |
 
 认证路由由[authentication 模块](../crates/backend/src/http/authentication.rs)组合明确的访问分组：题目公开；健康要求会话；所有 submissions 路径要求会话及单个 `X-Acorn-User-Id` 与当前 user.id 相同；有效会话退出也要求该头。认证、个人及健康响应使用 `Cache-Control: no-store`。会话检查、Origin 和预期用户校验先于业务参数提取、数据库查询或接纳；用户头仅表达页面预期身份，不授予身份。
 
-创建请求从 AuthenticatedUser 提取不可变 user_id 并传入 CreationService；历史 SQL 按该用户过滤，详情使用同一 SQL 同时匹配 id 和 user_id。手动审查将同一身份传入独立短操作，在 SELECT FOR UPDATE 读取机器及审查状态前限定归属。不存在或属于其他用户的提交统一返回 404 SubmissionNotFound。Scheduler、Kafka、自动审查及重启恢复使用可信内部读取，按提交 ID 处理所有用户的任务，不依赖浏览器会话。
+创建请求从 AuthenticatedUser 提取不可变 user_id 并传入 CreationService；历史 SQL 按该用户过滤，详情和源码分别在同一 SQL 同时匹配 id 和 user_id。手动审查将同一身份传入独立短操作，在 SELECT FOR UPDATE 读取机器及审查状态前限定归属。不存在或属于其他用户的提交统一返回 404 SubmissionNotFound。Scheduler、Kafka、自动审查及重启恢复使用可信内部读取，按提交 ID 处理所有用户的任务，不依赖浏览器会话。
 
 注册、登录、退出、提交及手动审查的 JSON POST 必须携带单个与 `http.public_origin` 精确匹配的 `Origin`，缺失、null 或不匹配拒绝。注册不创建 Session，登录失败保留原会话；auth/me 无需预期用户头。公共用户只返回 id、username、display_name。详细输入、Cookie、双 LRU、24 小时闲置续期及容量淘汰规则见[用户设计第 3–5 节](11-user-authentication-design.md#3-用户数据与密码)。
 
@@ -197,7 +198,7 @@ CE 的 `terminal_details` 使用 `compile_diagnostic_base64`、`compile_diagnost
 
 review 独立于 terminal_details，机器 AC 仍要求 terminal_details 为 null。审查 DOUBTFUL 或 FAILED 同样作为 GET 的正常业务数据返回 200，不把审查失败当作机器执行失败。prompt_version、raw_output_json、endpoint、密钥、完整 API 正文和思考链不进入前端 DTO。
 
-本人历史源码拟由独立 GET 读取，不加入上述轮询详情；新增路由、响应和归属合同见[源码查看设计](12-submission-source-design.md#3-http-与数据库合同)。
+本人历史源码通过独立 `GET /api/v1/submissions/{id}/source` 读取，不加入上述轮询详情；响应、归属及编码合同见[源码查看设计](12-submission-source-design.md#3-http-与数据库合同)。
 
 ### 5.4 HTTP 错误规约
 

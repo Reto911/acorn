@@ -198,13 +198,14 @@ HttpOnly 禁止页面脚本直接读取 Cookie，Secure 要求浏览器通过 HT
 | 创建幂等         | 保持 UNIQUE(user_id, create_request_key)，所有查重及竞争重读显式使用认证用户；不同用户可以独立使用相同 UUID          |
 | 提交历史         | SQL 按认证用户 user_id 过滤                                                                                          |
 | 提交详情         | HTTP 专用读取在同一 SQL 使用 id 与 user_id，避免查到其他用户详情再由页面隐藏                                         |
+| 提交源码         | 独立 HTTP 读取在同一 SQL 使用 id 与 user_id，保留已认证用户的归属边界                                                |
 | 手动审查         | 将 user_id 传入独立短操作；接纳事务的 SELECT FOR UPDATE 同时匹配 id 与 user_id，在读取已有审查和状态之前完成归属限制 |
 | Kafka 与自动审查 | 继续以提交 ID 处理可信内部任务，不依赖浏览器 Session；重启恢复覆盖全部用户，不按当前登录者筛选                       |
 | 健康查询         | 登录后可查，不要求 X-Acorn-User-Id；所有用户一致，不引入管理员检查                                                   |
 
 HTTP 的用户限定查询与内部 Scheduler／审查查询明确区分命名和调用入口。Worker、Kafka 消息和模型输入无需携带 Session、密码或新的用户信息。
 
-拟新增的本人源码读取沿用同一会话、预期用户及 SQL 归属边界，接口与私有视图清理方案见[源码查看设计](12-submission-source-design.md)。
+本人源码接口已接入同一会话、预期用户及 SQL 归属边界，接口合同及待接入的私有视图清理方案见[源码查看设计](12-submission-source-design.md)。
 
 为防止多个标签页共用 Cookie 时旧页面混用新账号的数据，个人提交查询、创建提交、手动审查和有效会话退出要求 X-Acorn-User-Id 等于当前已验证会话的 user_id。它只表达页面预期身份，不赋予身份；不匹配返回 409 SessionChanged，未执行业务操作。auth/me 不要求预期身份，供首次加载和账号变化时确认当前身份。登录成功后前端更新身份再发业务请求。
 

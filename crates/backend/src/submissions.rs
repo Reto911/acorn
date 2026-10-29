@@ -129,6 +129,16 @@ pub struct SubmissionInfo {
     pub terminal_at_ms: Option<i64>,
 }
 
+/// Original UTF-8 source and identity returned by an owner-scoped read.
+pub struct SubmissionSource {
+    /// API-generated UUID identifying this immutable submission.
+    pub id: String,
+    /// Language fixed when the submission was created.
+    pub language_id: String,
+    /// Strictly decoded original source, preserving whitespace and newlines.
+    pub source: String,
+}
+
 /// Full stored submission; HTTP lists deliberately use only SubmissionInfo.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Submission {

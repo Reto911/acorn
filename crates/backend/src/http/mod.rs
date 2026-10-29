@@ -82,6 +82,7 @@ pub fn router(
             get(list_submissions).post(create_submission),
         )
         .route("/api/v1/submissions/{id}", get(submission))
+        .route("/api/v1/submissions/{id}/source", get(submission_source))
         .route("/api/v1/submissions/{id}/review", post(start_review));
     let health = Router::new().route("/api/v1/health", get(get_health));
     Router::new()
@@ -254,6 +255,30 @@ async fn submission(
             )
         })?;
     Ok(Json(submission.into()))
+}
+
+/// Read the authenticated owner's immutable UTF-8 source in any persisted state.
+async fn submission_source(
+    State(state): State<AppState>,
+    Extension(authenticated): Extension<AuthenticatedUser>,
+    path: Result<Path<String>, PathRejection>,
+) -> Result<Json<dto::SubmissionSource>, ApiError> {
+    let Path(id) = path.map_err(|_| ApiError::invalid())?;
+    let id = Uuid::parse_str(&id)
+        .map_err(|_| ApiError::invalid())?
+        .to_string();
+    let source = state
+        .database
+        .submission_source_for_user(authenticated.user.id, &id)
+        .await?
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::NOT_FOUND,
+                "SubmissionNotFound",
+                "The submission was not found.",
+            )
+        })?;
+    Ok(Json(source.into()))
 }
 
 /// Validate the HTTP boundary and await a creation service that survives disconnects.

@@ -1,4 +1,4 @@
-//! Atomic creation, fixed-version task assembly and conditional business-state writes.
+//! Owner-scoped reads, atomic creation, fixed tasks and conditional business-state writes.
 
 use acorn_protocol::worker::v1::{SubmitJobRequest, TestCase};
 use sqlx::{AssertSqlSafe, MySql, MySqlConnection, Row, Transaction, mysql::MySqlRow};
@@ -9,7 +9,8 @@ use crate::{
     llm_review::{ReviewAttempt, ReviewMode, ReviewStatus, ReviewTrigger},
     submissions::{
         CreateSubmission, CreatedSubmission, JudgingContext, JudgingRecovery, JudgingTask,
-        Submission, SubmissionFilter, SubmissionInfo, SubmissionState, TerminalOutcome, Verdict,
+        Submission, SubmissionFilter, SubmissionInfo, SubmissionSource, SubmissionState,
+        TerminalOutcome, Verdict,
     },
 };
 
@@ -82,6 +83,33 @@ impl Database {
             let row = sqlx::query(AssertSqlSafe(format!("SELECT {INFO_COLUMNS}, user_id, source, create_request_key, terminal_details_json, review_id, review_details_json FROM submissions WHERE id = ? AND user_id = ?")))
                 .bind(id).bind(user_id).fetch_optional(&self.pool).await?;
             row.as_ref().map(stored_submission).transpose()
+        })
+        .await
+    }
+
+    /// Read one owner's original source without loading result or review details.
+    pub async fn submission_source_for_user(
+        &self,
+        user_id: i64,
+        id: &str,
+    ) -> Result<Option<SubmissionSource>> {
+        self.observe("Read personal submission source", false, async {
+            let row = sqlx::query(
+                "SELECT id, language_id, source FROM submissions WHERE id = ? AND user_id = ?",
+            )
+            .bind(id)
+            .bind(user_id)
+            .fetch_optional(&self.pool)
+            .await?;
+            row.map(|row| {
+                let source: Vec<u8> = row.try_get("source")?;
+                Ok(SubmissionSource {
+                    id: row.try_get("id")?,
+                    language_id: row.try_get("language_id")?,
+                    source: String::from_utf8(source).map_err(|error| Error::Data(error.into()))?,
+                })
+            })
+            .transpose()
         })
         .await
     }
