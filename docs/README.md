@@ -16,3 +16,4 @@
 - [MySQL 迁移设计与执行方案](09-mysql-migration-design.md)：迁移范围与设计依据、全新初始化、配置与连接池、存储和事务合同、错误处理、任务划分及验收要求。
 - [Kafka 判题通信设计与实施计划](10-kafka-judging-design.md)：Scheduler 与 Worker 的任务投递、状态回传、MySQL 交接及接纳容量、独立成员观测、Kafka 健康、消费生命周期、整体部署与任务验收；可勾选的[任务清单](d02-execution/10-kafka-judging-execution.md#4-任务清单)按设计任务编号跟踪。
 - [用户注册、登录与会话设计](11-user-authentication-design.md)：MySQL 账号、后端内存 Session、Cookie 与请求校验、个人提交隔离、前端账号切换、全新部署及实施验收方案；可勾选的[开发清单](d02-execution/11-user-authentication-execution.md#3-开发清单)按 U01–U05 细分步骤、依赖与完成条件。
+- [本人历史源码查看与审查行号定位设计](12-submission-source-design.md)：独立源码读取接口、本人归属、只读展示、LF 行号与审查疑点定位、身份清理及实施验收方案。

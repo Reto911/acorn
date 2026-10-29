@@ -197,6 +197,8 @@ CE 的 `terminal_details` 使用 `compile_diagnostic_base64`、`compile_diagnost
 
 review 独立于 terminal_details，机器 AC 仍要求 terminal_details 为 null。审查 DOUBTFUL 或 FAILED 同样作为 GET 的正常业务数据返回 200，不把审查失败当作机器执行失败。prompt_version、raw_output_json、endpoint、密钥、完整 API 正文和思考链不进入前端 DTO。
 
+本人历史源码拟由独立 GET 读取，不加入上述轮询详情；新增路由、响应和归属合同见[源码查看设计](12-submission-source-design.md#3-http-与数据库合同)。
+
 ### 5.4 HTTP 错误规约
 
 错误结构采用 `{"error":{"code":"QueueFull","message":"The submission queue is full."}}`。`code` 稳定供前端判断，`message` 为英文，具体措辞可以改进。HTTP 错误只描述当前 HTTP 操作未能完成。
