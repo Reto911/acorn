@@ -11,10 +11,11 @@ Acorn is a programming judge for single-file C and Python 3 submissions, with a 
 - Compile, execute, and compare output in Isolate sandboxes, with limits on CPU time, wall time, memory, process count, output, and disk usage.
 - Process different submissions in parallel across multiple Workers, saving verdicts, compiler diagnostics, and output from the first failing test case.
 - Filter submission history by problem, execution state, verdict, and review status. Historical results reference the problem version used for judging.
+- View the source of your historical submissions in a read-only editor, and use review line buttons to locate and highlight the relevant lines.
 - Trigger LLM reviews automatically according to a problem's policy, or start and rerun reviews manually to check for hardcoding, guessing, and attempts to bypass problem requirements.
 - Query backend admission conditions, the scheduling queue, and recent database and Worker observations after login.
 
-Problems and editing are public; submission, personal history, results, review, and health require login. Registration returns to manual login. Login preserves the current anonymous editing buffer and waits for another explicit submit. Account changes stop old requests and keep drafts and pending submissions separate by user. Submissions belong to the authenticated user; history, details, and manual reviews are limited to that user's submissions.
+Problems and editing are public; submission, personal history, results, review, and health require login. Registration returns to manual login. Login preserves the current anonymous editing buffer and waits for another explicit submit. Account changes stop old requests and keep drafts and pending submissions separate by user. Submissions belong to the authenticated user; history, details, source, and manual reviews are limited to that user's submissions.
 
 ## Project Structure
 
@@ -159,6 +160,8 @@ Worker group observation may still be pending immediately after startup. A `503 
 ### Submit Your First Program
 
 Open the [problem list](http://localhost:5173/problems) to read the A + B problem (`两数求和（A + B）`) and edit the [C sample](examples/submissions/a-plus-b.c) or [Python sample](examples/submissions/a-plus-b.py). Use “登录 / 注册” to log in with the seeded development account `test` / `Acorn-Test-Only-123!`, or register and then log in manually. Click “提交代码” after login and view the result and personal history. Anonymous editing stays in page memory until login; refreshing before login loses that buffer.
+
+Open a submission from personal history to view its original source under “本次提交源码”. A review's “查看第 X–Y 行” button locates the corresponding source range. “返回答题” opens the latest problem statement and your current draft. See the [frontend guide](web/README.md#结果与历史) for source loading, retry, and display behavior.
 
 To use the HTTP API instead, log in and submit using its returned user ID (`1` for the seed):
 

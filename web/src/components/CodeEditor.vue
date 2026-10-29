@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, useTemplateRef, watch } from 'vue'
-import * as monaco from 'monaco-editor/editor/editor.api'
+import * as monaco from 'monaco-editor/editor'
 import EditorWorker from 'monaco-editor/editor/editor.worker?worker'
+import 'monaco-editor/features/find/register'
+import 'monaco-editor/features/codicon/register'
 import 'monaco-editor/languages/definitions/cpp/register'
 import 'monaco-editor/languages/definitions/python/register'
 import type { LanguageId } from '../api/types'
