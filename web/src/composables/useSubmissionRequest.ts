@@ -1,13 +1,24 @@
-import { readonly, ref, shallowRef } from 'vue'
+import {
+  effectScope,
+  onScopeDispose,
+  readonly,
+  ref,
+  shallowRef,
+  watch,
+} from 'vue'
 import { createSubmission } from '../api'
 import { endsCreation } from '../api/feedback'
 import { RequestError } from '../api/http'
 import type { CreateSubmissionRequest } from '../api/types'
 import { exceptionContext, log } from '../utils/log'
+import { useAuth, type Identity } from './useAuth'
 
-export const PENDING_SUBMISSION_KEY = 'acorn:pending-submission:v1'
+export function pendingSubmissionKey(userId: number) {
+  return `acorn:pending-submission:v2:${userId}`
+}
 
 export interface PendingSubmission {
+  readonly owner_user_id: number
   readonly request_key: string
   readonly body: Readonly<CreateSubmissionRequest>
   readonly submission_id?: string
@@ -16,11 +27,13 @@ export interface PendingSubmission {
 type SessionStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>
 
 function freezeRequest(
+  ownerUserId: number,
   requestKey: string,
   body: CreateSubmissionRequest,
   submissionId?: string,
 ): PendingSubmission {
   return Object.freeze({
+    owner_user_id: ownerUserId,
     request_key: requestKey,
     body: Object.freeze({
       problem_id: body.problem_id,
@@ -32,11 +45,13 @@ function freezeRequest(
 }
 
 /** Validate storage data without logging the saved source or idempotency key. */
-function restoreRequest(text: string): PendingSubmission {
+function restoreRequest(text: string, ownerUserId: number): PendingSubmission {
   const value: unknown = JSON.parse(text)
   if (
     typeof value !== 'object' ||
     value === null ||
+    !('owner_user_id' in value) ||
+    value.owner_user_id !== ownerUserId ||
     !('request_key' in value) ||
     typeof value.request_key !== 'string' ||
     !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(
@@ -62,6 +77,7 @@ function restoreRequest(text: string): PendingSubmission {
   )
     throw new Error('Invalid saved submission content')
   return freezeRequest(
+    ownerUserId,
     value.request_key,
     {
       problem_id: body.problem_id,
@@ -72,46 +88,79 @@ function restoreRequest(text: string): PendingSubmission {
   )
 }
 
-/** One tab owns one attempt. Drafts are separate and never read or modified here. */
-export function createSubmissionRequest(storage: SessionStorage | null) {
+type SubmissionIdentity = Pick<
+  ReturnType<typeof useAuth>,
+  | 'user'
+  | 'generation'
+  | 'snapshot'
+  | 'isCurrent'
+  | 'requireLogin'
+  | 'handleError'
+>
+
+/** One tab exposes only its current user's attempt; other owners retain their keys. */
+export function createSubmissionRequest(
+  storage: SessionStorage | null,
+  identity: SubmissionIdentity,
+) {
   const pending = shallowRef<PendingSubmission | null>(null)
   const sending = ref(false)
   const error = shallowRef<RequestError | null>(null)
   const restored = ref(false)
   const storageWarning = ref<string | null>(null)
+  const memory = new Map<number, PendingSubmission>()
+  let ownerId: number | null = null
+  let operationGeneration = 0
+  let controller: AbortController | undefined
 
   function storageFailure(operation: string, message: string, cause?: unknown) {
     storageWarning.value = message
     log('warn', { operation, ...exceptionContext(cause) })
   }
 
-  if (storage) {
-    try {
-      const text = storage.getItem(PENDING_SUBMISSION_KEY)
-      if (text !== null) {
-        pending.value = restoreRequest(text)
-        restored.value = true
+  function restore() {
+    if (ownerId === null) return
+    const saved = memory.get(ownerId)
+    if (saved) {
+      pending.value = saved
+      restored.value = true
+      return
+    }
+    if (storage) {
+      try {
+        const text = storage.getItem(pendingSubmissionKey(ownerId))
+        if (text !== null) {
+          pending.value = restoreRequest(text, ownerId)
+          memory.set(ownerId, pending.value)
+          restored.value = true
+        }
+      } catch (cause) {
+        storageFailure(
+          'restore-submission-request',
+          '无法恢复上次提交请求，请先查看提交历史；不能用当前草稿重试上次请求。',
+          cause,
+        )
       }
-    } catch (cause) {
+    } else {
       storageFailure(
-        'restore-submission-request',
-        '无法恢复上次提交请求，请先查看提交历史；不能用当前草稿重试上次请求。',
-        cause,
+        'open-session-storage',
+        '本标签页的会话存储不可用，原请求仅保留在内存中，刷新或关闭后无法恢复重试。',
       )
     }
-  } else {
-    storageFailure(
-      'open-session-storage',
-      '本标签页的会话存储不可用，原请求仅保留在内存中，刷新或关闭后无法恢复重试。',
-    )
   }
 
   function persist() {
+    if (ownerId === null) return
+    if (pending.value) memory.set(ownerId, pending.value)
+    else memory.delete(ownerId)
     if (!storage) return
     try {
       if (pending.value)
-        storage.setItem(PENDING_SUBMISSION_KEY, JSON.stringify(pending.value))
-      else storage.removeItem(PENDING_SUBMISSION_KEY)
+        storage.setItem(
+          pendingSubmissionKey(ownerId),
+          JSON.stringify(pending.value),
+        )
+      else storage.removeItem(pendingSubmissionKey(ownerId))
       storageWarning.value = null
     } catch (cause) {
       storageFailure(
@@ -130,22 +179,65 @@ export function createSubmissionRequest(storage: SessionStorage | null) {
     persist()
   }
 
+  watch(
+    () => [identity.user.value?.id ?? null, identity.generation.value] as const,
+    ([userId]) => {
+      operationGeneration += 1
+      controller?.abort()
+      controller = undefined
+      sending.value = false
+      pending.value = null
+      error.value = null
+      restored.value = false
+      storageWarning.value = null
+      ownerId = userId
+      restore()
+    },
+    { flush: 'sync', immediate: true },
+  )
+
+  function current(snapshot: Identity, generation: number) {
+    return generation === operationGeneration && identity.isCurrent(snapshot)
+  }
+
   async function retry() {
     if (sending.value || !pending.value) return null
+    if (!identity.requireLogin()) return null
+    const account = identity.snapshot()
+    if (!account || account.userId !== pending.value.owner_user_id) return null
     const snapshot = pending.value
+    const generation = ++operationGeneration
+    const requestController = new AbortController()
+    controller = requestController
     sending.value = true
     error.value = null
     try {
-      const result = await createSubmission(snapshot.request_key, snapshot.body)
+      const result = await createSubmission(
+        snapshot.request_key,
+        snapshot.body,
+        {
+          expectedUserId: account.userId,
+          signal: requestController.signal,
+        },
+      )
+      if (!current(account, generation)) return null
       clear()
       return result
     } catch (cause) {
       // The API layer converts HTTP, parsing, timeout and network failures.
       if (!(cause instanceof RequestError)) throw cause
+      if (!current(account, generation)) return null
+      if (identity.handleError(cause, account)) return null
       error.value = cause
-      if (endsCreation(cause)) clear()
+      if (
+        cause.code !== 'AuthenticationRequired' &&
+        cause.code !== 'SessionChanged' &&
+        endsCreation(cause)
+      )
+        clear()
       else if (cause.submissionId) {
         pending.value = freezeRequest(
+          snapshot.owner_user_id,
           snapshot.request_key,
           snapshot.body,
           cause.submissionId,
@@ -154,13 +246,19 @@ export function createSubmissionRequest(storage: SessionStorage | null) {
       }
       return null
     } finally {
-      sending.value = false
+      if (current(account, generation)) {
+        sending.value = false
+        controller = undefined
+      }
     }
   }
 
   async function start(body: CreateSubmissionRequest) {
     if (sending.value || pending.value) return null
-    pending.value = freezeRequest(crypto.randomUUID(), body)
+    if (!identity.requireLogin()) return null
+    const account = identity.snapshot()
+    if (!account || account.userId !== ownerId) return null
+    pending.value = freezeRequest(account.userId, crypto.randomUUID(), body)
     restored.value = false
     persist()
     return retry()
@@ -168,11 +266,17 @@ export function createSubmissionRequest(storage: SessionStorage | null) {
 
   /** Call only after UI confirmation; abandoning cannot cancel a saved submission. */
   function abandonConfirmed() {
-    if (sending.value) return false
+    const account = identity.snapshot()
+    if (sending.value || !account || account.userId !== ownerId) return false
     clear()
     error.value = null
     return true
   }
+
+  onScopeDispose(() => {
+    operationGeneration += 1
+    controller?.abort()
+  })
 
   return {
     pending: readonly(pending),
@@ -196,7 +300,10 @@ export function useSubmissionRequest() {
     } catch {
       // Access itself may be denied; the controller shows the storage warning.
     }
-    tabRequest = createSubmissionRequest(storage)
+    // The controller belongs to the application, rather than its first page.
+    tabRequest = effectScope(true).run(() =>
+      createSubmissionRequest(storage, useAuth()),
+    )!
   }
   return tabRequest
 }

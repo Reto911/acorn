@@ -8,6 +8,20 @@ export interface ErrorFeedback {
 }
 
 const messages: Record<string, [string, string]> = {
+  AuthenticationRequired: [
+    '请先登录',
+    '登录后可继续操作；原账号的草稿和待确认提交会保留。',
+  ],
+  InvalidCredentials: ['用户名或密码错误', '请检查登录信息后重试。'],
+  UsernameTaken: ['用户名已被使用', '请更换用户名后注册。'],
+  SessionChanged: [
+    '当前账号已变化',
+    '请确认当前账号后再次主动操作；原请求不会自动重发。',
+  ],
+  RequestOriginRejected: [
+    '请求来源未获允许',
+    '请检查访问地址与服务端外部 Origin 配置。',
+  ],
   InvalidRequest: ['请求内容有误', '请检查题号、语言、源码或查询参数后重试。'],
   InvalidIdempotencyKey: [
     '提交请求标识无效',
@@ -171,6 +185,8 @@ export function endsCreation(error: RequestError) {
     Object.hasOwn(messages, error.code) &&
     error.code !== 'QueueFull' &&
     error.code !== 'BackendStopping' &&
-    error.code !== 'InternalError'
+    error.code !== 'InternalError' &&
+    error.code !== 'AuthenticationRequired' &&
+    error.code !== 'SessionChanged'
   )
 }

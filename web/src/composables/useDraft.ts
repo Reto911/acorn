@@ -61,14 +61,17 @@ function decodeDraft(text: string): DraftRecord {
 /** One answer page owns its drafts, debounce timer and last selected language. */
 export function useDraft(
   problem: () => Problem,
+  owner: () => number | null,
   storage: DraftStorage | null = browserStorage(),
 ) {
   const problemId = problem().problem_id
-  const languageKey = `acorn:draft-language:v1:${problemId}`
+  let ownerId = owner()
   const languageId = ref<LanguageId>(problem().languages[0]!.language_id)
   const storageWarning = ref<string | null>(null)
   const versionNotice = ref<string | null>(null)
   const drafts = new Map<LanguageId, Draft>()
+  const anonymousEdits = new Set<LanguageId>()
+  let anonymousLanguageSelected = false
   let timer: ReturnType<typeof setTimeout> | undefined
   let notifiedVersion: number | undefined
 
@@ -78,12 +81,18 @@ export function useDraft(
   }
 
   function draftKey(language: LanguageId) {
-    return `acorn:draft:v1:${problemId}:${language}`
+    return `acorn:draft:v2:${ownerId}:${problemId}:${language}`
   }
 
-  if (storage) {
+  function languageKey() {
+    return `acorn:draft-language:v2:${ownerId}:${problemId}`
+  }
+
+  function restoreLanguage() {
+    languageId.value = problem().languages[0]!.language_id
+    if (!storage || ownerId === null) return
     try {
-      const selected = storage.getItem(languageKey)
+      const selected = storage.getItem(languageKey())
       if (problem().languages.some((item) => item.language_id === selected))
         languageId.value = selected as LanguageId
     } catch (cause) {
@@ -93,7 +102,10 @@ export function useDraft(
         cause,
       )
     }
-  } else {
+  }
+
+  restoreLanguage()
+  if (!storage && ownerId !== null) {
     failure(
       'open-draft-storage',
       '本地存储不可用，草稿仅保留在当前页面内存中，刷新或关闭后可能丢失。',
@@ -109,7 +121,7 @@ export function useDraft(
       savedAt: null,
       dirty: false,
     })
-    if (storage) {
+    if (storage && ownerId !== null) {
       try {
         const text = storage.getItem(draftKey(language))
         if (text !== null) {
@@ -137,30 +149,33 @@ export function useDraft(
     timer = undefined
   }
 
-  function save() {
-    cancelTimer()
+  function saveDraft(language: LanguageId, draft: Draft) {
+    if (ownerId === null) {
+      storageWarning.value = '尚未登录，草稿仅保留在当前页面内存中。'
+      return false
+    }
     if (!storage) {
-      current.value.dirty = true
+      draft.dirty = true
       failure('save-draft', '本地存储不可用，草稿未保存；当前仍可编辑和提交。')
       return false
     }
     const savedAt = Date.now()
     try {
       storage.setItem(
-        draftKey(languageId.value),
+        draftKey(language),
         JSON.stringify({
-          source: current.value.source,
-          version_no: current.value.version,
+          source: draft.source,
+          version_no: draft.version,
           updated_at_ms: savedAt,
         } satisfies DraftRecord),
       )
-      storage.setItem(languageKey, languageId.value)
-      current.value.savedAt = savedAt
-      current.value.dirty = false
+      storage.setItem(languageKey(), languageId.value)
+      draft.savedAt = savedAt
+      draft.dirty = false
       storageWarning.value = null
       return true
     } catch (cause) {
-      current.value.dirty = true
+      draft.dirty = true
       failure(
         'save-draft',
         '无法保存本地草稿，当前内容尚未保存；请复制代码留存，编辑和提交仍可继续。',
@@ -170,8 +185,19 @@ export function useDraft(
     }
   }
 
+  function save() {
+    cancelTimer()
+    return saveDraft(languageId.value, current.value)
+  }
+
   function flush() {
-    if (current.value.dirty) save()
+    cancelTimer()
+    let warning: string | null = null
+    for (const [language, draft] of drafts) {
+      if (draft.dirty && !saveDraft(language, draft))
+        warning = storageWarning.value
+    }
+    if (warning) storageWarning.value = warning
   }
 
   function syncVersion() {
@@ -188,13 +214,14 @@ export function useDraft(
 
   function selectLanguage(language: LanguageId) {
     if (language === languageId.value) return
+    if (ownerId === null) anonymousLanguageSelected = true
     flush()
     languageId.value = language
     current.value = load(language)
     syncVersion()
-    if (storage) {
+    if (storage && ownerId !== null) {
       try {
-        storage.setItem(languageKey, language)
+        storage.setItem(languageKey(), language)
       } catch (cause) {
         failure(
           'save-draft-language',
@@ -209,6 +236,7 @@ export function useDraft(
     get: () => current.value.source,
     set: (value: string) => {
       if (value === current.value.source) return
+      if (ownerId === null) anonymousEdits.add(languageId.value)
       current.value.source = value
       current.value.dirty = true
       cancelTimer()
@@ -225,6 +253,12 @@ export function useDraft(
     current.value.source = ''
     current.value.savedAt = null
     current.value.dirty = true
+    if (ownerId === null) {
+      anonymousEdits.add(languageId.value)
+      current.value.dirty = false
+      storageWarning.value = null
+      return true
+    }
     try {
       if (!storage) throw new Error('Draft storage is unavailable')
       storage.removeItem(draftKey(languageId.value))
@@ -240,6 +274,47 @@ export function useDraft(
       return false
     }
   }
+
+  watch(
+    owner,
+    (nextOwner) => {
+      const previousOwner = ownerId
+      // Save with the captured owner before changing any storage key.
+      flush()
+      ownerId = nextOwner
+      storageWarning.value = null
+      if (previousOwner === null && nextOwner !== null) {
+        // Anonymous buffers, including other edited languages, survive login.
+        const selectedLanguage = languageId.value
+        const edited = [...drafts].filter(([language]) =>
+          anonymousEdits.has(language),
+        )
+        drafts.clear()
+        restoreLanguage()
+        if (anonymousLanguageSelected || anonymousEdits.has(selectedLanguage))
+          languageId.value = selectedLanguage
+        for (const [language, draft] of edited) {
+          draft.dirty = true
+          drafts.set(language, draft)
+        }
+        current.value = load(languageId.value)
+        anonymousEdits.clear()
+        anonymousLanguageSelected = false
+        syncVersion()
+        flush()
+        return
+      }
+      drafts.clear()
+      anonymousEdits.clear()
+      anonymousLanguageSelected = false
+      versionNotice.value = null
+      notifiedVersion = undefined
+      restoreLanguage()
+      current.value = load(languageId.value)
+      syncVersion()
+    },
+    { flush: 'sync' },
+  )
 
   watch(
     problem,

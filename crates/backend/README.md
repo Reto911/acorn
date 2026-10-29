@@ -40,7 +40,7 @@ target/debug/acorn-backend --config "$HOME/.config/acorn/backend.toml"
 
 应用连接已初始化的 MySQL 8.4／InnoDB 数据库，只接受结构版本 4。启动检查版本，缺少数据库密码时明确失败；空用户表可启动并开放注册，正式程序不自动创建账号。命令行也支持 `--help` 和 `--version`。
 
-可选预置开发账号为 `test`，显示名 `Test User`，密码为 `Acorn-Test-Only-123!`，SQL 保存对应 Argon2id 哈希。HTTP 提供注册、登录、当前身份和退出，注册成功后须手动登录。题目接口公开，提交及审查接口要求登录并匹配预期用户头，健康接口要求登录。提交归属认证用户，历史、详情和手动审查均按该身份限定；不存在或属于他人的提交统一返回 `404 SubmissionNotFound`。浏览器登录交互尚未接入，受保护操作先使用下述 HTTP 示例。
+可选预置开发账号为 `test`，显示名 `Test User`，密码为 `Acorn-Test-Only-123!`，SQL 保存对应 Argon2id 哈希。HTTP 提供注册、登录、当前身份和退出，注册成功后须手动登录。题目接口公开，提交及审查接口要求登录并匹配预期用户头，健康接口要求登录。提交归属认证用户，历史、详情和手动审查均按该身份限定；不存在或属于他人的提交统一返回 `404 SubmissionNotFound`。浏览器操作见[前端说明](../../web/README.md#快速使用)，HTTP 操作见下述示例。
 
 ## 配置
 

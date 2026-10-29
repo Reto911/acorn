@@ -140,11 +140,11 @@ async fn serve(config: &Config, database: Database) -> Result<()> {
             },
             result = &mut health_task, if !health_finished => {
                 health_finished = true;
-                observe_health_completion(result, false);
+                observe_health_completion(result, stopping);
             },
             result = &mut membership_task, if !membership_finished => {
                 membership_finished = true;
-                observe_membership_completion(result, false);
+                observe_membership_completion(result, stopping);
             },
             signal = stop_signal(), if !stopping => {
                 if let Err(error) = signal {

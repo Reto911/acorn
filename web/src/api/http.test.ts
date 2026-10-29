@@ -2,6 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { RequestError, requestJson } from './http'
 import {
   createSubmission,
+  getMe,
+  getHealth,
+  login,
+  register,
+  logout,
   getSubmission,
   listProblems,
   listSubmissions,
@@ -157,6 +162,104 @@ describe('HTTP operation boundaries', () => {
 })
 
 describe('allowed API fields', () => {
+  it('uses public authentication DTOs without persisting or logging credentials', async () => {
+    const user = { id: 7, username: 'test', display_name: 'Test' }
+    fetchMock
+      .mockResolvedValueOnce(Response.json({ user: null }))
+      .mockResolvedValueOnce(Response.json({ user }, { status: 201 }))
+      .mockResolvedValueOnce(Response.json({ user }))
+      .mockResolvedValueOnce(Response.json({ user: null }))
+    expect(await getMe()).toEqual({ user: null })
+    expect(
+      await register({
+        username: 'test',
+        password: 'private-password',
+        role: 'admin',
+      } as never),
+    ).toEqual({ user })
+    expect(
+      await login({
+        username: 'test',
+        password: 'private-password',
+        user_id: 1,
+      } as never),
+    ).toEqual({ user })
+    expect(await logout({ expectedUserId: 7 })).toEqual({ user: null })
+    expect(
+      fetchMock.mock.calls.map(([url, options]) => ({
+        url,
+        body: options?.body,
+      })),
+    ).toEqual([
+      { url: '/api/v1/auth/me', body: undefined },
+      {
+        url: '/api/v1/auth/register',
+        body: JSON.stringify({
+          username: 'test',
+          password: 'private-password',
+        }),
+      },
+      {
+        url: '/api/v1/auth/login',
+        body: JSON.stringify({
+          username: 'test',
+          password: 'private-password',
+        }),
+      },
+      { url: '/api/v1/auth/logout', body: '{}' },
+    ])
+    expect(fetchMock.mock.calls[3]![1]!.headers).toHaveProperty(
+      'X-Acorn-User-Id',
+      '7',
+    )
+    expect(JSON.stringify(vi.mocked(console.info).mock.calls)).not.toContain(
+      'private-password',
+    )
+    fetchMock.mockResolvedValueOnce(Response.json({ user: null }))
+    await expect(
+      login({ username: 'test', password: 'private-password' }),
+    ).rejects.toMatchObject({ kind: 'invalid-response' })
+  })
+
+  it('forwards the captured expected owner through every personal request but omits it for health and me', async () => {
+    fetchMock
+      .mockResolvedValueOnce(Response.json({ items: [], limit: 20, offset: 0 }))
+      .mockResolvedValueOnce(Response.json({ submission_id: 'saved-id' }))
+      .mockResolvedValueOnce(
+        Response.json(
+          { submission_id: 'saved-id', state: 'queued' },
+          { status: 202 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        Response.json(
+          {
+            submission_id: 'saved-id',
+            review_status: 'PENDING',
+            review: { review_id: 'review-a' },
+          },
+          { status: 202 },
+        ),
+      )
+      .mockResolvedValueOnce(Response.json({}))
+      .mockResolvedValueOnce(Response.json({ user: null }))
+    const options = { expectedUserId: 9 }
+    await listSubmissions({}, options)
+    await getSubmission('saved-id', options)
+    await createSubmission(
+      'key',
+      { problem_id: 1, language_id: 'c', source: 'x' },
+      options,
+    )
+    await startReview('saved-id', null, options)
+    await getHealth(options)
+    await getMe(options)
+    for (const [, init] of fetchMock.mock.calls.slice(0, 4))
+      expect(init!.headers).toHaveProperty('X-Acorn-User-Id', '9')
+    for (const [, init] of fetchMock.mock.calls.slice(4))
+      expect(init!.headers).not.toHaveProperty('X-Acorn-User-Id')
+  })
+
   it('sends only the expected review identity and accepts both new and reused reviews', async () => {
     const review = {
       review_id: 'review-a',

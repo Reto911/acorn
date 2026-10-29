@@ -42,6 +42,8 @@ interface RequestOptions {
   method?: 'GET' | 'POST'
   body?: unknown
   idempotencyKey?: string
+  /** Identity captured by the page or frozen write operation, never a credential. */
+  expectedUserId?: number
   signal?: AbortSignal
   /** Mutating operations validate acknowledgements before accepting their outcome. */
   validate?: (value: unknown, status: number) => boolean
@@ -98,6 +100,8 @@ export async function requestJson<T>(
     if (options.body !== undefined) headers['Content-Type'] = 'application/json'
     if (options.idempotencyKey)
       headers['Idempotency-Key'] = options.idempotencyKey
+    if (options.expectedUserId !== undefined)
+      headers['X-Acorn-User-Id'] = String(options.expectedUserId)
     const response = await fetch(path, {
       method: context.method,
       headers,

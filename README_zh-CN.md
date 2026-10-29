@@ -6,15 +6,15 @@ Acorn 是支持 C 和 Python 3 的单文件源码判题系统，提供浏览器�
 
 ## 功能
 
-- 公开浏览题目，在 Monaco 编辑器中编写 C 或 Python 代码，按题目和语言保存本地草稿。
-- 通过 HTTP 注册、登录、查询当前身份和退出，使用后端内存会话与持久 Cookie。
+- 公开浏览题目，在 Monaco 编辑器中编写 C 或 Python 代码，登录后按用户、题目和语言保存本地草稿。
+- 通过浏览器或 HTTP 注册、登录、查询当前身份和退出，使用后端内存会话与持久 Cookie。
 - 在 Isolate 沙箱中编译、执行并比较输出，支持 CPU 时间、墙钟时间、内存、进程数、输出和磁盘限额。
 - 通过多个 Worker 并行处理不同提交，保存判题结果、编译诊断和首个失败用例的输出。
 - 查询提交历史，按题目、执行状态、判题结论和审查状态筛选；历史结果关联实际判题的题目版本。
 - 按题目策略自动调用 LLM，或手动启动、重新审查，查看针对硬编码、猜测和规避实现的审查意见。
 - 登录后查询后端接纳条件、调度队列、数据库和 Worker 的最近观测。
 
-浏览器当前可公开浏览题目和编辑代码；登录交互接入前，受保护功能先通过 HTTP API 使用。提交归属认证用户，历史、详情和手动审查仅限该用户的提交。
+题目和编辑器公开使用，提交、个人历史、结果、审查和健康要求登录。注册成功后手动登录；登录保留当前匿名编辑内容，由用户再次主动提交。账号变化会停止旧请求，并按用户隔离草稿和待确认提交。提交归属认证用户，历史、详情和手动审查仅限该用户的提交。
 
 ## 项目结构
 
@@ -106,7 +106,7 @@ cp config/worker.example.toml "$HOME/.config/acorn/worker.toml"
 cp config/backend.example.toml "$HOME/.config/acorn/backend.toml"
 ```
 
-编辑 `worker.toml`，核对 `sandbox.executable`、`languages.c.compiler` 和 `languages.python.interpreter`，为 `sandbox.box_id` 选择本机空闲且专用于该 Worker 的 ID。后端示例配置连接 `http://127.0.0.1:50051`，数据库由 `database.endpoint`、`name` 和 `username` 指定。下述 HTTP 直连示例保留 `http.public_origin="http://127.0.0.1:8080"`；若选择其他外部 Origin，每个写请求也须发送该精确值。浏览器经开发代理发送写请求时应改为实际浏览器 Origin，例如 `http://localhost:5173`，主机名及端口须完全一致。
+编辑 `worker.toml`，核对 `sandbox.executable`、`languages.c.compiler` 和 `languages.python.interpreter`，为 `sandbox.box_id` 选择本机空闲且专用于该 Worker 的 ID。后端示例配置连接 `http://127.0.0.1:50051`，数据库由 `database.endpoint`、`name` 和 `username` 指定。以下浏览器流程须将后端的 `http.public_origin` 改为 `"http://localhost:5173"`；下述 HTTP 示例直连后端时也发送该 Origin。若选择其他外部 Origin，配置及每个写请求须一起修改，主机名和端口必须完全一致。
 
 ### 初始化数据库
 
@@ -158,13 +158,15 @@ pnpm dev
 
 ### 提交第一份代码
 
-打开[题目列表](http://localhost:5173/problems)，阅读“两数求和（A + B）”并编辑 [C 样例](examples/submissions/a-plus-b.c)或 [Python 样例](examples/submissions/a-plus-b.py)。浏览器登录及受保护请求尚待接入，当前先使用预置开发账号 `test` / `Acorn-Test-Only-123!` 通过 HTTP 登录，再用响应中的用户 ID 提交（预置用户为 `1`）：
+打开[题目列表](http://localhost:5173/problems)，阅读“两数求和（A + B）”并编辑 [C 样例](examples/submissions/a-plus-b.c)或 [Python 样例](examples/submissions/a-plus-b.py)。点击“登录 / 注册”，使用预置开发账号 `test` / `Acorn-Test-Only-123!` 登录，或注册后手动登录。登录后点击“提交代码”，查看结果及个人历史。匿名编辑仅保留在当前页面内存中，登录前刷新会丢失。
+
+也可通过 HTTP API 登录，再用响应中的用户 ID 提交（预置用户为 `1`）：
 
 ```sh
 ACORN_COOKIE_JAR=/tmp/acorn-cookies.txt
 curl --fail-with-body -c "$ACORN_COOKIE_JAR" http://127.0.0.1:8080/api/v1/auth/login \
   -H 'Content-Type: application/json' \
-  -H 'Origin: http://127.0.0.1:8080' \
+  -H 'Origin: http://localhost:5173' \
   -d '{"username":"test","password":"Acorn-Test-Only-123!"}'
 ```
 
@@ -173,7 +175,7 @@ curl --fail-with-body -c "$ACORN_COOKIE_JAR" http://127.0.0.1:8080/api/v1/auth/l
 ```sh
 ACORN_REQUEST_KEY=$(python3 -c 'import uuid; print(uuid.uuid4())')
 curl -i -b "$ACORN_COOKIE_JAR" -c "$ACORN_COOKIE_JAR" http://127.0.0.1:8080/api/v1/submissions \
-  -H 'Origin: http://127.0.0.1:8080' \
+  -H 'Origin: http://localhost:5173' \
   -H 'X-Acorn-User-Id: 1' \
   -H 'Content-Type: application/json' \
   -H "Idempotency-Key: $ACORN_REQUEST_KEY" \
@@ -241,7 +243,7 @@ retry_interval_ms = 1_000
 
 ### LLM 代码审查
 
-在后端 `[llm_review]` 中设置 `enabled = true`，填写完整的 Responses API `endpoint`、`api_key` 和 `model`。密钥保存在服务端 TOML 中。重启后，对机器判题已完成的提交调用需认证的审查 HTTP 接口；浏览器登录接入后可在结果页使用“启动审查”或“重新审查”。
+在后端 `[llm_review]` 中设置 `enabled = true`，填写完整的 Responses API `endpoint`、`api_key` 和 `model`。密钥保存在服务端 TOML 中。
 
 自动审查由提交固定题目版本的 `review_mode` 决定：`DISABLED` 关闭，`ENABLE-ANY` 在至少一例通过时触发，`ENABLE-ALL` 在全部通过时触发。内置示例题默认关闭自动审查。审查意见单独保存，重新审查会替换上次意见。配置和 HTTP 操作见[后端审查说明](crates/backend/README.md#llm-代码审查)。
 

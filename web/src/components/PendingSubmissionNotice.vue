@@ -1,8 +1,12 @@
 <script setup lang="ts">
-import { onScopeDispose, ref, watch } from 'vue'
+import { onScopeDispose, ref, shallowRef, watch } from 'vue'
 import { ElAlert, ElButton, ElMessageBox } from 'element-plus'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { useSubmissionRequest } from '../composables/useSubmissionRequest'
+import { useAuth } from '../composables/useAuth'
+import { getSubmission } from '../api'
+import { RequestError } from '../api/http'
+import type { SubmissionState } from '../api/types'
 import RequestFeedback from './RequestFeedback.vue'
 import 'element-plus/es/components/alert/style/css'
 import 'element-plus/es/components/button/style/css'
@@ -10,6 +14,7 @@ import 'element-plus/es/components/message-box/style/css'
 
 const router = useRouter()
 const route = useRoute()
+const auth = useAuth()
 const {
   pending,
   sending,
@@ -22,6 +27,69 @@ const {
 const confirming = ref(false)
 let active = true
 let pageGeneration = 0
+const knownState = ref<SubmissionState | null>(null)
+const checking = ref(false)
+const checkError = shallowRef<RequestError | null>(null)
+let checkGeneration = 0
+let checkController: AbortController | undefined
+
+function stopCheck() {
+  checkGeneration += 1
+  checkController?.abort()
+  checkController = undefined
+  checking.value = false
+  knownState.value = null
+  checkError.value = null
+}
+
+async function checkKnownSubmission() {
+  stopCheck()
+  const account = auth.snapshot()
+  const snapshot = pending.value
+  if (
+    !restored.value ||
+    !account ||
+    !snapshot?.submission_id ||
+    snapshot.owner_user_id !== account.userId
+  )
+    return
+  const generation = checkGeneration
+  const controller = new AbortController()
+  checkController = controller
+  checking.value = true
+  try {
+    const submission = await getSubmission(snapshot.submission_id, {
+      expectedUserId: account.userId,
+      signal: controller.signal,
+    })
+    if (active && generation === checkGeneration && auth.isCurrent(account))
+      knownState.value = submission.state
+  } catch (cause) {
+    if (!(cause instanceof RequestError)) throw cause
+    if (
+      active &&
+      generation === checkGeneration &&
+      auth.isCurrent(account) &&
+      !auth.handleError(cause, account)
+    )
+      checkError.value = cause
+  } finally {
+    if (generation === checkGeneration) {
+      checking.value = false
+      checkController = undefined
+    }
+  }
+}
+
+watch(
+  () => [pending.value, restored.value, auth.generation.value] as const,
+  () => {
+    void checkKnownSubmission()
+  },
+  { immediate: true, flush: 'post' },
+)
+// Clear the previous account's status before the next render and deferred restore query.
+watch(auth.generation, stopCheck, { flush: 'sync' })
 watch(
   () => route.fullPath,
   () => {
@@ -31,13 +99,24 @@ watch(
 )
 onScopeDispose(() => {
   active = false
+  stopCheck()
   if (confirming.value) ElMessageBox.close()
 })
 
 async function retryOriginal() {
   const originalPage = pageGeneration
+  const identity = auth.snapshot()
+  if (!identity) {
+    auth.requireLogin()
+    return
+  }
   const result = await retry()
-  if (result && active && pageGeneration === originalPage)
+  if (
+    result &&
+    active &&
+    pageGeneration === originalPage &&
+    auth.isCurrent(identity)
+  )
     await router.push({
       name: 'result',
       params: { submissionId: result.submission_id },
@@ -45,6 +124,9 @@ async function retryOriginal() {
 }
 
 async function confirmAbandon() {
+  const original = pending.value
+  const identity = auth.snapshot()
+  if (!original || !identity) return
   confirming.value = true
   try {
     await ElMessageBox.confirm(
@@ -57,7 +139,8 @@ async function confirmAbandon() {
         distinguishCancelAndClose: true,
       },
     )
-    if (active) abandonConfirmed()
+    if (active && pending.value === original && auth.isCurrent(identity))
+      abandonConfirmed()
   } catch (cause) {
     if (cause !== 'cancel' && cause !== 'close') throw cause
   } finally {
@@ -89,16 +172,26 @@ async function confirmAbandon() {
         重试使用点击提交时的代码，后续编辑不会替换原内容。
       </p>
       <p>
-        本标签页一次只保留一份待完成请求。完成或确认放弃后，才能开始另一份提交。
+        本标签页为当前账号保留一份待完成请求。完成或确认放弃后，才能开始另一份提交。
       </p>
       <p v-if="pending.submission_id" class="submission-id">
         原提交 ID：{{ pending.submission_id }}
       </p>
+      <p v-if="knownState" role="status">
+        当前提交状态：{{ knownState }}。是否重试原请求由你决定。
+      </p>
+      <RequestFeedback
+        v-if="checking || checkError"
+        :loading="checking"
+        loading-text="正在确认原提交的当前状态…"
+        :error="checkError"
+        @retry="checkKnownSubmission"
+      />
       <div class="pending-actions">
         <ElButton
           type="primary"
           :loading="sending"
-          :disabled="sending || confirming"
+          :disabled="sending || confirming || checking"
           @click="retryOriginal"
         >
           重试原提交

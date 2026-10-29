@@ -12,6 +12,7 @@ export function useSubmissionPolling(
   submissionId: () => string,
   load: (id: string, signal: AbortSignal) => Promise<Submission>,
   visibility: PageVisibility = document,
+  options: { handleError?: (error: unknown) => boolean } = {},
 ) {
   const data = shallowRef<Submission | null>(null)
   const error = shallowRef<unknown>(null)
@@ -28,8 +29,9 @@ export function useSubmissionPolling(
   let timer: ReturnType<typeof setTimeout> | undefined
   let generation = 0
   let disposed = false
+  let stopped = false
 
-  function stop() {
+  function cancel() {
     generation += 1
     clearTimeout(timer)
     timer = undefined
@@ -38,8 +40,17 @@ export function useSubmissionPolling(
     loading.value = false
   }
 
+  /** Permanently stop this identity's polling and clear its private snapshot. */
+  function stop() {
+    stopped = true
+    cancel()
+    data.value = null
+    error.value = null
+    refreshRequired.value = false
+  }
+
   async function refresh() {
-    if (disposed || hidden.value || loading.value) return
+    if (disposed || stopped || hidden.value || loading.value) return
     clearTimeout(timer)
     timer = undefined
     const current = ++generation
@@ -58,7 +69,10 @@ export function useSubmissionPolling(
       data.value = snapshot
       refreshRequired.value = false
     } catch (cause) {
-      if (current === generation && !signal.aborted) error.value = cause
+      if (current === generation && !signal.aborted) {
+        if (options.handleError?.(cause)) stop()
+        else error.value = cause
+      }
     } finally {
       if (current === generation) {
         controller = undefined
@@ -71,8 +85,8 @@ export function useSubmissionPolling(
 
   /** Discard any older GET, apply an accepted review snapshot and immediately query again. */
   async function reconcileReview(response?: ReviewResponse) {
-    if (disposed) return
-    stop()
+    if (disposed || stopped) return
+    cancel()
     refreshRequired.value = true
     if (response && data.value?.submission_id === response.submission_id)
       data.value = {
@@ -85,7 +99,7 @@ export function useSubmissionPolling(
 
   function visibilityChanged() {
     hidden.value = visibility.hidden
-    if (hidden.value) stop()
+    if (hidden.value) cancel()
     else if (!terminal.value && !error.value) void refresh()
   }
 
@@ -93,7 +107,7 @@ export function useSubmissionPolling(
   watch(
     submissionId,
     () => {
-      stop()
+      cancel()
       data.value = null
       error.value = null
       refreshRequired.value = false
@@ -116,5 +130,6 @@ export function useSubmissionPolling(
     refreshRequired,
     refresh,
     reconcileReview,
+    stop,
   }
 }

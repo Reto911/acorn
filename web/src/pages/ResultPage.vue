@@ -1,18 +1,26 @@
 <script setup lang="ts">
 import { ElButton } from 'element-plus'
+import { watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
-import { getSubmission } from '../api'
+import { getSubmission, startReview as sendReview } from '../api'
 import FixedProblemStatement from '../components/FixedProblemStatement.vue'
 import RequestFeedback from '../components/RequestFeedback.vue'
 import SubmissionOutcome from '../components/SubmissionOutcome.vue'
 import SubmissionReview from '../components/SubmissionReview.vue'
 import { useReviewRequest } from '../composables/useReviewRequest'
 import { useSubmissionPolling } from '../composables/useSubmissionPolling'
+import { useAuth } from '../composables/useAuth'
 import { readHistoryQuery } from '../utils/historyQuery'
 import { submissionDateFormat as dateFormat } from '../utils/submissionPresentation'
 import 'element-plus/es/components/button/style/css'
 
 const route = useRoute()
+const auth = useAuth()
+// App mounts a private page only after confirming the current authenticated identity.
+const identity = auth.snapshot()
+if (!identity)
+  throw new Error('Private page requires an authenticated identity')
+const handleError = (cause: unknown) => auth.handleError(cause, identity)
 const {
   data: submission,
   error,
@@ -22,19 +30,40 @@ const {
   refreshRequired,
   refresh,
   reconcileReview,
+  stop: stopPolling,
 } = useSubmissionPolling(
   () => String(route.params.submissionId),
-  (id, signal) => getSubmission(id, { signal, polling: true }),
+  (id, signal) =>
+    getSubmission(id, {
+      signal,
+      polling: true,
+      expectedUserId: identity.userId,
+    }),
+  document,
+  { handleError },
 )
 const {
   sending: reviewSending,
   error: reviewError,
   canStart: canStartReview,
   start: startReview,
+  stop: stopReview,
 } = useReviewRequest(
   () => submission.value,
   () => refreshRequired.value,
   reconcileReview,
+  sendReview,
+  { expectedUserId: identity.userId, handleError },
+)
+watch(
+  auth.generation,
+  () => {
+    if (!auth.isCurrent(identity)) {
+      stopReview()
+      stopPolling()
+    }
+  },
+  { flush: 'sync' },
 )
 </script>
 

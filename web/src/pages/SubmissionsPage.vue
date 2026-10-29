@@ -5,6 +5,7 @@ import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { listSubmissions } from '../api'
 import RequestFeedback from '../components/RequestFeedback.vue'
 import { useQuery } from '../composables/useQuery'
+import { useAuth } from '../composables/useAuth'
 import { readHistoryQuery } from '../utils/historyQuery'
 import { reviewStatuses } from '../utils/reviewPresentation'
 import {
@@ -18,6 +19,11 @@ import 'element-plus/es/components/table-column/style/css'
 
 const route = useRoute()
 const router = useRouter()
+const auth = useAuth()
+// App confirms identity before mounting private pages; retain that owner for every request.
+const identity = auth.snapshot()
+if (!identity)
+  throw new Error('Private page requires an authenticated identity')
 const query = computed(() => readHistoryQuery(route.query))
 const filters = reactive({
   problem_id: '' as string | number,
@@ -42,9 +48,19 @@ const {
   loading,
   error,
   reload,
+  stop,
 } = useQuery(
   () => query.value,
-  (value, signal) => listSubmissions(value, { signal }),
+  (value, signal) =>
+    listSubmissions(value, { signal, expectedUserId: identity.userId }),
+  { handleError: (cause) => auth.handleError(cause, identity) },
+)
+watch(
+  auth.generation,
+  () => {
+    if (!auth.isCurrent(identity)) stop()
+  },
+  { flush: 'sync' },
 )
 const hasFilters = computed(
   () =>
@@ -96,7 +112,7 @@ function changePage(offset: number) {
   <section aria-labelledby="page-title">
     <div class="page-heading">
       <h1 id="page-title">提交历史</h1>
-      <p>查看后端配置用户的提交记录，包括其他浏览器创建的提交。</p>
+      <p>查看当前账号的提交记录，包括其他浏览器创建的提交。</p>
     </div>
     <div class="surface history-list">
       <form

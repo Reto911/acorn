@@ -5,15 +5,32 @@ import { RequestError } from '../api/http'
 export function useQuery<Q, T>(
   source: () => Q,
   load: (query: Q, signal: AbortSignal) => Promise<T>,
-  options: { refreshIntervalMs?: number } = {},
+  options: {
+    refreshIntervalMs?: number
+    handleError?: (error: unknown) => boolean
+  } = {},
 ) {
   const data = shallowRef<T | null>(null)
   const error = shallowRef<unknown>(null)
   const loading = shallowRef(false)
   let controller: AbortController | undefined
   let generation = 0
+  let stopped = false
+
+  /** Stop this identity's requests and discard its private snapshots immediately. */
+  function stop() {
+    stopped = true
+    generation += 1
+    clearInterval(refreshTimer)
+    controller?.abort()
+    controller = undefined
+    data.value = null
+    error.value = null
+    loading.value = false
+  }
 
   async function execute(preserveData: boolean) {
+    if (stopped) return
     const current = ++generation
     controller?.abort()
     controller = new AbortController()
@@ -29,26 +46,24 @@ export function useQuery<Q, T>(
         current === generation &&
         !signal.aborted &&
         !(cause instanceof RequestError && cause.kind === 'cancelled')
-      )
-        error.value = cause
+      ) {
+        if (options.handleError?.(cause)) stop()
+        else error.value = cause
+      }
     } finally {
       if (current === generation) loading.value = false
     }
   }
 
-  watch(source, () => void execute(false), { immediate: true, deep: true })
   const reload = () => execute(true)
   const refreshTimer =
     options.refreshIntervalMs === undefined
       ? undefined
       : setInterval(() => {
-          if (!loading.value) void reload()
+          if (!stopped && !loading.value) void reload()
         }, options.refreshIntervalMs)
-  onScopeDispose(() => {
-    clearInterval(refreshTimer)
-    generation += 1
-    controller?.abort()
-  })
+  watch(source, () => void execute(false), { immediate: true, deep: true })
+  onScopeDispose(stop)
 
-  return { data, error, loading, reload }
+  return { data, error, loading, reload, stop }
 }

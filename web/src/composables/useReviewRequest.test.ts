@@ -230,4 +230,67 @@ describe('manual review requests', () => {
     await second
     expect(reconcile).not.toHaveBeenCalled()
   })
+
+  it.each([
+    { status: 401, code: 'AuthenticationRequired' },
+    { status: 409, code: 'SessionChanged' },
+  ])(
+    'stops on $code without reconciliation or reposting',
+    async ({ status, code }) => {
+      const failure = new RequestError('http', context, status, {
+        code,
+        message: 'Identity rejected.',
+      })
+      const send = vi.fn().mockRejectedValue(failure)
+      const reconcile = vi.fn(async () => {})
+      const handleError = vi.fn(() => true)
+      const request = scope().run(() =>
+        useReviewRequest(
+          () => finished,
+          () => false,
+          reconcile,
+          send,
+          { expectedUserId: 42, handleError },
+        ),
+      )!
+      await request.start()
+      expect(send).toHaveBeenCalledWith('submission-a', null, {
+        signal: expect.any(AbortSignal),
+        expectedUserId: 42,
+      })
+      expect(handleError).toHaveBeenCalledWith(failure)
+      expect(request.error.value).toBeNull()
+      expect(request.canStart.value).toBe(false)
+      await request.start()
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(send).toHaveBeenCalledOnce()
+      expect(reconcile).not.toHaveBeenCalled()
+    },
+  )
+
+  it('discards a late review admission when the owner is invalidated', async () => {
+    let resolve!: (response: ReviewResponse) => void
+    const send = vi.fn().mockReturnValue(
+      new Promise<ReviewResponse>((res) => {
+        resolve = res
+      }),
+    )
+    const reconcile = vi.fn(async () => {})
+    const request = scope().run(() =>
+      useReviewRequest(
+        () => finished,
+        () => false,
+        reconcile,
+        send,
+      ),
+    )!
+    const waiting = request.start()
+    request.stop()
+    expect(send.mock.calls[0]![2].signal.aborted).toBe(true)
+    resolve(accepted)
+    await waiting
+    await request.start()
+    expect(send).toHaveBeenCalledOnce()
+    expect(reconcile).not.toHaveBeenCalled()
+  })
 })

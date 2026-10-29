@@ -1,4 +1,23 @@
 /** Public HTTP JSON contracts; source and Worker progress are never query fields. */
+export interface User {
+  id: number
+  username: string
+  display_name: string
+}
+
+export interface AuthResponse {
+  user: User | null
+}
+
+export interface LoginRequest {
+  username: string
+  password: string
+}
+
+export interface RegisterRequest extends LoginRequest {
+  display_name?: string
+}
+
 export type LanguageId = 'c' | 'python'
 export type SubmissionState =
   'queued' | 'dispatching' | 'running' | 'finished' | 'failed'

@@ -260,4 +260,45 @@ describe('submission polling lifecycle', () => {
     expect(query.refreshRequired.value).toBe(false)
     expect(query.terminal.value).toBe(true)
   })
+
+  it('clears private results and blocks polling, visibility resumption and review reconciliation after identity rejection', async () => {
+    const visibility = new Visibility()
+    const failure = new Error('Session changed')
+    const load = vi
+      .fn()
+      .mockResolvedValueOnce(queued)
+      .mockRejectedValueOnce(failure)
+    const handleError = vi.fn(() => true)
+    const query = scope().run(() =>
+      useSubmissionPolling(() => 'first', load, visibility, { handleError }),
+    )!
+    await nextTick()
+    expect(query.data.value).toBe(queued)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(handleError).toHaveBeenCalledWith(failure)
+    expect(query.data.value).toBeNull()
+    expect(query.error.value).toBeNull()
+    expect(query.loading.value).toBe(false)
+    visibility.change(true)
+    visibility.change(false)
+    await query.reconcileReview()
+    await query.refresh()
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(load).toHaveBeenCalledTimes(2)
+  })
+
+  it('cancels immediately when its owner changes and discards the old identity response', async () => {
+    const response = deferred()
+    const load = vi.fn().mockReturnValue(response.promise)
+    const query = scope().run(() =>
+      useSubmissionPolling(() => 'first', load, new Visibility()),
+    )!
+    query.stop()
+    expect(load.mock.calls[0]![1].aborted).toBe(true)
+    response.resolve(queued)
+    await nextTick()
+    await query.refresh()
+    expect(query.data.value).toBeNull()
+    expect(load).toHaveBeenCalledOnce()
+  })
 })

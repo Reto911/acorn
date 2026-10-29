@@ -44,19 +44,134 @@ afterEach(() => {
 })
 
 describe('local answer drafts', () => {
+  it('saves the departing owner before switching and restores each owner language independently', () => {
+    vi.useFakeTimers()
+    const storage = memoryStorage()
+    const owner = ref<number | null>(1)
+    const scope = effectScope()
+    const draft = scope.run(() =>
+      useDraft(
+        () => problem,
+        () => owner.value,
+        storage,
+      ),
+    )!
+    draft.source.value = 'first owner C'
+    draft.selectLanguage('python')
+    draft.source.value = 'first owner Python'
+    owner.value = 2
+    expect(draft.source.value).toBe('')
+    expect(draft.languageId.value).toBe('c')
+    expect(
+      JSON.parse(storage.getItem('acorn:draft:v2:1:1:python')!).source,
+    ).toBe('first owner Python')
+    draft.source.value = 'second owner C'
+    owner.value = null
+    expect(draft.source.value).toBe('')
+    owner.value = 1
+    // Untouched anonymous buffers allow the returning account's draft to load.
+    expect(draft.languageId.value).toBe('python')
+    expect(draft.source.value).toBe('first owner Python')
+    scope.stop()
+    const restoredScope = effectScope()
+    const first = restoredScope.run(() =>
+      useDraft(
+        () => problem,
+        () => 1,
+        storage,
+      ),
+    )!
+    const second = restoredScope.run(() =>
+      useDraft(
+        () => problem,
+        () => 2,
+        storage,
+      ),
+    )!
+    expect(first.languageId.value).toBe('python')
+    expect(first.source.value).toBe('first owner Python')
+    expect(second.languageId.value).toBe('c')
+    expect(second.source.value).toBe('second owner C')
+    restoredScope.stop()
+  })
+
+  it('keeps anonymous multilingual buffers through login without importing ownerless records', () => {
+    vi.useFakeTimers()
+    const storage = memoryStorage()
+    storage.setItem(
+      'acorn:draft:v1:1:c',
+      JSON.stringify({ source: 'ownerless', version_no: 1, updated_at_ms: 1 }),
+    )
+    storage.setItem(
+      'acorn:draft:v2:1:1:c',
+      JSON.stringify({
+        source: 'account old C',
+        version_no: 1,
+        updated_at_ms: 1,
+      }),
+    )
+    const owner = ref<number | null>(null)
+    const scope = effectScope()
+    const draft = scope.run(() =>
+      useDraft(
+        () => problem,
+        () => owner.value,
+        storage,
+      ),
+    )!
+    expect(draft.source.value).toBe('')
+    draft.source.value = 'anonymous C'
+    draft.selectLanguage('python')
+    draft.source.value = 'anonymous Python'
+    vi.advanceTimersByTime(1000)
+    expect(JSON.parse(storage.getItem('acorn:draft:v2:1:1:c')!).source).toBe(
+      'account old C',
+    )
+    expect(storage.getItem('acorn:draft:v2:null:1:python')).toBeNull()
+    owner.value = 1
+    expect(draft.source.value).toBe('anonymous Python')
+    expect(draft.saved.value).toBe(true)
+    scope.stop()
+    const reopenedScope = effectScope()
+    const reopened = reopenedScope.run(() =>
+      useDraft(
+        () => problem,
+        () => 1,
+        storage,
+      ),
+    )!
+    expect(reopened.languageId.value).toBe('python')
+    expect(reopened.source.value).toBe('anonymous Python')
+    reopened.selectLanguage('c')
+    expect(reopened.source.value).toBe('anonymous C')
+    expect(JSON.parse(storage.getItem('acorn:draft:v2:1:1:c')!).source).toBe(
+      'anonymous C',
+    )
+    expect(JSON.parse(storage.getItem('acorn:draft:v1:1:c')!).source).toBe(
+      'ownerless',
+    )
+    reopenedScope.stop()
+  })
+
   it('debounces writes, flushes on switch and disposal, and restores independent problem/language drafts', () => {
     vi.useFakeTimers()
     const storage = memoryStorage()
     const scope = effectScope()
-    const draft = scope.run(() => useDraft(() => problem, storage))!
+    const draft = scope.run(() =>
+      useDraft(
+        () => problem,
+        () => 1,
+        storage,
+      ),
+    )!
     draft.source.value = 'C draft\n'
     vi.advanceTimersByTime(999)
-    expect(storage.getItem('acorn:draft:v1:1:c')).toBeNull()
+    expect(storage.getItem('acorn:draft:v2:1:1:c')).toBeNull()
     vi.advanceTimersByTime(1)
     expect(draft.saved.value).toBe(true)
     draft.source.value = 'updated C\n'
     draft.selectLanguage('python')
-    expect(JSON.parse(storage.getItem('acorn:draft:v1:1:c')!).source).toBe(
+    expect(JSON.parse(storage.getItem('acorn:draft:v2:1:1:c')!).source).toBe(
       'updated C\n',
     )
     expect(draft.source.value).toBe('')
@@ -64,13 +179,23 @@ describe('local answer drafts', () => {
     scope.stop()
 
     const restoredScope = effectScope()
-    const restored = restoredScope.run(() => useDraft(() => problem, storage))!
+    const restored = restoredScope.run(() =>
+      useDraft(
+        () => problem,
+        () => 1,
+        storage,
+      ),
+    )!
     expect(restored.languageId.value).toBe('python')
     expect(restored.source.value).toBe('print(1)\n')
     restored.selectLanguage('c')
     expect(restored.source.value).toBe('updated C\n')
     const other = restoredScope.run(() =>
-      useDraft(() => ({ ...problem, problem_id: 2 }), storage),
+      useDraft(
+        () => ({ ...problem, problem_id: 2 }),
+        () => 1,
+        storage,
+      ),
     )!
     expect(other.source.value).toBe('')
     restoredScope.stop()
@@ -79,11 +204,11 @@ describe('local answer drafts', () => {
   it('retains source across version changes, saves the displayed version and notices it only once', () => {
     const storage = memoryStorage()
     storage.setItem(
-      'acorn:draft:v1:1:c',
+      'acorn:draft:v2:1:1:c',
       JSON.stringify({ source: 'C code', version_no: 1, updated_at_ms: 1 }),
     )
     storage.setItem(
-      'acorn:draft:v1:1:python',
+      'acorn:draft:v2:1:1:python',
       JSON.stringify({
         source: 'Python code',
         version_no: 1,
@@ -93,13 +218,17 @@ describe('local answer drafts', () => {
     const currentProblem = ref({ ...problem, version_no: 2 })
     const scope = effectScope()
     const draft = scope.run(() =>
-      useDraft(() => currentProblem.value, storage),
+      useDraft(
+        () => currentProblem.value,
+        () => 1,
+        storage,
+      ),
     )!
     expect(draft.source.value).toBe('C code')
     expect(draft.versionNotice.value).toContain('v2')
-    expect(JSON.parse(storage.getItem('acorn:draft:v1:1:c')!).version_no).toBe(
-      2,
-    )
+    expect(
+      JSON.parse(storage.getItem('acorn:draft:v2:1:1:c')!).version_no,
+    ).toBe(2)
     draft.dismissVersionNotice()
     draft.selectLanguage('python')
     expect(draft.source.value).toBe('Python code')
@@ -109,7 +238,11 @@ describe('local answer drafts', () => {
     scope.stop()
     const reopenedScope = effectScope()
     const reopened = reopenedScope.run(() =>
-      useDraft(() => currentProblem.value, storage),
+      useDraft(
+        () => currentProblem.value,
+        () => 1,
+        storage,
+      ),
     )!
     expect(reopened.versionNotice.value).toBeNull()
     reopenedScope.stop()
@@ -120,7 +253,13 @@ describe('local answer drafts', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const storage = memoryStorage()
     const scope = effectScope()
-    const draft = scope.run(() => useDraft(() => problem, storage))!
+    const draft = scope.run(() =>
+      useDraft(
+        () => problem,
+        () => 1,
+        storage,
+      ),
+    )!
     draft.source.value = 'private-source'
     expect(draft.save()).toBe(true)
     storage.setItem.mockImplementation(() => {
@@ -136,7 +275,11 @@ describe('local answer drafts', () => {
     scope.stop()
     const unavailableScope = effectScope()
     const unavailable = unavailableScope.run(() =>
-      useDraft(() => problem, null),
+      useDraft(
+        () => problem,
+        () => 1,
+        null,
+      ),
     )!
     unavailable.source.value = 'still editable'
     expect(unavailable.save()).toBe(false)
@@ -148,11 +291,17 @@ describe('local answer drafts', () => {
   it('clears only the confirmed language and cancels a pending auto-save', () => {
     vi.useFakeTimers()
     const storage = memoryStorage()
-    storage.setItem('acorn:draft:v1:1:python', 'other-language')
-    storage.setItem('acorn:draft:v1:2:c', 'other-problem')
+    storage.setItem('acorn:draft:v2:1:1:python', 'other-language')
+    storage.setItem('acorn:draft:v2:1:2:c', 'other-problem')
     storage.setItem('acorn:pending-submission:v1', 'frozen request')
     const scope = effectScope()
-    const draft = scope.run(() => useDraft(() => problem, storage))!
+    const draft = scope.run(() =>
+      useDraft(
+        () => problem,
+        () => 1,
+        storage,
+      ),
+    )!
     draft.source.value = 'C code'
     draft.save()
     draft.source.value = 'pending code'
@@ -160,9 +309,9 @@ describe('local answer drafts', () => {
     vi.advanceTimersByTime(1000)
     scope.stop()
     expect(draft.source.value).toBe('')
-    expect(storage.getItem('acorn:draft:v1:1:c')).toBeNull()
-    expect(storage.getItem('acorn:draft:v1:1:python')).toBe('other-language')
-    expect(storage.getItem('acorn:draft:v1:2:c')).toBe('other-problem')
+    expect(storage.getItem('acorn:draft:v2:1:1:c')).toBeNull()
+    expect(storage.getItem('acorn:draft:v2:1:1:python')).toBe('other-language')
+    expect(storage.getItem('acorn:draft:v2:1:2:c')).toBe('other-problem')
     expect(storage.getItem('acorn:pending-submission:v1')).toBe(
       'frozen request',
     )

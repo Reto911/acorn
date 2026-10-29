@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, watch } from 'vue'
 import { ElAlert, ElButton, ElTable, ElTableColumn } from 'element-plus'
 import { getHealth } from '../api'
 import RequestFeedback from '../components/RequestFeedback.vue'
 import { useQuery } from '../composables/useQuery'
+import { useAuth } from '../composables/useAuth'
 import {
   admissionLabels,
   executionLabels,
@@ -18,15 +19,30 @@ import 'element-plus/es/components/button/style/css'
 import 'element-plus/es/components/table/style/css'
 import 'element-plus/es/components/table-column/style/css'
 
+const auth = useAuth()
+const identity = auth.snapshot()
+if (!identity)
+  throw new Error('Private page requires an authenticated identity')
 const {
   data: snapshot,
   loading,
   error,
   reload,
+  stop,
 } = useQuery(
   () => 'health',
   (_query, signal) => getHealth({ signal }),
-  { refreshIntervalMs: 10_000 },
+  {
+    refreshIntervalMs: 10_000,
+    handleError: (cause) => auth.handleError(cause, identity),
+  },
+)
+watch(
+  auth.generation,
+  () => {
+    if (!auth.isCurrent(identity)) stop()
+  },
+  { flush: 'sync' },
 )
 const stale = computed(() =>
   snapshot.value ? staleObservations(snapshot.value) : [],

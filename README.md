@@ -6,15 +6,15 @@ Acorn is a programming judge for single-file C and Python 3 submissions, with a 
 
 ## Features
 
-- Browse problems publicly, write C or Python code in Monaco, and save local drafts by problem and language.
-- Register and log in over HTTP, inspect the current identity, and log out with an in-memory session and a persistent Cookie.
+- Browse problems publicly, write C or Python code in Monaco, and save local drafts by user, problem, and language after login.
+- Register and log in in the browser or over HTTP, inspect the current identity, and log out with an in-memory session and a persistent Cookie.
 - Compile, execute, and compare output in Isolate sandboxes, with limits on CPU time, wall time, memory, process count, output, and disk usage.
 - Process different submissions in parallel across multiple Workers, saving verdicts, compiler diagnostics, and output from the first failing test case.
 - Filter submission history by problem, execution state, verdict, and review status. Historical results reference the problem version used for judging.
 - Trigger LLM reviews automatically according to a problem's policy, or start and rerun reviews manually to check for hardcoding, guessing, and attempts to bypass problem requirements.
 - Query backend admission conditions, the scheduling queue, and recent database and Worker observations after login.
 
-The browser currently supports public problem browsing and editing. Use the HTTP API for protected operations while browser login is being integrated. Submissions belong to the authenticated user; history, details, and manual reviews are limited to that user's submissions.
+Problems and editing are public; submission, personal history, results, review, and health require login. Registration returns to manual login. Login preserves the current anonymous editing buffer and waits for another explicit submit. Account changes stop old requests and keep drafts and pending submissions separate by user. Submissions belong to the authenticated user; history, details, and manual reviews are limited to that user's submissions.
 
 ## Project Structure
 
@@ -106,7 +106,7 @@ cp config/worker.example.toml "$HOME/.config/acorn/worker.toml"
 cp config/backend.example.toml "$HOME/.config/acorn/backend.toml"
 ```
 
-Edit `worker.toml` to check `sandbox.executable`, `languages.c.compiler`, and `languages.python.interpreter`. Choose an available `sandbox.box_id` dedicated to this Worker on the host. The example backend configuration connects to `http://127.0.0.1:50051` and selects the MySQL database configured by `database.endpoint`, `name`, and `username`. Keep `http.public_origin="http://127.0.0.1:8080"` for the direct HTTP examples below; if you choose another external Origin, send that exact value in each write request. Browser writes through the development proxy will require the actual browser Origin, such as `http://localhost:5173`; host names and ports must match exactly.
+Edit `worker.toml` to check `sandbox.executable`, `languages.c.compiler`, and `languages.python.interpreter`. Choose an available `sandbox.box_id` dedicated to this Worker on the host. The example backend configuration connects to `http://127.0.0.1:50051` and selects the MySQL database configured by `database.endpoint`, `name`, and `username`. For this browser workflow, set `http.public_origin="http://localhost:5173"` in the backend configuration. The HTTP examples below send that same Origin while connecting directly to the backend. If you choose another external Origin, change both the configuration and each write request; host names and ports must match exactly.
 
 ### Initialize the Database
 
@@ -158,13 +158,15 @@ Worker group observation may still be pending immediately after startup. A `503 
 
 ### Submit Your First Program
 
-Open the [problem list](http://localhost:5173/problems) to read the A + B problem (`两数求和（A + B）`) and edit the [C sample](examples/submissions/a-plus-b.c) or [Python sample](examples/submissions/a-plus-b.py). Browser login and protected requests are awaiting integration. For now, log in over HTTP with the seeded development account `test` / `Acorn-Test-Only-123!`, then submit using its returned user ID (`1` for the seed):
+Open the [problem list](http://localhost:5173/problems) to read the A + B problem (`两数求和（A + B）`) and edit the [C sample](examples/submissions/a-plus-b.c) or [Python sample](examples/submissions/a-plus-b.py). Use “登录 / 注册” to log in with the seeded development account `test` / `Acorn-Test-Only-123!`, or register and then log in manually. Click “提交代码” after login and view the result and personal history. Anonymous editing stays in page memory until login; refreshing before login loses that buffer.
+
+To use the HTTP API instead, log in and submit using its returned user ID (`1` for the seed):
 
 ```sh
 ACORN_COOKIE_JAR=/tmp/acorn-cookies.txt
 curl --fail-with-body -c "$ACORN_COOKIE_JAR" http://127.0.0.1:8080/api/v1/auth/login \
   -H 'Content-Type: application/json' \
-  -H 'Origin: http://127.0.0.1:8080' \
+  -H 'Origin: http://localhost:5173' \
   -d '{"username":"test","password":"Acorn-Test-Only-123!"}'
 ```
 
@@ -173,7 +175,7 @@ Send the Cookie and the page’s expected user identity with personal requests:
 ```sh
 ACORN_REQUEST_KEY=$(python3 -c 'import uuid; print(uuid.uuid4())')
 curl -i -b "$ACORN_COOKIE_JAR" -c "$ACORN_COOKIE_JAR" http://127.0.0.1:8080/api/v1/submissions \
-  -H 'Origin: http://127.0.0.1:8080' \
+  -H 'Origin: http://localhost:5173' \
   -H 'X-Acorn-User-Id: 1' \
   -H 'Content-Type: application/json' \
   -H "Idempotency-Key: $ACORN_REQUEST_KEY" \
@@ -241,8 +243,7 @@ Each Worker executes one submission at a time. Multiple Workers process differen
 
 ### LLM Code Review
 
-Set `enabled = true` in the backend's `[llm_review]` section and provide the complete Responses API `endpoint`, `api_key`, and `model`. Store the key in the server-side TOML file. After restarting, use the authenticated review HTTP endpoint for a completed judging run; browser login integration will enable Start review (`启动审查`) and Rerun review (`重新审查`) in the result page.
-
+Set `enabled = true` in the backend's `[llm_review]` section and provide the complete Responses API `endpoint`, `api_key`, and `model`. Store the key in the server-side TOML file.
 Automatic reviews follow the `review_mode` of the submission's fixed problem version: `DISABLED` turns them off, `ENABLE-ANY` triggers after at least one test case passes, and `ENABLE-ALL` triggers when all cases pass. The built-in example problem disables automatic reviews by default. Review opinions are saved separately; rerunning replaces the previous opinion. See the [backend review guide](crates/backend/README.md#llm-代码审查) for configuration and HTTP operations.
 
 ## Operation and Deployment

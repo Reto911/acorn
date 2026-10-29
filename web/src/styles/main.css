@@ -72,9 +72,10 @@ a:focus-visible {
   min-height: 76px;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 24px;
   margin: 0 auto;
-  padding: 0 40px;
+  padding: 12px 40px;
 }
 
 .brand {
@@ -124,6 +125,33 @@ a:focus-visible {
 .main-nav .is-active {
   color: #355642;
   background: #ecf2ec;
+}
+
+.account-nav {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 14px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.account-nav > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.account-nav small {
+  color: #758178;
+}
+
+.auth-placeholder {
+  padding: 32px;
+}
+
+.auth-placeholder p {
+  margin: 12px 0 20px;
 }
 
 .main-content {

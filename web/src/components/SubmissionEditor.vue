@@ -17,6 +17,7 @@ import {
 import { useRouter } from 'vue-router'
 import type { Problem } from '../api/types'
 import { useDraft } from '../composables/useDraft'
+import { useAuth } from '../composables/useAuth'
 import { useSubmissionRequest } from '../composables/useSubmissionRequest'
 import 'element-plus/es/components/alert/style/css'
 import 'element-plus/es/components/button/style/css'
@@ -27,6 +28,7 @@ import 'element-plus/es/components/option/style/css'
 
 const props = defineProps<{ problem: Problem; submissionDisabled: boolean }>()
 const router = useRouter()
+const auth = useAuth()
 const {
   source,
   languageId,
@@ -38,7 +40,10 @@ const {
   flush,
   clearConfirmed,
   dismissVersionNotice,
-} = useDraft(() => props.problem)
+} = useDraft(
+  () => props.problem,
+  () => auth.user.value?.id ?? null,
+)
 const { pending, sending, start } = useSubmissionRequest()
 const CodeEditor = defineAsyncComponent(() => import('./CodeEditor.vue'))
 const confirming = ref(false)
@@ -71,6 +76,11 @@ const cannotSubmit = computed(
 )
 
 function saveWithFeedback() {
+  if (!auth.user.value) {
+    save()
+    ElMessage.info('草稿保留在当前页面内存中，登录后可保存到本地。')
+    return
+  }
   if (save()) ElMessage.success('草稿已保存到本地')
   else ElMessage.error('草稿未能保存，请查看本地存储提示。')
 }
@@ -89,6 +99,7 @@ function saveKey(event: KeyboardEvent) {
 
 async function clearDraft() {
   const language = languageId.value
+  const generation = auth.generation.value
   confirming.value = true
   try {
     await ElMessageBox.confirm(
@@ -101,7 +112,11 @@ async function clearDraft() {
         distinguishCancelAndClose: true,
       },
     )
-    if (active && languageId.value === language) {
+    if (
+      active &&
+      auth.generation.value === generation &&
+      languageId.value === language
+    ) {
       if (clearConfirmed()) ElMessage.success('本语言草稿已清空')
       else ElMessage.error('未能清除本地草稿，请查看存储提示。')
     }
@@ -114,13 +129,16 @@ async function clearDraft() {
 
 async function submit() {
   if (cannotSubmit.value) return
+  if (!auth.requireLogin()) return
+  const identity = auth.snapshot()
+  if (!identity) return
   save()
   const result = await start({
     problem_id: props.problem.problem_id,
     language_id: languageId.value,
     source: source.value,
   })
-  if (result && active)
+  if (result && active && auth.isCurrent(identity))
     await router.push({
       name: 'result',
       params: { submissionId: result.submission_id },
@@ -200,7 +218,13 @@ onScopeDispose(() => {
     <div class="editor-actions">
       <p class="draft-status" role="status">
         {{
-          saved ? '草稿已保存到本地' : source.length ? '草稿尚未保存' : '空草稿'
+          !auth.user.value
+            ? '未登录，草稿仅保留在当前页面内存中'
+            : saved
+              ? '草稿已保存到本地'
+              : source.length
+                ? '草稿尚未保存'
+                : '空草稿'
         }}
       </p>
       <div class="draft-actions">

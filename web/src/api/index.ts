@@ -1,6 +1,9 @@
 import { log } from '../utils/log'
 import { requestJson } from './http'
 import type {
+  AuthResponse,
+  LoginRequest,
+  RegisterRequest,
   CreateSubmissionRequest,
   CreateSubmissionResponse,
   HistoryQuery,
@@ -16,6 +19,84 @@ import type {
 
 export interface QueryOptions {
   signal?: AbortSignal
+  expectedUserId?: number
+}
+
+/** Authentication responses contain only a nullable public identity. */
+function validAuth(value: unknown, nullable: boolean) {
+  if (typeof value !== 'object' || value === null || !('user' in value))
+    return false
+  if (value.user === null) return nullable
+  if (typeof value.user !== 'object') return false
+  const user = value.user
+  return (
+    'id' in user &&
+    typeof user.id === 'number' &&
+    Number.isSafeInteger(user.id) &&
+    user.id > 0 &&
+    'username' in user &&
+    typeof user.username === 'string' &&
+    'display_name' in user &&
+    typeof user.display_name === 'string'
+  )
+}
+
+export async function getMe(options: QueryOptions = {}) {
+  return (
+    await requestJson<AuthResponse>('/api/v1/auth/me', {
+      operation: 'get-me',
+      signal: options.signal,
+      validate: (value, status) => status === 200 && validAuth(value, true),
+    })
+  ).data
+}
+
+export async function login(request: LoginRequest, options: QueryOptions = {}) {
+  return (
+    await requestJson<AuthResponse>('/api/v1/auth/login', {
+      operation: 'login',
+      method: 'POST',
+      signal: options.signal,
+      body: { username: request.username, password: request.password },
+      validate: (value, status) => status === 200 && validAuth(value, false),
+    })
+  ).data
+}
+
+export async function register(
+  request: RegisterRequest,
+  options: QueryOptions = {},
+) {
+  return (
+    await requestJson<AuthResponse>('/api/v1/auth/register', {
+      operation: 'register',
+      method: 'POST',
+      signal: options.signal,
+      body: {
+        username: request.username,
+        password: request.password,
+        ...(request.display_name === undefined
+          ? {}
+          : { display_name: request.display_name }),
+      },
+      validate: (value, status) => status === 201 && validAuth(value, false),
+    })
+  ).data
+}
+
+export async function logout(options: QueryOptions = {}) {
+  return (
+    await requestJson<AuthResponse>('/api/v1/auth/logout', {
+      operation: 'logout',
+      method: 'POST',
+      ...options,
+      body: {},
+      validate: (value, status) =>
+        status === 200 &&
+        validAuth(value, true) &&
+        (value as AuthResponse).user === null,
+    })
+  ).data
 }
 
 /** Read the backend snapshot without triggering component probes. */
@@ -23,7 +104,7 @@ export async function getHealth(options: QueryOptions = {}) {
   return (
     await requestJson<HealthSnapshot>('/api/v1/health', {
       operation: 'get-health',
-      ...options,
+      signal: options.signal,
     })
   ).data
 }
@@ -102,6 +183,7 @@ export async function getSubmission(
   const result = await requestJson<Submission>(path, {
     operation: 'get-submission',
     signal: options.signal,
+    expectedUserId: options.expectedUserId,
   })
   if (options.polling)
     log('debug', {
@@ -126,6 +208,7 @@ export async function startReview(
     operation: 'start-review',
     method: 'POST',
     signal: options.signal,
+    expectedUserId: options.expectedUserId,
     body: { expected_review_id: expectedReviewId },
     validate: (value, status) => {
       if (
@@ -186,6 +269,7 @@ export async function createSubmission(
       operation: 'create-submission',
       method: 'POST',
       signal: options.signal,
+      expectedUserId: options.expectedUserId,
       idempotencyKey: requestKey,
       body: {
         problem_id: snapshot.problem_id,

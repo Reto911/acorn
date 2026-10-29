@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ElButton } from 'element-plus'
+import { ref, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 import { getProblem } from '../api'
 import PendingSubmissionNotice from '../components/PendingSubmissionNotice.vue'
@@ -7,9 +8,20 @@ import ProblemStatement from '../components/ProblemStatement.vue'
 import RequestFeedback from '../components/RequestFeedback.vue'
 import SubmissionEditor from '../components/SubmissionEditor.vue'
 import { useQuery } from '../composables/useQuery'
+import { useAuth } from '../composables/useAuth'
 import 'element-plus/es/components/button/style/css'
 
 const route = useRoute()
+const auth = useAuth()
+const editorGeneration = ref(0)
+watch(
+  () => auth.user.value?.id ?? null,
+  (owner, previousOwner) => {
+    if (previousOwner !== null && owner !== previousOwner)
+      editorGeneration.value += 1
+  },
+  { flush: 'sync' },
+)
 const {
   data: problem,
   loading,
@@ -69,7 +81,7 @@ const {
         </div>
       </section>
       <SubmissionEditor
-        :key="problem.problem_id"
+        :key="`${problem.problem_id}:${editorGeneration}`"
         :problem="problem"
         :submission-disabled="loading || !!error"
       />

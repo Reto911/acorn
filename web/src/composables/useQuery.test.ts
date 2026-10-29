@@ -67,4 +67,54 @@ describe('page query lifecycle', () => {
     expect(query.error.value).toBeNull()
     scope.stop()
   })
+
+  it('clears private data and stops periodic and explicit queries when identity is rejected', async () => {
+    vi.useFakeTimers()
+    const source = ref('private-page')
+    const failure = new Error('Identity expired')
+    const load = vi
+      .fn()
+      .mockResolvedValueOnce('private snapshot')
+      .mockRejectedValueOnce(failure)
+    const handleError = vi.fn(() => true)
+    const scope = effectScope()
+    const query = scope.run(() =>
+      useQuery(() => source.value, load, {
+        refreshIntervalMs: 10_000,
+        handleError,
+      }),
+    )!
+    try {
+      await nextTick()
+      expect(query.data.value).toBe('private snapshot')
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(handleError).toHaveBeenCalledWith(failure)
+      expect(query.data.value).toBeNull()
+      expect(query.error.value).toBeNull()
+      expect(query.loading.value).toBe(false)
+      source.value = 'changed-page'
+      await nextTick()
+      await query.reload()
+      await vi.advanceTimersByTimeAsync(20_000)
+      expect(load).toHaveBeenCalledTimes(2)
+    } finally {
+      scope.stop()
+      vi.useRealTimers()
+    }
+  })
+
+  it('stops immediately on identity changes and ignores a late private snapshot', async () => {
+    const response = deferred<string>()
+    const load = vi.fn().mockReturnValue(response.promise)
+    const scope = effectScope()
+    const query = scope.run(() => useQuery(() => 'private-page', load))!
+    query.stop()
+    expect(load.mock.calls[0]![1].aborted).toBe(true)
+    response.resolve('old owner snapshot')
+    await response.promise
+    await query.reload()
+    expect(query.data.value).toBeNull()
+    expect(load).toHaveBeenCalledOnce()
+    scope.stop()
+  })
 })
