@@ -1,17 +1,19 @@
 <script setup lang="ts">
 import { ElButton } from 'element-plus'
-import { watch } from 'vue'
+import { shallowRef, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 import { getSubmission, startReview as sendReview } from '../api'
 import FixedProblemStatement from '../components/FixedProblemStatement.vue'
 import RequestFeedback from '../components/RequestFeedback.vue'
 import SubmissionOutcome from '../components/SubmissionOutcome.vue'
 import SubmissionReview from '../components/SubmissionReview.vue'
+import SubmissionSource from '../components/SubmissionSource.vue'
 import { useReviewRequest } from '../composables/useReviewRequest'
 import { useSubmissionPolling } from '../composables/useSubmissionPolling'
 import { useAuth } from '../composables/useAuth'
 import { readHistoryQuery } from '../utils/historyQuery'
 import { submissionDateFormat as dateFormat } from '../utils/submissionPresentation'
+import type { SourceLocation } from '../utils/sourcePresentation'
 import 'element-plus/es/components/button/style/css'
 
 const route = useRoute()
@@ -21,6 +23,7 @@ const identity = auth.snapshot()
 if (!identity)
   throw new Error('Private page requires an authenticated identity')
 const handleError = (cause: unknown) => auth.handleError(cause, identity)
+const sourceLocation = shallowRef<SourceLocation | null>(null)
 const {
   data: submission,
   error,
@@ -55,10 +58,38 @@ const {
   sendReview,
   { expectedUserId: identity.userId, handleError },
 )
+
+/** Keep every explicit click distinct, including repeated selections of the same finding. */
+const locateSource = (location: SourceLocation) => {
+  const review = submission.value?.review
+  if (
+    auth.isCurrent(identity) &&
+    review?.result &&
+    review.review_id === location.reviewId
+  )
+    sourceLocation.value = { ...location }
+}
+
+watch(
+  () => route.params.submissionId,
+  () => {
+    sourceLocation.value = null
+  },
+  { flush: 'sync' },
+)
+watch(
+  () => submission.value?.review,
+  (review) => {
+    if (!review?.result || review.review_id !== sourceLocation.value?.reviewId)
+      sourceLocation.value = null
+  },
+  { flush: 'sync' },
+)
 watch(
   auth.generation,
   () => {
     if (!auth.isCurrent(identity)) {
+      sourceLocation.value = null
       stopReview()
       stopPolling()
     }
@@ -158,6 +189,7 @@ watch(
         :error="reviewError"
         @start="startReview"
         @refresh="refresh"
+        @locate="locateSource"
       />
       <p v-if="!terminal && !error" class="result-note" role="status">
         {{
@@ -168,6 +200,12 @@ watch(
               : '每次查询完成后等待 1 秒刷新状态。'
         }}
       </p>
+      <SubmissionSource
+        :key="submission.submission_id"
+        :submission-id="submission.submission_id"
+        :identity="identity"
+        :location="sourceLocation"
+      />
       <FixedProblemStatement
         :key="`${submission.problem_id}:${submission.version_no}`"
         :problem-id="submission.problem_id"

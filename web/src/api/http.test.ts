@@ -8,6 +8,7 @@ import {
   register,
   logout,
   getSubmission,
+  getSubmissionSource,
   listProblems,
   listSubmissions,
   startReview,
@@ -226,6 +227,13 @@ describe('allowed API fields', () => {
       .mockResolvedValueOnce(Response.json({ items: [], limit: 20, offset: 0 }))
       .mockResolvedValueOnce(Response.json({ submission_id: 'saved-id' }))
       .mockResolvedValueOnce(
+        Response.json({
+          submission_id: 'saved-id',
+          language_id: 'c',
+          source: 'x',
+        }),
+      )
+      .mockResolvedValueOnce(
         Response.json(
           { submission_id: 'saved-id', state: 'queued' },
           { status: 202 },
@@ -246,6 +254,7 @@ describe('allowed API fields', () => {
     const options = { expectedUserId: 9 }
     await listSubmissions({}, options)
     await getSubmission('saved-id', options)
+    await getSubmissionSource('saved-id', options)
     await createSubmission(
       'key',
       { problem_id: 1, language_id: 'c', source: 'x' },
@@ -254,10 +263,57 @@ describe('allowed API fields', () => {
     await startReview('saved-id', null, options)
     await getHealth(options)
     await getMe(options)
-    for (const [, init] of fetchMock.mock.calls.slice(0, 4))
+    for (const [, init] of fetchMock.mock.calls.slice(0, 5))
       expect(init!.headers).toHaveProperty('X-Acorn-User-Id', '9')
-    for (const [, init] of fetchMock.mock.calls.slice(4))
+    for (const [, init] of fetchMock.mock.calls.slice(5))
       expect(init!.headers).not.toHaveProperty('X-Acorn-User-Id')
+  })
+
+  it('reads original source using an encoded ID without logging its contents', async () => {
+    const source = '  // private-source 中文\r\nfirst\rsecond\n\n'
+    const response = {
+      submission_id: 'saved/id ?#',
+      language_id: 'c',
+      source,
+    }
+    fetchMock.mockResolvedValueOnce(Response.json(response))
+
+    expect(await getSubmissionSource(response.submission_id)).toEqual(response)
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(fetchMock.mock.calls[0]![0]).toBe(
+      '/api/v1/submissions/saved%2Fid%20%3F%23/source',
+    )
+    expect(fetchMock.mock.calls[0]![1]).toMatchObject({ method: 'GET' })
+    expect(fetchMock.mock.calls[0]![1]?.body).toBeUndefined()
+    for (const level of ['debug', 'info', 'warn', 'error'] as const)
+      expect(
+        JSON.stringify(vi.mocked(console[level]).mock.calls),
+      ).not.toContain('private-source')
+  })
+
+  it('cancels source reading through the caller signal without retrying', async () => {
+    const caller = new AbortController()
+    fetchMock.mockImplementation(
+      (_input, options) =>
+        new Promise((_resolve, reject) => {
+          options?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('Aborted', 'AbortError')),
+          )
+        }),
+    )
+    const result = getSubmissionSource('saved-id', {
+      signal: caller.signal,
+      expectedUserId: 9,
+    }).catch((error: unknown) => error)
+    caller.abort()
+
+    expect(await result).toMatchObject({
+      kind: 'cancelled',
+      context: { operation: 'get-submission-source' },
+    })
+    expect(fetchMock.mock.calls[0]![1]?.signal?.aborted).toBe(true)
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(console.error).not.toHaveBeenCalled()
   })
 
   it('sends only the expected review identity and accepts both new and reused reviews', async () => {

@@ -1,4 +1,4 @@
-/** Public HTTP JSON contracts; source and Worker progress are never query fields. */
+/** Public HTTP JSON contracts; source is returned only by its dedicated owner query. */
 export interface User {
   id: number
   username: string
@@ -123,6 +123,13 @@ export interface SubmissionSummary {
   review_status: ReviewStatus
   created_at_ms: number
   terminal_at_ms: number | null
+}
+
+/** Immutable original content, separate from frequently refreshed submission details. */
+export interface SubmissionSource {
+  submission_id: string
+  language_id: LanguageId
+  source: string
 }
 
 /** Measurements use microseconds and bytes; absence differs from explicit zero. */

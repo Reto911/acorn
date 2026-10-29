@@ -7,6 +7,7 @@ import {
   reviewStatuses,
 } from '../utils/reviewPresentation'
 import { submissionDateFormat as dateFormat } from '../utils/submissionPresentation'
+import type { SourceLocation } from '../utils/sourcePresentation'
 import RequestFeedback from './RequestFeedback.vue'
 import 'element-plus/es/components/button/style/css'
 
@@ -17,7 +18,7 @@ defineProps<{
   refreshRequired: boolean
   error: unknown
 }>()
-defineEmits<{ start: []; refresh: [] }>()
+defineEmits<{ start: []; refresh: []; locate: [location: SourceLocation] }>()
 </script>
 
 <template>
@@ -102,8 +103,24 @@ defineEmits<{ start: []; refresh: [] }>()
             :key="index"
           >
             <h3>
-              {{ findingCategories[finding.category] }} · 第
-              {{ finding.line_start }}–{{ finding.line_end }} 行（含首尾）
+              {{ findingCategories[finding.category] }} ·
+              <ElButton
+                link
+                type="primary"
+                @click="
+                  $emit('locate', {
+                    reviewId: submission.review.review_id,
+                    lineStart: finding.line_start,
+                    lineEnd: finding.line_end,
+                  })
+                "
+              >
+                {{
+                  finding.line_start === finding.line_end
+                    ? `查看第 ${finding.line_start} 行`
+                    : `查看第 ${finding.line_start}–${finding.line_end} 行`
+                }}
+              </ElButton>
             </h3>
             <h4>具体证据</h4>
             <p class="review-text">{{ finding.evidence }}</p>

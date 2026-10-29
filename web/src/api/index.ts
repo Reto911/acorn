@@ -13,6 +13,7 @@ import type {
   Problem,
   ProblemSummary,
   Submission,
+  SubmissionSource,
   SubmissionSummary,
   ReviewResponse,
 } from './types'
@@ -195,6 +196,23 @@ export async function getSubmission(
       duration_ms: result.duration_ms,
     })
   return result.data
+}
+
+/** Read the owner's original source without changing whitespace or logging its contents. */
+export async function getSubmissionSource(
+  submissionId: string,
+  options: QueryOptions = {},
+) {
+  return (
+    await requestJson<SubmissionSource>(
+      `/api/v1/submissions/${encodeURIComponent(submissionId)}/source`,
+      {
+        operation: 'get-submission-source',
+        signal: options.signal,
+        expectedUserId: options.expectedUserId,
+      },
+    )
+  ).data
 }
 
 /** Send one explicit review request using the caller's latest persisted identity; never retry. */
