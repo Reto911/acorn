@@ -171,7 +171,7 @@ def initialize_database():
             print(f"Initializing {script}...", flush=True)
             with (ROOT / script).open("rb") as source:
                 subprocess.run(command, stdin=source, check=True)
-    print(f"Initialized {database!r}: schema version 4, user 1 and example problem 1 (104 cases).")
+    print(f"Initialized {database!r}: schema version 5, user 1 and example problem 1 (104 cases).")
     print("Configure the backend with this database and its separate runtime account.")
 
 

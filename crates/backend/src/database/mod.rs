@@ -85,9 +85,9 @@ impl Database {
                     .await?;
             let version = version
                 .ok_or_else(|| Error::Data(anyhow::anyhow!("Schema version row is missing")))?;
-            if version != 4 {
+            if version != 5 {
                 return Err(Error::Data(anyhow::anyhow!(
-                    "Expected schema version 4, got {version}"
+                    "Expected schema version 5, got {version}"
                 )));
             }
             Ok(())

@@ -8,11 +8,25 @@ SET SESSION sql_mode = 'STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION';
 
 START TRANSACTION;
 
+INSERT INTO checker_scripts (id, name, source)
+VALUES (1, 'trim_trailing_ascii_whitespace', 'import json
+import sys
+from pathlib import Path
+
+trailing = b"\\t\\n\\v\\f\\r "
+actual = Path(sys.argv[3]).read_bytes()
+expected = Path(sys.argv[2]).read_bytes()
+
+verdict = "AC" if actual.rstrip(trailing) == expected.rstrip(trailing) else "WA"
+print(json.dumps({"verdict": verdict}))
+');
+
 INSERT INTO problems (id, current_version_no, created_at_ms)
 VALUES (1, NULL, CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000 AS SIGNED));
 
 INSERT INTO problem_versions (
-    problem_id, version_no, title, statement, comparison_mode, published_at_ms
+    problem_id, version_no, title, statement, checker_script_id, checker_config_json,
+    published_at_ms
 )
 VALUES (
     1,
@@ -39,7 +53,8 @@ VALUES (
 ```text
 3
 ```',
-    'trim_trailing_ascii_whitespace',
+    1,
+    '{}',
     CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000 AS SIGNED)
 );
 

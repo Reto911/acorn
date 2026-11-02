@@ -263,7 +263,7 @@ API 层负责协议和错误，composable 负责明确的客户端生命周期�
 | 后端及 Worker 健康状态           | 已有 `GET /api/v1/health`，只读本地状态及共享观测缓存                                                      | 页面提供每 10 秒自动获取、手动刷新及独立过期警告                                         |
 | LLM 审查结果、手动启动及状态筛选 | 字段、POST review 路由及历史筛选；公共 review.review_id 用于下一次 expected_review_id，完整 DTO 见第 08 篇 | 结果区、手动操作及筛选按 L05–L06 独立验收                                                |
 
-F01–F07 基础 GUI 复用题目与提交接口；LLM 依赖审查列、路由及 DTO／筛选合同，不修改 Worker 判题协议。当前 MySQL 初始化结构为版本 4，见[数据库设计](02-database-design.md)。题面格式和显式版本查询遵守[后端设计](03-backend-design.md)；健康观测按 F08 划分，LLM 按第 08 篇 L01–L06 划分。
+F01–F07 基础 GUI 复用题目与提交接口；LLM 依赖审查列、路由及 DTO／筛选合同，不修改 Worker 判题协议。当前 MySQL 初始化结构为版本 5，见[数据库设计](02-database-design.md)。题面格式和显式版本查询遵守[后端设计](03-backend-design.md)；健康观测按 F08 划分，LLM 按第 08 篇 L01–L06 划分。
 
 ### 6.2 后续健康功能
 

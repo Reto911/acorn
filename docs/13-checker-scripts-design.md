@@ -2,7 +2,7 @@
 
 版本：v1。本文定义统一 Python 答案校验、数据库与任务增量、文件协议、沙箱复用、资源和错误归因，以及实施任务和验收要求。实施状态与实际检查见[实施记录](d02-execution/13-checker-scripts-execution.md)。
 
-本篇是下一版判题合同。现有结构版本 4、固定 trim 比较及每阶段沙箱初始化的实现，由[Worker](01-worker-design.md)、[数据库](02-database-design.md)、[后端](03-backend-design.md)和 [Kafka](10-kafka-judging-design.md)设计描述；实施本篇时按第 7 节同步替换相关实现与说明。
+本篇是下一版判题合同。现有结构版本 5、固定 trim 比较及每阶段沙箱初始化的实现，由[Worker](01-worker-design.md)、[数据库](02-database-design.md)、[后端](03-backend-design.md)和 [Kafka](10-kafka-judging-design.md)设计描述；实施本篇时按第 7 节同步替换相关实现与说明。
 
 ## 1. 目标与范围
 
@@ -20,7 +20,7 @@ HTTP 认证、个人提交隔离、幂等创建、Kafka 首个有效终态、首
 
 ### 2.1 脚本与题目版本
 
-目标数据库结构版本为 5，沿用[MySQL 字段表示](02-database-design.md#2-字段表示)、字符集和短事务合同。
+数据库结构版本为 5，沿用[MySQL 字段表示](02-database-design.md#2-字段表示)、字符集和短事务合同。
 
 checker_scripts：
 

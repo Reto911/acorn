@@ -182,7 +182,7 @@ async fn published_queries_and_fixed_version_creation() {
 
     let mut connection = fixture.connection().await;
     sqlx::raw_sql("START TRANSACTION;
-        INSERT INTO problem_versions (problem_id, version_no, title, statement, comparison_mode, review_mode, published_at_ms) SELECT problem_id, 2, 'Version two', statement, comparison_mode, 'ENABLE-ALL', published_at_ms + 1 FROM problem_versions WHERE problem_id = 1 AND version_no = 1;
+        INSERT INTO problem_versions (problem_id, version_no, title, statement, checker_script_id, checker_config_json, checker_cpu_time_ms, checker_wall_time_ms, checker_memory_kib, review_mode, published_at_ms) SELECT problem_id, 2, 'Version two', statement, checker_script_id, checker_config_json, checker_cpu_time_ms, checker_wall_time_ms, checker_memory_kib, 'ENABLE-ALL', published_at_ms + 1 FROM problem_versions WHERE problem_id = 1 AND version_no = 1;
         INSERT INTO problem_version_languages SELECT problem_id, 2, language_id, cpu_time_ms, wall_time_ms, 1 FROM problem_version_languages WHERE problem_id = 1 AND version_no = 1 AND language_id = 'c';
         INSERT INTO test_cases VALUES (1, 2, 1, X'00FF010A', X'FF000A');
         UPDATE problems SET current_version_no = 2 WHERE id = 1;
@@ -846,11 +846,107 @@ async fn kafka_events_enqueue_only_persisted_changes() {
     fixture.close().await;
 }
 
-/// Invalid deployment data rolls back creation, and application writes enforce user foreign keys.
+/// Checker constraints preserve shared scripts, and invalid task data rolls back creation.
 #[tokio::test]
 async fn invalid_task_data_and_foreign_keys() {
     let fixture = Fixture::new().await;
     let mut connection = fixture.connection().await;
+    let original_source: Vec<u8> =
+        sqlx::query_scalar("SELECT source FROM checker_scripts WHERE id = 1")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+    assert!(
+        std::str::from_utf8(&original_source)
+            .unwrap()
+            .contains(r#"trailing = b"\t\n\v\f\r ""#)
+    );
+    sqlx::raw_sql("START TRANSACTION;
+        INSERT INTO problems (id, current_version_no, created_at_ms) VALUES (2, NULL, 0);
+        INSERT INTO problem_versions (problem_id, version_no, title, statement, checker_script_id, published_at_ms) VALUES (2, 1, 'Shared checker', 'Shared checker', 1, 0);
+        COMMIT;")
+        .execute(&mut connection).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM problem_versions WHERE checker_script_id = 1"
+        )
+        .fetch_one(&mut connection)
+        .await
+        .unwrap(),
+        2
+    );
+    let config: String = sqlx::query_scalar(
+        "SELECT checker_config_json FROM problem_versions WHERE problem_id = 2 AND version_no = 1",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(config, "{}");
+    for statement in [
+        "UPDATE problem_versions SET checker_script_id = 999 WHERE problem_id = 2",
+        "DELETE FROM checker_scripts WHERE id = 1",
+        "UPDATE checker_scripts SET id = 999 WHERE id = 1",
+    ] {
+        let error = sqlx::query(statement)
+            .execute(&mut connection)
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .as_database_error()
+                .unwrap()
+                .is_foreign_key_violation()
+        );
+    }
+    let updated_source = b"print('{\"verdict\": \"AC\"}')\n";
+    sqlx::query("UPDATE checker_scripts SET source = ? WHERE id = 1")
+        .bind(updated_source.as_slice())
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, Vec<u8>>("SELECT source FROM checker_scripts WHERE id = 1")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap(),
+        updated_source
+    );
+    for config in ["[]", "null", "1", "\"text\"", "", "{invalid}"] {
+        assert!(
+            sqlx::query("UPDATE problem_versions SET checker_config_json = ? WHERE problem_id = 2")
+                .bind(config)
+                .execute(&mut connection)
+                .await
+                .is_err()
+        );
+    }
+    sqlx::query("UPDATE problem_versions SET checker_config_json = ? WHERE problem_id = 2")
+        .bind(r#"{"parameter": {"enabled": true}}"#)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    for statement in [
+        "UPDATE problem_versions SET checker_cpu_time_ms = ? WHERE problem_id = 2",
+        "UPDATE problem_versions SET checker_wall_time_ms = ? WHERE problem_id = 2",
+        "UPDATE problem_versions SET checker_memory_kib = ? WHERE problem_id = 2",
+    ] {
+        for value in [Some(1_i64), None] {
+            sqlx::query(statement)
+                .bind(value)
+                .execute(&mut connection)
+                .await
+                .unwrap();
+        }
+        for value in [0_i64, -1] {
+            assert!(
+                sqlx::query(statement)
+                    .bind(value)
+                    .execute(&mut connection)
+                    .await
+                    .is_err()
+            );
+        }
+    }
     sqlx::query("DELETE FROM test_cases WHERE case_index = 2")
         .execute(&mut connection)
         .await
@@ -932,7 +1028,7 @@ async fn startup_checks_and_finite_lock_wait() {
     assert!(
         error
             .to_string()
-            .contains("Expected schema version 4, got 1")
+            .contains("Expected schema version 5, got 1")
     );
     sqlx::query("DELETE FROM schema_version WHERE id = 1")
         .execute(&mut connection)
@@ -942,7 +1038,7 @@ async fn startup_checks_and_finite_lock_wait() {
         Database::open(&fixture.config).await,
         Err(Error::Data(_))
     ));
-    sqlx::query("INSERT INTO schema_version (id, version) VALUES (1, 4)")
+    sqlx::query("INSERT INTO schema_version (id, version) VALUES (1, 5)")
         .execute(&mut connection)
         .await
         .unwrap();
@@ -1322,7 +1418,7 @@ async fn review_policy_interruption_and_constraints() {
     );
     let mut connection = fixture.connection().await;
     // Publish a new version through the existing deployment-side fixture pattern.
-    sqlx::raw_sql("BEGIN; INSERT INTO problem_versions (problem_id, version_no, title, statement, published_at_ms, review_mode) VALUES (1, 2, 'New title', 'New statement', 200, 'ENABLE-ANY'); INSERT INTO problem_version_languages SELECT problem_id, 2, language_id, cpu_time_ms, wall_time_ms, memory_kib FROM problem_version_languages WHERE problem_id=1 AND version_no=1; INSERT INTO test_cases SELECT problem_id, 2, case_index, input, expected_output FROM test_cases WHERE problem_id=1 AND version_no=1; UPDATE problems SET current_version_no=2 WHERE id=1; COMMIT;")
+    sqlx::raw_sql("BEGIN; INSERT INTO problem_versions (problem_id, version_no, title, statement, checker_script_id, checker_config_json, checker_cpu_time_ms, checker_wall_time_ms, checker_memory_kib, published_at_ms, review_mode) SELECT problem_id, 2, 'New title', 'New statement', checker_script_id, checker_config_json, checker_cpu_time_ms, checker_wall_time_ms, checker_memory_kib, 200, 'ENABLE-ANY' FROM problem_versions WHERE problem_id=1 AND version_no=1; INSERT INTO problem_version_languages SELECT problem_id, 2, language_id, cpu_time_ms, wall_time_ms, memory_kib FROM problem_version_languages WHERE problem_id=1 AND version_no=1; INSERT INTO test_cases SELECT problem_id, 2, case_index, input, expected_output FROM test_cases WHERE problem_id=1 AND version_no=1; UPDATE problems SET current_version_no=2 WHERE id=1; COMMIT;")
         .execute(&mut connection).await.unwrap();
     assert_eq!(
         database.problem(1).await.unwrap().unwrap().review_mode,

@@ -2,6 +2,8 @@
 
 版本：v2。本文定义 MySQL 迁移的合同、设计依据、实施任务和验收要求；审核讨论见[审核记录](d01-review/09-mysql-migration-review.md)，实际过程、完成状态和检查结果见[实施记录](d02-execution/09-mysql-migration-execution.md)。
 
+本文保留迁移至 MySQL 结构版本 4 时的范围与任务。后续结构版本 5 的脚本表及题目版本字段见[数据库设计](02-database-design.md)和[判题脚本设计](13-checker-scripts-design.md)，连接、事务和全新初始化职责继续沿用本篇合同。
+
 ## 1. 目标与审核范围
 
 将后端持久化改为 MySQL，保持现有判题、幂等提交、固定题目版本、最新一次 LLM 审查和健康观测的业务行为。复用 SQLx、现有数据库模块、服务生命周期及测试，Worker、Proto 和 HTTP DTO 保持现有合同。

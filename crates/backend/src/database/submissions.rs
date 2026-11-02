@@ -434,13 +434,8 @@ async fn load_task(
     config: &Config,
 ) -> Result<JudgingTask> {
     validate_source(&source, config)?;
-    let language = sqlx::query("SELECT v.comparison_mode, v.review_mode, l.cpu_time_ms, l.wall_time_ms, l.memory_kib FROM problem_versions v JOIN problem_version_languages l USING (problem_id, version_no) WHERE v.problem_id = ? AND v.version_no = ? AND l.language_id = ?")
+    let language = sqlx::query("SELECT v.review_mode, l.cpu_time_ms, l.wall_time_ms, l.memory_kib FROM problem_versions v JOIN problem_version_languages l USING (problem_id, version_no) WHERE v.problem_id = ? AND v.version_no = ? AND l.language_id = ?")
         .bind(info.problem_id).bind(info.version_no).bind(&info.language_id).fetch_optional(&mut *connection).await?.ok_or(Error::LanguageNotAllowed)?;
-    if language.try_get::<String, _>("comparison_mode")? != "trim_trailing_ascii_whitespace" {
-        return Err(Error::Data(anyhow::anyhow!(
-            "Unsupported comparison mode in stored task"
-        )));
-    }
     let limits = run_limits(&language)?;
     let policy = &config.request;
     if limits.cpu_time_ms == 0

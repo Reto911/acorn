@@ -42,7 +42,7 @@ impl Database {
     ) -> Result<Option<ProblemVersion>> {
         self.observe("Read problem version", false, async {
             let mut connection = self.pool.acquire().await?;
-            let row = sqlx::query("SELECT v.problem_id, v.version_no, v.title, v.statement, v.comparison_mode, v.published_at_ms, v.review_mode FROM problems p JOIN problem_versions v ON v.problem_id = p.id AND v.version_no = COALESCE(?, p.current_version_no) WHERE p.id = ?")
+            let row = sqlx::query("SELECT v.problem_id, v.version_no, v.title, v.statement, v.published_at_ms, v.review_mode FROM problems p JOIN problem_versions v ON v.problem_id = p.id AND v.version_no = COALESCE(?, p.current_version_no) WHERE p.id = ?")
                 .bind(version).bind(problem_id).fetch_optional(&mut *connection).await?;
             let Some(row) = row else {
                 return Ok(None);
@@ -53,7 +53,6 @@ impl Database {
                 summary,
                 statement: row.try_get("statement")?,
                 review_mode: ReviewMode::parse(&row.try_get::<String, _>("review_mode")?)?,
-                comparison_mode: row.try_get("comparison_mode")?,
                 published_at_ms: row.try_get("published_at_ms")?,
                 languages,
             }))

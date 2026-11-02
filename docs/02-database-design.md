@@ -1,16 +1,16 @@
 # 数据库设计
 
-本文定义 MySQL 8.4／InnoDB、结构版本 4 的数据合同；迁移任务见[迁移设计](09-mysql-migration-design.md)，实际过程和验证结果见[实施记录](d02-execution/09-mysql-migration-execution.md)。
+本文定义 MySQL 8.4／InnoDB、结构版本 5 的数据合同；迁移任务见[迁移设计](09-mysql-migration-design.md)，实际过程和验证结果见[实施记录](d02-execution/09-mysql-migration-execution.md)。
 
-结构版本 5 的脚本表、题目脚本引用／参数及 checker 限额覆盖按[判题脚本设计第 2 节](13-checker-scripts-design.md#2-数据模型与源码副本)实施。该增量尚未写入现有 SQL 与存储实现；下面保留结构版本 4 的合同，实施时统一替换，进度见[脚本实施记录](d02-execution/13-checker-scripts-execution.md)。
+脚本表、题目脚本引用／参数及 checker 限额覆盖遵守[判题脚本设计第 2 节](13-checker-scripts-design.md#2-数据模型与源码副本)。任务装配和执行的实施范围及检查结果见[脚本实施记录](d02-execution/13-checker-scripts-execution.md)。
 
 数据访问由后端[数据库模块](../crates/backend/src/database/mod.rs)提供，使用[题目类型](../crates/backend/src/problems.rs)与[提交和终态类型](../crates/backend/src/submissions.rs)。审查字段、固定版本策略和最近一次意见遵守[LLM 数据合同](08-llm-code-review-design.md#5-数据库增量)，数据库错误按[后端故障契约](03-backend-design.md#83-数据库及后台故障)报告。开发用户脚本见 [seed-user.sql](../examples/seed-user.sql)。
 
-按[MySQL 迁移设计](09-mysql-migration-design.md)从空库初始化，不保留旧数据；结构版本 4 标记新库结构。内存限额使用 KiB，实际结果中的内存统计使用字节。
+按[MySQL 迁移设计](09-mysql-migration-design.md)从空库初始化，不保留旧数据；结构版本 5 标记新库结构。内存限额使用 KiB，实际结果中的内存统计使用字节。
 
 初始建表语句见 [001-initial-schema.sql](../sql/001-initial-schema.sql)，账户准备和执行顺序见[SQL 初始化说明](../sql/README.md#初始化)，初始化职责见[迁移设计第 7 节](09-mysql-migration-design.md#7-sql-改写与全新初始化)。
 
-[002-example-problem.sql](../sql/002-example-problem.sql) 提供随正式发布保留的两数求和题及 C/Python 限额、用例，在新库建表后装入；它不改变结构版本或创建用户。
+[002-example-problem.sql](../sql/002-example-problem.sql) 提供随正式发布保留的两数求和题、trim checker 脚本及 C/Python 限额、用例，在新库建表后装入；它不改变结构版本或创建用户。
 
 ## 1. 范围与职责
 
@@ -31,26 +31,26 @@ API、Scheduler 与 llm_review 属于同一后端进程，见[后端设计](03-b
 
 ## 2. 字段表示
 
-| 类型                               | 表示                                                                                              |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------- |
-| 用户、题目 ID                      | 有符号 `BIGINT AUTO_INCREMENT PRIMARY KEY`；Rust、HTTP 和显式预置继续使用正值 i64，不承诺连续编号 |
-| Submission ID、幂等键、审查 ID     | 规范 UUID 文本，使用 `VARCHAR(36)`；Submission ID 作为不透明的 Job ID 交给 Worker                 |
-| 版本身份                           | 有符号 `BIGINT`，`(problem_id, version_no)` 联合主键，版本号在题目内从 1 递增                     |
-| 时间戳                             | 有符号 `BIGINT`，UTC Unix 毫秒，字段以 `_at_ms` 结尾                                              |
-| 限额与统计                         | 有符号 `BIGINT`，明确使用 ms、KiB 或 bytes 等既有单位；未知统计保持缺失                           |
-| 源码及测试数据                     | `LONGBLOB`，保留编码、换行及空字节；大小使用 `OCTET_LENGTH()`                                     |
-| 用户名                             | `VARCHAR(255)`，完整唯一键，最多 255 字符                                                         |
-| 展示名称、题目标题、题面、密码哈希 | `LONGTEXT`；密码哈希保留包含算法、参数、盐和哈希值的编码字符串                                    |
-| 状态与结论                         | `VARCHAR(32)` 固定枚举，使用 `CHECK`；语言为 `VARCHAR(16)`，比较模式为 `VARCHAR(64)`              |
-| 终态和审查详情                     | 可空 `LONGTEXT`，附 JSON 对象检查；复用有界应用类型，不重复保存独立的状态或结论列                 |
+| 类型                                         | 表示                                                                                              |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| 用户、题目、脚本 ID                          | 有符号 `BIGINT AUTO_INCREMENT PRIMARY KEY`；Rust、HTTP 和显式预置继续使用正值 i64，不承诺连续编号 |
+| Submission ID、幂等键、审查 ID               | 规范 UUID 文本，使用 `VARCHAR(36)`；Submission ID 作为不透明的 Job ID 交给 Worker                 |
+| 版本身份                                     | 有符号 `BIGINT`，`(problem_id, version_no)` 联合主键，版本号在题目内从 1 递增                     |
+| 时间戳                                       | 有符号 `BIGINT`，UTC Unix 毫秒，字段以 `_at_ms` 结尾                                              |
+| 限额与统计                                   | 有符号 `BIGINT`，明确使用 ms、KiB 或 bytes 等既有单位；未知统计保持缺失                           |
+| 源码及测试数据                               | `LONGBLOB`，保留编码、换行及空字节；大小使用 `OCTET_LENGTH()`                                     |
+| 用户名                                       | `VARCHAR(255)`，完整唯一键，最多 255 字符                                                         |
+| 展示名称、题目标题、题面、脚本名称、密码哈希 | `LONGTEXT`；密码哈希保留包含算法、参数、盐和哈希值的编码字符串                                    |
+| 状态与结论                                   | `VARCHAR(32)` 固定枚举，使用 `CHECK`；语言为 `VARCHAR(16)`                                        |
+| checker 参数、终态和审查详情                 | `LONGTEXT`，附 JSON 对象检查；checker 参数非空且默认 `{}`，终态和审查详情可空                     |
 
 除明确标注可空外，字段均为 `NOT NULL`。ID 不是内容摘要或鉴权凭据。数据库结构版本统一管理，不在每条业务记录中重复保存。
 
 文本使用 `utf8mb4 COLLATE utf8mb4_0900_bin`，枚举与唯一键比较区分大小写、重音和末尾空格。初始化会话和每条新应用连接启用 `STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION`，避免越界写入被静默截断；应用连接设置 READ COMMITTED 及两类有限锁等待。
 
-MySQL 不允许对自增列使用原有的正值 CHECK，显式用户／题目 ID 正值由预置 SQL 和后端输入边界保证，不增加触发器；数据库不再拒绝所有人工写入的非正主键。这与用户名 255 字符上限均为[已确认差异](09-mysql-migration-design.md#43-d04-已确认的差异)。`LONGBLOB` 覆盖 65,536 字节边界，应用接纳预算及服务端传输限制仍然生效，列容量不扩大用户可提交的数据范围。
+MySQL 不允许对自增列使用原有的正值 CHECK，显式用户／题目／脚本 ID 正值由预置 SQL 和后端输入边界保证，不增加触发器；数据库不再拒绝所有人工写入的非正主键。这与用户名 255 字符上限均为[已确认差异](09-mysql-migration-design.md#43-d04-已确认的差异)。`LONGBLOB` 覆盖 65,536 字节边界，应用接纳预算及服务端传输限制仍然生效，列容量不扩大用户可提交的数据范围。
 
-源码、用例数量、单项和合计字节上限遵守 Worker 请求契约。运行、编译、输出、沙箱和通信门限保存在各服务的启动配置中；题目指定的单用例限额保存在版本语言表中。
+源码、用例数量、单项和合计字节上限遵守 Worker 请求契约。运行、编译、输出、沙箱和通信门限保存在各服务的启动配置中；题目指定的用户程序单用例限额保存在版本语言表中，checker 的可选覆盖值保存在题目版本中。
 
 ## 3. 业务表
 
@@ -86,21 +86,23 @@ MySQL 不允许对自增列使用原有的正值 CHECK，显式用户／题目 I
 
 ### 3.3 problem_versions
 
-| 字段              | 用途与约束                                                                                                                                           |
-| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `problem_id`      | 外键关联 `problems(id)`，与 `version_no` 构成联合主键                                                                                                |
-| `version_no`      | 题目内从 1 递增的正整数                                                                                                                              |
-| `title`           | 版本标题                                                                                                                                             |
-| `statement`       | 版本题面的 Markdown 源文；原文保存，浏览器按[前端设计](05-frontend-design.md#32-答题页面)禁用内嵌 HTML 渲染                                          |
-| `comparison_mode` | 比较规则保留字段，默认 `trim_trailing_ascii_whitespace`                                                                                              |
-| `review_mode`     | 自动审查模式，`DISABLED` / `ENABLE-ANY` / `ENABLE-ALL`，默认 `DISABLED`；门槛见[第 08 篇第 4.1 节](08-llm-code-review-design.md#41-根据现有结果判断) |
-| `published_at_ms` | 发布时刻                                                                                                                                             |
+| 字段                   | 用途与约束                                                                                                                                           |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `problem_id`           | 外键关联 `problems(id)`，与 `version_no` 构成联合主键                                                                                                |
+| `version_no`           | 题目内从 1 递增的正整数                                                                                                                              |
+| `title`                | 版本标题                                                                                                                                             |
+| `statement`            | 版本题面的 Markdown 源文；原文保存，浏览器按[前端设计](05-frontend-design.md#32-答题页面)禁用内嵌 HTML 渲染                                          |
+| `checker_script_id`    | 非空外键，关联 `checker_scripts(id)`；允许多个版本共享同一脚本                                                                                       |
+| `checker_config_json`  | 非空 `LONGTEXT` JSON 对象，默认 `{}`；该版本的脚本参数                                                                                               |
+| `checker_cpu_time_ms`  | 可空正整数，覆盖 checker CPU 限额                                                                                                                    |
+| `checker_wall_time_ms` | 可空正整数，覆盖 checker 墙钟限额                                                                                                                    |
+| `checker_memory_kib`   | 可空正整数，覆盖 checker 内存限额，单位 KiB                                                                                                          |
+| `review_mode`          | 自动审查模式，`DISABLED` / `ENABLE-ANY` / `ENABLE-ALL`，默认 `DISABLED`；门槛见[第 08 篇第 4.1 节](08-llm-code-review-design.md#41-根据现有结果判断) |
+| `published_at_ms`      | 发布时刻                                                                                                                                             |
 
-版本、语言限额、全部测试用例和发布指针在同一事务中写入。发布分配下一个版本号并更新指针，不提供将最新指针切回旧版本的入口。首版不持久化可编辑草稿；已发布内容不可修改，修改题面、测试、限额、比较规则或自动审查模式时创建新版本。自动门槛使用提交固定版本的模式，不随最新发布指针变化。
+版本、语言限额、全部测试用例和发布指针在同一事务中写入。发布分配下一个版本号并更新指针，不提供将最新指针切回旧版本的入口。首版不持久化可编辑草稿；已发布内容不可修改，修改题面、测试、限额、脚本引用、脚本参数或自动审查模式时创建新版本。自动门槛使用提交固定版本的模式，不随最新发布指针变化。
 
-首版 `comparison_mode` 只允许默认值：删除整个输出字节串末尾的 ASCII 空白 HT、LF、VT、FF、CR、SPACE，再逐字节比较，内部空白保持不变。Worker 执行相同固定规则，RPC 不增加未使用的规则参数；其他规则在扩展协议与执行器后启用，当前拒绝发布不支持的值。
-
-脚本版本将移除 comparison_mode，以脚本引用和参数替代。题目版本仍固定题目数据、参数与限额，但引用的脚本源码允许原地修改；任务采用装配时读到的副本，具体边界见[脚本引用合同](13-checker-scripts-design.md#22-装配时取得源码)。
+脚本参数的键、类型、默认值和语义由脚本定义，不设比较模式枚举或通用参数 Schema。题目版本固定题目数据、脚本引用、参数与限额；引用的脚本源码允许原地修改。任务采用装配时读到的副本，具体边界见[脚本引用合同](13-checker-scripts-design.md#22-装配时取得源码)。
 
 引用版本的表使用完整的 `(problem_id, version_no)`，不另外生成版本 UUID。版本不可变固定题目数据与限额，不提供工具链版本或跨 Worker 的可复现保证。
 
@@ -120,12 +122,12 @@ MySQL 不允许对自增列使用原有的正值 CHECK，显式用户／题目 I
 
 ### 3.5 test_cases
 
-| 字段                       | 用途与约束                            |
-| -------------------------- | ------------------------------------- |
-| `problem_id`、`version_no` | 联合外键关联题目版本                  |
-| `case_index`               | 从 1 开始的执行顺序，版本内连续且唯一 |
-| `input`                    | 输入 LONGBLOB，可以为空               |
-| `expected_output`          | 期望输出 LONGBLOB，可以为空           |
+| 字段                       | 用途与约束                                     |
+| -------------------------- | ---------------------------------------------- |
+| `problem_id`、`version_no` | 联合外键关联题目版本                           |
+| `case_index`               | 从 1 开始的执行顺序，版本内连续且唯一          |
+| `input`                    | 输入 LONGBLOB，可以为空                        |
+| `expected_output`          | 参考输出或 checker 辅助数据 LONGBLOB，可以为空 |
 
 联合主键为 `(problem_id, version_no, case_index)`。读取时使用 `ORDER BY case_index`；组装 RPC 后由数组顺序表达相同顺序。失败用例通过 Submission 固定版本和返回的序号定位。
 
@@ -172,7 +174,17 @@ JSON 使用应用侧固定类型，字节字段编码为 Base64。保存前验�
 
 ### 3.7 schema_version
 
-固定主键 `id=1` 保存一行 `version=4`，两列使用有符号 BIGINT。CHECK 限制主键为 1、版本为正值；全部表、外键及索引创建成功后才插入版本行。后端启动只检查版本，不要求预置用户存在，不逐项扫描结构，检查失败关闭池并报错。
+固定主键 `id=1` 保存一行 `version=5`，两列使用有符号 BIGINT。CHECK 限制主键为 1、版本为正值；全部表、外键及索引创建成功后才插入版本行。后端启动只检查版本，不要求预置用户存在，不逐项扫描结构，检查失败关闭池并报错。
+
+### 3.8 checker_scripts
+
+| 字段     | 用途与约束                                                |
+| -------- | --------------------------------------------------------- |
+| `id`     | 自动分配的整数主键，表示脚本记录身份                      |
+| `name`   | 非空 `LONGTEXT`，维护者可读名称，不作为执行分支或文件路径 |
+| `source` | 非空 `LONGBLOB`，UTF-8 Python 源码                        |
+
+脚本由维护者直接在数据库管理，可以更新已被题目版本引用的源码。修改同一记录影响所有引用它、此后才装配的任务；不要求为源码修改创建脚本 ID 或题目版本。脚本表不保存源码历史、内容摘要或脚本参数，版本参数由 `problem_versions` 保存。普通题目查询不返回脚本源码、参数或 checker 限额。
 
 ## 4. 创建与内存队列
 
@@ -227,10 +239,11 @@ Scheduler 只有一个活动实例，随后端进程启动。`judging_recovery` 
 
 ### 6.1 外键
 
-MySQL 结构保留下列六条完整外键，使用 `ON DELETE RESTRICT` / `ON UPDATE RESTRICT`，避免删除或更改仍被历史引用的身份：
+MySQL 结构采用下列七条完整外键，使用 `ON DELETE RESTRICT` / `ON UPDATE RESTRICT`，避免删除或更改仍被历史引用的身份：
 
 | 子表字段                                            | 父表字段                                                         |
 | --------------------------------------------------- | ---------------------------------------------------------------- |
+| `problem_versions(checker_script_id)`               | `checker_scripts(id)`                                            |
 | `problem_versions(problem_id)`                      | `problems(id)`                                                   |
 | `problems(id, current_version_no)`                  | `problem_versions(problem_id, version_no)`                       |
 | `problem_version_languages(problem_id, version_no)` | `problem_versions(problem_id, version_no)`                       |
@@ -244,7 +257,7 @@ MySQL DDL 会隐式提交，初始脚本不承诺整体回滚。客户端必须�
 
 ### 6.2 约束与索引
 
-主键与唯一键约束 ID、用户名、创建幂等键和版本内语言/用例。MySQL 会话采用严格模式；SQL 检查固定枚举、既有正值限额和序号、非空源码、终态详情的 JSON 对象格式，以及第 3.6 节定义的终态空值关系。JSON CHECK 先用 CASE 与 JSON_VALID 保护 JSON_TYPE 调用，要求非空详情为 OBJECT；CASE 结果通过 `= 1` 转为 MySQL CHECK 要求的布尔条件。应用校验连续用例序号、字节上限、支持的比较规则和具体结果形状；整数转换保持有符号 i64 范围。
+主键与唯一键约束 ID、用户名、创建幂等键和版本内语言/用例。MySQL 会话采用严格模式；SQL 检查固定枚举、正值限额和序号、非空提交源码、checker 参数和终态详情的 JSON 对象格式，以及第 3.6 节定义的终态空值关系。JSON CHECK 先用 CASE 与 JSON_VALID 保护 JSON_TYPE 调用，要求 checker 参数及非空详情为 OBJECT；CASE 结果通过 `= 1` 转为 MySQL CHECK 要求的布尔条件。checker 覆盖限额接受 NULL 或正值；应用校验连续用例序号、字节上限和具体结果形状；整数转换保持有符号 i64 范围。
 
 SQL 同时约束审查枚举、JSON 对象格式和基本空值关系；详情类型与内容预算由应用在组装及写入边界按第 08 篇第 5.2 节校验。模型内容或返回元数据造成详情超限时保存 FAILED/ReviewInvalidOutput，使用预算内的失败详情，不作为数据库写入故障。历史查询按 review_status 与既有条件取交集，复用现有索引，首版不预建额外审查索引。
 
@@ -258,7 +271,7 @@ SQL 同时约束审查枚举、JSON 对象格式和基本空值关系；详情�
 | `submissions(verdict, created_at_ms, id)`          | 按判题结论直接检索               |
 | `submissions(state, created_at_ms, id)`            | 按 queued 状态及顺序装入排队任务 |
 
-联合主键已覆盖版本子表的关联前缀，无需重复建立同前缀索引。Scheduler 不按每次进度或心跳更新数据库。
+联合主键已覆盖版本子表的关联前缀，脚本引用使用 InnoDB 外键所需索引，不额外建立 UNIQUE 或相同前缀索引。Scheduler 不按每次进度或心跳更新数据库。
 
 ## 7. 最小实施验证
 

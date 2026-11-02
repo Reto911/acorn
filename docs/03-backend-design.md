@@ -94,13 +94,13 @@ llm_review 复用该共享池和 Tokio runtime。读取审查输入后先归还�
 
 一个数据库操作使用一个连接，完成一次查询或一个短事务后归还；占用连接和事务均不能跨越 gRPC、模型 HTTP 调用或等待内存队列交接。应用每条新连接设置 READ COMMITTED、严格 SQL 模式及有限锁等待，SQL 使用参数绑定。同键 INSERT 竞争先回滚再按用户和幂等键读取一次；手动审查在事务内锁定提交行，具体顺序见[迁移事务合同](09-mysql-migration-design.md#5-运行期提交和审查事务)。
 
-服务连接 TOML 指定的端点、库名及用户，以进程环境变量 MYSQL_PASSWORD 提供密码，不自动加载 .env。启动只读取 schema_version 中 id=1 的版本 4；缺少密码、缺少版本行或版本不符均拒绝启动，已建立的池在检查失败后关闭。空用户表允许启动并开放注册，应用不建库、建表或自动升级。
+服务连接 TOML 指定的端点、库名及用户，以进程环境变量 MYSQL_PASSWORD 提供密码，不自动加载 .env。启动只读取 schema_version 中 id=1 的版本 5；缺少密码、缺少版本行或版本不符均拒绝启动，已建立的池在检查失败后关闭。空用户表允许启动并开放注册，应用不建库、建表或自动升级。
 
 题目按数据库设计在事务内发布，包含至少一个用例和允许语言的正值预算。开发用户 test 可按需预置，密码为 Acorn-Test-Only-123!，脚本保存由正式密码实现生成的 Argon2id PHC；正式程序不自动创建账号。database/users 提供账号创建和按用户名查询，auth 提供输入校验及密码计算；凭据查询返回后先释放连接，再进入密码验证。HTTP 认证接口复用这些能力；会话存储在同一 HTTP 路由实例共享的进程内存中，认证不逐请求查 users。业务归属来自认证用户，完整登录、会话及个人隔离合同见[用户设计](11-user-authentication-design.md)。
 
 后端仍验证语言、用例数量、数据大小和限额：源码按 UTF-8 编码后的长度计量；输入、期望输出及总载荷按原始字节计量。HTTP 请求体、Kafka 消息和原始任务载荷各有独立上限。
 
-内存限额从 MySQL `memory_kib`、配置 `request.max_run_memory_kib` 到 RPC `RunLimits.memory_kib` 统一使用 KiB，不进行字节除法。初始化结构为版本 4，采用空库全新部署。后端与 Worker 使用同一版 KiB 协议；实际资源统计和结果字节字段的单位保持原契约。
+内存限额从 MySQL `memory_kib`、配置 `request.max_run_memory_kib` 到 RPC `RunLimits.memory_kib` 统一使用 KiB，不进行字节除法。初始化结构为版本 5，采用空库全新部署。后端与 Worker 使用同一版 KiB 协议；实际资源统计和结果字节字段的单位保持原契约。
 
 同一版本的测试数据在一次任务装配中按 `case_index` 读取。正常新提交由 API 将内存中的完整任务直接交给 Scheduler，Scheduler 不再次读源码或题库。启动装入排队任务时才由 Scheduler 读取其固定版本数据。
 
@@ -305,7 +305,7 @@ EventConsumer 按事件组串行读取。Database::judging_context 仅查询当�
 
 ### 8.1 启动
 
-1. 加载并校验 TOML，初始化日志，读取进程 MYSQL_PASSWORD，连接 MySQL 并检查结构版本 4；空用户表可启动并开放注册。
+1. 加载并校验 TOML，初始化日志，读取进程 MYSQL_PASSWORD，连接 MySQL 并检查结构版本 5；空用户表可启动并开放注册。
 2. 中断遗留 PENDING 审查，保持原机器终态；通过 judging_recovery 装入 queued 任务及 dispatching/running 等待 ID，校验合计待接纳容量。
 3. 恢复本地许可及去重状态，创建审查服务、Kafka Publisher 和 EventConsumer，启动状态健康采集及 HTTP。状态缓存初始可为 unknown。
 

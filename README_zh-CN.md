@@ -119,7 +119,7 @@ mysql --host=127.0.0.1 --port=3306 --user=example_initializer --password --ssl-m
 mysql --host=127.0.0.1 --port=3306 --user=example_initializer --password --ssl-mode=DISABLED --database=appdb < sql/002-example-problem.sql
 ```
 
-这会创建结构版本 4、用户 1 和题号 1 的两数求和题，包含 C/Python 限额与 104 个测试用例。后续启动直接复用该数据库。初始化针对空库，遇到首个 SQL 错误即停止；后端启动检查结构版本，允许空用户表启动并开放注册。手动初始化可省略开发用户脚本，部署脚本包含该步骤。正式程序不自动创建账号、导入旧库或自动升级。
+这会创建结构版本 5、用户 1 和题号 1 的两数求和题，包含 trim checker 脚本、`{}` 参数、C/Python 限额与 104 个测试用例。后续启动直接复用该数据库。初始化针对空库，遇到首个 SQL 错误即停止；后端启动检查结构版本，允许空用户表启动并开放注册。手动初始化可省略开发用户脚本，部署脚本包含该步骤。正式程序不自动创建账号、导入旧库或自动升级。
 
 脚本内容、账户职责和初始化中途失败的处理见[SQL 说明](sql/README.md)。
 
@@ -209,7 +209,7 @@ curl --fail-with-body -b "$ACORN_COOKIE_JAR" -c "$ACORN_COOKIE_JAR" \
 | 后端 `auth.max_sessions_per_user`      | `10`                         | 每用户会话容量                     |
 | 后端 `auth.max_sessions`               | `10000`                      | 全局会话容量                       |
 | 后端 `database.endpoint`               | `127.0.0.1:3306`             | MySQL 主机和 TCP 端口              |
-| 后端 `database.name`                   | `appdb`                      | 已初始化的结构版本 4 数据库        |
+| 后端 `database.name`                   | `appdb`                      | 已初始化的结构版本 5 数据库        |
 | 后端 `database.username`               | `example_user`               | 业务读写账户                       |
 | 后端 `MYSQL_PASSWORD`                  | 进程环境变量                 | 数据库密码                         |
 | 后端 `database.max_connections`        | `4`                          | 共享应用连接池上限                 |

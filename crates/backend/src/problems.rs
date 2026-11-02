@@ -33,8 +33,6 @@ pub struct ProblemVersion {
     pub statement: String,
     /// Immutable automatic review policy for this version.
     pub review_mode: ReviewMode,
-    /// Supported fixed output-comparison rule.
-    pub comparison_mode: String,
     /// UTC Unix publication time in milliseconds.
     pub published_at_ms: i64,
     /// Ordered allowed languages and budgets.

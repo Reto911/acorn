@@ -1,4 +1,4 @@
--- Initial schema for docs/02-database-design.md, version 4.
+-- Initial schema for docs/02-database-design.md, version 5.
 -- Requires MySQL 8.4 and InnoDB. Run once against an empty database.
 -- DDL implicitly commits; stop on the first error and reinitialize an empty DB.
 -- The application does not create tables or upgrade existing databases.
@@ -29,18 +29,36 @@ CREATE TABLE problems (
     created_at_ms BIGINT NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 
+CREATE TABLE checker_scripts (
+    id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    name LONGTEXT NOT NULL,
+    source LONGBLOB NOT NULL
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
+
 CREATE TABLE problem_versions (
     problem_id BIGINT NOT NULL,
     version_no BIGINT NOT NULL CHECK (version_no > 0),
     title LONGTEXT NOT NULL,
     statement LONGTEXT NOT NULL,
-    comparison_mode VARCHAR(64) NOT NULL DEFAULT 'trim_trailing_ascii_whitespace'
-        CHECK (comparison_mode = 'trim_trailing_ascii_whitespace'),
+    checker_script_id BIGINT NOT NULL,
+    checker_config_json LONGTEXT NOT NULL DEFAULT ('{}'),
+    checker_cpu_time_ms BIGINT CHECK (checker_cpu_time_ms > 0),
+    checker_wall_time_ms BIGINT CHECK (checker_wall_time_ms > 0),
+    checker_memory_kib BIGINT CHECK (checker_memory_kib > 0),
     published_at_ms BIGINT NOT NULL,
     review_mode VARCHAR(32) NOT NULL DEFAULT 'DISABLED'
         CHECK (review_mode IN ('DISABLED', 'ENABLE-ANY', 'ENABLE-ALL')),
     PRIMARY KEY (problem_id, version_no),
+    CONSTRAINT problem_versions_checker_config_object CHECK (
+        CASE
+            WHEN JSON_VALID(checker_config_json)
+                THEN JSON_TYPE(checker_config_json) = 'OBJECT'
+            ELSE 0
+        END = 1
+    ),
     FOREIGN KEY (problem_id) REFERENCES problems (id)
+        ON DELETE RESTRICT ON UPDATE RESTRICT,
+    FOREIGN KEY (checker_script_id) REFERENCES checker_scripts (id)
         ON DELETE RESTRICT ON UPDATE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
 
@@ -159,4 +177,4 @@ CREATE INDEX submissions_queued_order_idx
     ON submissions (state, created_at_ms, id);
 
 -- Write the version marker only after every DDL statement has succeeded.
-INSERT INTO schema_version (id, version) VALUES (1, 4);
+INSERT INTO schema_version (id, version) VALUES (1, 5);
