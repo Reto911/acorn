@@ -8,7 +8,7 @@ Acorn is a programming judge for single-file C and Python 3 submissions, with a 
 
 - Browse problems publicly, write C or Python code in Monaco, and save local drafts by user, problem, and language after login.
 - Register and log in in the browser or over HTTP, inspect the current identity, and log out with an in-memory session and a persistent Cookie.
-- Compile, execute, and compare output in Isolate sandboxes, with limits on CPU time, wall time, memory, process count, output, and disk usage.
+- Compile and execute in Isolate, then judge normal user output with a Python checker script loaded from MySQL, with separate checker limits and user CPU, wall time, memory, process, output, and disk limits.
 - Process different submissions in parallel across multiple Workers, saving verdicts, compiler diagnostics, and output from the first failing test case.
 - Filter submission history by problem, execution state, verdict, and review status. Historical results reference the problem version used for judging.
 - View the source of your historical submissions in a read-only editor, and use review line buttons to locate and highlight the relevant lines.
@@ -16,6 +16,8 @@ Acorn is a programming judge for single-file C and Python 3 submissions, with a 
 - Query backend admission conditions, the scheduling queue, and recent database and Worker observations after login.
 
 Problems and editing are public; submission, personal history, results, review, and health require login. Registration returns to manual login. Login preserves the current anonymous editing buffer and waits for another explicit submit. Account changes stop old requests and keep drafts and pending submissions separate by user. Submissions belong to the authenticated user; history, details, source, and manual reviews are limited to that user's submissions.
+
+Checker scripts return AC or WA through a strict JSON object after successful execution. Script errors become `failed` / `CheckerFailed`, with a stable diagnostic; raw checker output stays private. Result CPU and wall time describe the current user run; memory is the user environment’s historical peak and may include earlier cases. Checker resource use is excluded.
 
 ## Project Structure
 
@@ -204,6 +206,8 @@ Both the backend and Worker read TOML through `--config <PATH>`; restart the ser
 | Worker `server.listen`                    | `127.0.0.1:50051`            | gRPC listening address                             |
 | Worker `sandbox.box_id`                   | `0`                          | Isolate box ID for compilation/user execution      |
 | Worker `sandbox.checker_box_id`           | `1`                          | Separate Isolate box ID for the checker            |
+| Worker `checker.result_max_bytes`         | `4096`                       | Complete checker result stdout budget              |
+| Worker `checker.diagnostic_max_bytes`     | `65536`                      | Retained private checker stderr budget             |
 | Backend `http.listen`                     | `127.0.0.1:8080`             | HTTP API listening address                         |
 | Backend `http.public_origin`              | `http://127.0.0.1:8080`      | Required browser-facing Origin for JSON writes     |
 | Backend `http.cookie_secure`              | `false`                      | Secure Cookie setting for the external protocol    |

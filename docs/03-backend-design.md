@@ -198,7 +198,7 @@ Idempotency-Key: 7b5f28d3-51a4-463c-98a4-0a11815d8d46
 
 CE 的 `terminal_details` 使用 `compile_diagnostic_base64`、`compile_diagnostic_truncated`。用例失败使用 `failed_case` 对象，含 `case_index`、`stdout_base64`、`stderr_base64`、两个截断标记，以及可选的 `resources`、`exit_code` 或 `signal`。资源字段保持 Worker 的微秒和字节单位；未提供的字段省略，退出码和信号至多存在一种。
 
-脚本版本保持这些 HTTP 字段不变，新增 CheckerFailed 机器执行故障，仅返回稳定的故障摘要，不透传 checker 原始输出或诊断。同提交复用后，peak_memory_bytes 可能包含用户运行环境先前用例的峰值；用户与 checker 消耗仍分开，见[结果归因](13-checker-scripts-design.md#43-结果归因)和[计量语义](13-checker-scripts-design.md#53-复用的计量语义与释放)。
+统一脚本校验保持这些 HTTP 字段，CheckerFailed 为机器执行故障，仅返回稳定的故障摘要，不透传 checker 原始输出或诊断。CPU 与墙钟表示本次用户运行，peak_memory_bytes 表示用户运行环境历史峰值，可能包含此前用例；checker 消耗不计入这些字段，见[结果归因](13-checker-scripts-design.md#43-结果归因)和[计量语义](13-checker-scripts-design.md#53-复用的计量语义与释放)。
 
 查询到判题失败仍返回 `200 OK`，由业务状态和结果描述失败。执行失败详情中的 `code` 属于任务结果，不是 HTTP 错误码。
 

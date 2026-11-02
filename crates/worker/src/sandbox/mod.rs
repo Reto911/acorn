@@ -23,7 +23,7 @@ pub struct SandboxFile {
     pub executable: bool,
 }
 
-/// Bounded collection differs between compilation diagnostics and case output.
+/// Retention and overflow behavior for compiler, user and checker output.
 #[derive(Clone, Copy, Debug)]
 pub enum OutputPolicy {
     /// Retain at most this many bytes across both streams, draining the remainder.
@@ -37,6 +37,13 @@ pub enum OutputPolicy {
         stdout_max_bytes: usize,
         /// Maximum retained stderr bytes.
         stderr_max_bytes: usize,
+    },
+    /// Stop on stdout overflow; retain and drain stderr without changing the verdict.
+    Checker {
+        /// Maximum complete result JSON bytes.
+        result_max_bytes: usize,
+        /// Maximum retained private diagnostic bytes.
+        diagnostic_max_bytes: usize,
     },
 }
 
@@ -69,7 +76,7 @@ pub struct SandboxRunSpec {
 /// Original reason for a Worker-initiated stop, preserved across Isolate SIGTERM.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StopReason {
-    /// Runtime stdout or stderr exceeded its budget.
+    /// A fatal user or checker output budget was exceeded.
     OutputLimit,
     /// Deadline measured from Job admission expired.
     JobDeadline,
@@ -91,9 +98,9 @@ pub struct StageControl {
 /// Available measurements; missing Isolate statistics remain absent.
 #[derive(Debug, Default)]
 pub struct ResourceUsage {
-    /// Process-tree CPU consumption in microseconds.
+    /// This user or checker run's process-tree CPU consumption in microseconds.
     pub cpu_time_us: Option<u64>,
-    /// Elapsed execution time in microseconds.
+    /// This user or checker run's elapsed execution time in microseconds.
     pub wall_time_us: Option<u64>,
     /// Cgroup historical peak bytes within this environment, without substituting RSS.
     pub memory_bytes: Option<u64>,
@@ -123,7 +130,7 @@ pub struct SandboxRunOutcome {
     pub memory_limit_exceeded: bool,
     /// Isolate reported a CPU or elapsed-time limit.
     pub time_limit_exceeded: bool,
-    /// Runtime collection exceeded stdout or stderr retention limits.
+    /// A fatal user or checker output budget was exceeded.
     pub output_limit_exceeded: bool,
     /// Original Worker stop cause, if one was necessary.
     pub stop_reason: Option<StopReason>,

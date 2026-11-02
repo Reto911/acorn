@@ -38,6 +38,10 @@ process_max_count = 32
 diagnostic_max_bytes = 65_536
 artifact_max_bytes = 16_777_216
 
+[checker]
+result_max_bytes = 4_096
+diagnostic_max_bytes = 65_536
+
 [sandbox]
 backend = "isolate"
 executable = "/usr/bin/isolate"

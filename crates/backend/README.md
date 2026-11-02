@@ -15,7 +15,7 @@ acorn-backend 是 Acorn 的 HTTP 后端，使用 Axum、Tokio 和 SQLx。它管�
 | `health`                  | 数据库与 Worker 共享采集、最近观测缓存                     |
 | `config`、`logging`       | TOML 配置和英文 stderr 日志                                |
 
-一个后端进程运行一个 Scheduler，可连接多个 Worker。每个提交固定创建时的题目版本，源码、测试数据、checker 源码副本、版本参数和有效 checker 限额随任务交给 Worker；提交 ID 同时作为 Worker Job ID。当前执行器使用固定 trim 比较，checker 字段用于任务数据交接。
+一个后端进程运行一个 Scheduler，可连接多个 Worker。每个提交固定创建时的题目版本，源码、测试数据、checker 源码副本、版本参数和有效 checker 限额随任务交给 Worker；提交 ID 同时作为 Worker Job ID。Worker 对每次正常用户运行执行统一 Python checker；脚本以实际退出码 0 和严格 JSON 返回 AC／WA。
 
 库接口 `scheduler::kafka::Publisher` 和 `EventConsumer` 分别提供任务发布与事件消费，`EventProcessor` 共用状态持久化和审查交接。调用方先用 `Database::judging_recovery`／`Scheduler::restore` 恢复本地所有权，再运行两项服务，提供停止信号并监督错误。Kafka 组位点需由部署初始化，运行规则见 [Kafka 设计](../../docs/10-kafka-judging-design.md)。正式入口通过 Scheduler::start 恢复并监督两项 Kafka 服务。
 
@@ -183,7 +183,7 @@ curl --fail-with-body -i -b "$ACORN_COOKIE_JAR" -c "$ACORN_COOKIE_JAR" http://12
 | [wrong-answer.py](../../examples/submissions/wrong-answer.py) | `python`      | WA       |
 | [time-limit.c](../../examples/submissions/time-limit.c)       | `c`           | TLE      |
 
-提交状态依次为 `queued`、`dispatching`、`running`，最终为 `finished` 或 `failed`。`finished` 携带 AC、WA、CE、RE、TLE、MLE、OLE 之一；`failed` 携带执行或消息协议错误。CE 返回编译诊断，用例失败返回首个失败用例的输出及可用资源统计。HTTP 中的字节字段使用 Base64；资源统计使用微秒和字节。
+提交状态依次为 `queued`、`dispatching`、`running`，最终为 `finished` 或 `failed`。`finished` 携带 AC、WA、CE、RE、TLE、MLE、OLE 之一；`failed` 携带执行或消息协议错误。CE 返回编译诊断，用例失败返回首个失败用例的输出及可用资源统计。HTTP 中的字节字段使用 Base64；资源统计使用微秒和字节；CPU／墙钟为本次用户运行，内存为用户环境历史峰值，可能包含此前用例。checker 消耗不合并，CheckerFailed 保存为 failed／无 verdict，仅公开稳定诊断，不返回脚本原始输出，也不触发 LLM 审查。
 
 ### 读取本人提交源码
 

@@ -133,6 +133,17 @@ mod tests {
             Ok(Observation::Terminal(_))
         ));
         reply.state = JobState::Failed as i32;
-        assert!(validate(reply, "job", "c", 2, &config.results).is_err());
+        assert!(validate(reply.clone(), "job", "c", 2, &config.results).is_err());
+        reply.completed_cases = 1;
+        reply.terminal = Some(Terminal::Failure(proto::JobFailure {
+            code: "CheckerFailed".into(),
+            diagnostic: "Checker failed for case 2: invalid result JSON.".into(),
+        }));
+        let Ok(Observation::Terminal(terminal)) = validate(reply, "job", "c", 2, &config.results)
+        else {
+            panic!("Checker failure must retain prior completed progress")
+        };
+        assert_eq!(terminal.state, crate::submissions::SubmissionState::Failed);
+        assert!(terminal.verdict.is_none());
     }
 }

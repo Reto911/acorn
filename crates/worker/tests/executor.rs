@@ -62,10 +62,10 @@ async fn c_ac_ce_and_wa_short_circuit() {
     assert_eq!(accepted.verdict, Verdict::Accepted as i32);
     assert!(accepted.failed_case.is_none());
     let operations = fixture.operations();
-    assert_eq!(operations.matches("--run").count(), 3);
+    assert_eq!(operations.matches("--run").count(), 5);
     assert_eq!(operations.matches("/usr/bin/gcc").count(), 1);
-    assert_eq!(operations.matches("--init").count(), 2);
-    assert_eq!(operations.matches("--cleanup").count(), 2);
+    assert_eq!(operations.matches("--init").count(), 3);
+    assert_eq!(operations.matches("--cleanup").count(), 3);
 
     let before = fixture.operations().matches("--run").count();
     fixture.config.compile.diagnostic_max_bytes = 64;
@@ -106,7 +106,7 @@ async fn c_ac_ce_and_wa_short_circuit() {
             && usage.wall_time_us.is_none()
             && usage.peak_memory_bytes.is_none()
     );
-    assert_eq!(fixture.operations().matches("--run").count() - before, 3);
+    assert_eq!(fixture.operations().matches("--run").count() - before, 5);
 }
 
 /// Python receives an original source copy each time; syntax errors are first-case RE.
@@ -126,7 +126,7 @@ async fn python_independent_copies_and_syntax_error() {
     .await;
     assert_eq!(accepted.completed_cases, 2);
     assert_eq!(result(accepted).verdict, Verdict::Accepted as i32);
-    assert_eq!(fixture.operations().matches("--run").count(), 2);
+    assert_eq!(fixture.operations().matches("--run").count(), 4);
     let before = fixture.operations().matches("--run").count();
     let re = execute(
         &fixture,
@@ -189,13 +189,9 @@ if sys.stdin.buffer.read():
         assert!(executor.is_available());
     }
     let operations = fixture.operations();
-    assert_eq!(operations.matches("--init").count(), 2);
-    assert_eq!(operations.matches("--run").count(), 6);
-    assert_eq!(operations.matches("--cleanup").count(), 2);
-    assert!(
-        !operations.contains("--box-id=1 "),
-        "Checker initializes only when actually needed"
-    );
+    assert_eq!(operations.matches("--init").count(), 4);
+    assert_eq!(operations.matches("--run").count(), 12);
+    assert_eq!(operations.matches("--cleanup").count(), 4);
 }
 
 /// The controlled manager proves dual-box file plumbing, rather than host isolation.
@@ -240,6 +236,274 @@ async fn comparison_preserves_internal_and_non_ascii_whitespace() {
             .await,
         );
         assert_eq!(outcome.verdict, Verdict::WrongAnswer as i32);
+    }
+}
+
+/// Production checker execution restores its fixed files and returns only user measurements on WA.
+#[tokio::test]
+async fn checker_inputs_reuse_and_user_resources() {
+    let fixture = Fixture::new("resources");
+    let mut executor = Executor::new(fixture.config.clone());
+    let user = r#"from pathlib import Path
+import sys
+for name in ['checker.py', 'input.bin', 'answer.bin', 'output.bin', 'config.json']:
+    assert not Path(name).exists()
+Path('ordinary').write_text('user-only')
+sys.stdout.buffer.write(sys.stdin.buffer.read())
+"#;
+    let checker = r#"from pathlib import Path
+import json, sys
+assert sys.argv[1:] == ['input.bin', 'answer.bin', 'output.bin', 'config.json']
+assert sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode
+assert sys.stdin.buffer.read() == b''
+assert not Path('ordinary').exists()
+assert Path('input.bin').read_bytes() == Path('output.bin').read_bytes()
+assert Path('answer.bin').read_bytes() == b'\x00\xffprivate-answer'
+assert json.loads(Path('config.json').read_text()) == {'secret': 'private-config'}
+counter = Path('counter')
+number = int(counter.read_text()) + 1 if counter.exists() else 1
+counter.write_text(str(number))
+for name in ['checker.py', 'input.bin', 'answer.bin', 'output.bin', 'config.json']:
+    Path(name).write_bytes(b'changed')
+print(json.dumps({'verdict': 'AC' if number == 1 else 'WA'}))
+"#;
+    for id in ["checker-first", "checker-next"] {
+        let mut request = job(
+            id,
+            "python",
+            user,
+            &[
+                (b"\x00\xfffirst", b"\x00\xffprivate-answer"),
+                (b"second", b"\x00\xffprivate-answer"),
+                (b"third", b""),
+            ],
+        );
+        request.checker_source = checker.as_bytes().to_vec();
+        request.checker_config_json = r#"{"secret":"private-config"}"#.into();
+        let (_sender, stop) = watch::channel(None);
+        let outcome = executor
+            .run(
+                request,
+                StageControl {
+                    deadline: Instant::now() + Duration::from_secs(10),
+                    stop,
+                },
+                |_| {},
+            )
+            .await;
+        assert_eq!(outcome.completed_cases, 2);
+        let result = result(outcome);
+        assert_eq!(result.verdict, Verdict::WrongAnswer as i32);
+        let case = result.failed_case.unwrap();
+        assert_eq!(case.case_index, 2);
+        assert_eq!(case.stdout, b"second");
+        assert_eq!(
+            case.exit,
+            Some(acorn_protocol::worker::v1::failed_case::Exit::ExitCode(0))
+        );
+        let usage = case.resources.unwrap();
+        assert_eq!(usage.cpu_time_us, Some(1000));
+        assert_eq!(usage.wall_time_us, Some(2000));
+        assert_eq!(usage.peak_memory_bytes, Some(123 * 1024));
+        assert!(executor.is_available());
+    }
+    let operations = fixture.operations();
+    assert_eq!(operations.matches("--run").count(), 8);
+    assert_eq!(operations.matches("--init").count(), 4);
+    assert_eq!(operations.matches("--cleanup").count(), 4);
+    assert!(operations.contains("-I -B -S checker.py input.bin answer.bin output.bin config.json"));
+}
+
+/// Failed execution and malformed results never publish checker bytes or count an undecided case.
+#[tokio::test]
+async fn checker_failures_are_private_and_preserve_progress() {
+    for (mode, source, reason) in [
+        ("normal", "def invalid(:", "exit code 1"),
+        (
+            "normal",
+            "raise RuntimeError('private-script')",
+            "exit code 1",
+        ),
+        (
+            "normal",
+            "import sys\nprint('{\"verdict\":\"AC\"}', flush=True)\nprint('private-stderr', file=sys.stderr)\nsys.exit(7)",
+            "exit code 7",
+        ),
+        (
+            "normal",
+            "print('private-debug {\"verdict\":\"AC\"}')",
+            "invalid result JSON",
+        ),
+        (
+            "normal",
+            "import os, signal\nos.kill(os.getpid(), signal.SIGTERM)",
+            "signal 15",
+        ),
+        (
+            "checker_timeout",
+            "print('{\"verdict\":\"AC\"}')",
+            "time limit",
+        ),
+        (
+            "checker_oom",
+            "print('{\"verdict\":\"AC\"}')",
+            "memory limit",
+        ),
+    ] {
+        let fixture = Fixture::new(mode);
+        let mut request = job(
+            "checker-error",
+            "python",
+            "print('user')",
+            &[(b"", b"private-answer")],
+        );
+        request.checker_source = source.as_bytes().to_vec();
+        let outcome = execute(&fixture, request).await;
+        assert_eq!(outcome.completed_cases, 0, "{mode}: {source}");
+        let Terminal::Failure(error) = outcome.terminal else {
+            panic!("Expected CheckerFailed")
+        };
+        assert_eq!(error.code, "CheckerFailed");
+        assert!(error.diagnostic.starts_with("Checker failed for case 1:"));
+        assert!(error.diagnostic.contains(reason), "{}", error.diagnostic);
+        assert!(!error.diagnostic.contains("private"));
+    }
+    let fixture = Fixture::new("normal");
+    let mut request = job(
+        "later-checker-error",
+        "python",
+        "print('user')",
+        &[(b"first", b""), (b"second", b""), (b"third", b"")],
+    );
+    request.checker_source = b"from pathlib import Path\nif Path('input.bin').read_bytes() == b'first':\n    print('{\"verdict\":\"AC\"}')\nelse:\n    raise RuntimeError('private-error')".to_vec();
+    let outcome = execute(&fixture, request).await;
+    assert_eq!(outcome.completed_cases, 1);
+    let Terminal::Failure(error) = outcome.terminal else {
+        panic!("Expected CheckerFailed")
+    };
+    assert_eq!(error.code, "CheckerFailed");
+    assert_eq!(error.diagnostic, "Checker failed for case 2: exit code 1.");
+    assert_eq!(fixture.operations().matches("--run").count(), 4);
+}
+
+/// Long private diagnostics drain normally, but result overflow rejects even an early valid prefix.
+#[tokio::test]
+async fn checker_output_limits_are_independent() {
+    let mut fixture = Fixture::new("normal");
+    fixture.config.execution.stdout_max_bytes = 8;
+    fixture.config.checker.result_max_bytes = 64;
+    fixture.config.checker.diagnostic_max_bytes = 32;
+    let mut request = job("checker-stderr", "python", "print('user')", &[(b"", b"")]);
+    request.checker_source =
+        b"import os\nos.write(2, b'\\xff' * 8192)\nprint('{\"verdict\":\"AC\"}')".to_vec();
+    assert_eq!(
+        result(execute(&fixture, request.clone()).await).verdict,
+        Verdict::Accepted as i32
+    );
+    request.checker_source =
+        b"import os\nprint('{\"verdict\":\"AC\"}', flush=True)\nos.write(1, b'x' * 8192)".to_vec();
+    let outcome = execute(&fixture, request).await;
+    assert_eq!(outcome.completed_cases, 0);
+    let Terminal::Failure(error) = outcome.terminal else {
+        panic!("Expected result overflow failure")
+    };
+    assert_eq!(error.code, "CheckerFailed");
+    assert!(error.diagnostic.contains("result output limit"));
+}
+
+/// Absolute Job deadlines and shutdown stop active checkers even with no independent limits.
+#[tokio::test]
+async fn checker_deadline_and_shutdown_keep_their_causes() {
+    for shutdown in [false, true] {
+        let fixture = Fixture::new("normal");
+        let mut executor = Executor::new(fixture.config.clone());
+        let mut request = job("checker-stop", "python", "print('user')", &[(b"", b"")]);
+        request.checker_source =
+            b"from pathlib import Path\nPath('ready').touch()\nimport time\ntime.sleep(60)"
+                .to_vec();
+        request.checker_limits = Some(Default::default());
+        let (sender, stop) = watch::channel(None);
+        let run = executor.run(
+            request,
+            StageControl {
+                deadline: Instant::now()
+                    + Duration::from_millis(if shutdown { 5000 } else { 2000 }),
+                stop,
+            },
+            |_| {},
+        );
+        let signal = async {
+            if shutdown {
+                let ready = fixture.directory.path().join(format!(
+                    "isolate-{}/box/ready",
+                    fixture.config.sandbox.checker_box_id
+                ));
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while !ready.exists() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                sender
+                    .send(Some(acorn_worker::sandbox::StopReason::Shutdown))
+                    .unwrap();
+            }
+        };
+        let (outcome, ()) = tokio::join!(run, signal);
+        assert_eq!(outcome.completed_cases, 0);
+        let Terminal::Failure(error) = outcome.terminal else {
+            panic!("Expected checker stop")
+        };
+        assert_eq!(
+            error.code,
+            if shutdown {
+                "WorkerShutdown"
+            } else {
+                "JobDeadlineExceeded"
+            }
+        );
+        assert!(executor.is_available());
+        let operations = fixture.operations();
+        let checker_run = operations
+            .lines()
+            .find(|line| line.contains("--run") && line.contains("checker.py"))
+            .unwrap();
+        assert!(
+            !checker_run.contains("--time=")
+                && !checker_run.contains("--wall-time=")
+                && !checker_run.contains("--cg-mem=")
+        );
+        assert_eq!(operations.matches("--cleanup").count(), 2);
+    }
+}
+
+/// An unconfirmed checker stop retains the Job and blocks all subsequent execution.
+#[tokio::test]
+async fn checker_unconfirmed_stop_retains_execution_slot() {
+    let fixture = Fixture::new("checker_manager_failure");
+    let mut executor = Executor::new(fixture.config.clone());
+    for _ in 0..2 {
+        let (_sender, stop) = watch::channel(None);
+        let outcome = executor
+            .run(
+                job("blocked-checker", "python", "print(42)", &[(b"", b"42")]),
+                StageControl {
+                    deadline: Instant::now() + Duration::from_secs(10),
+                    stop,
+                },
+                |_| {},
+            )
+            .await;
+        let Terminal::Failure(error) = outcome.terminal else {
+            panic!("Expected unconfirmed checker stop")
+        };
+        assert_eq!(error.code, "StopUnconfirmed");
+        assert_eq!(outcome.completed_cases, 0);
+        assert!(!executor.is_available());
+        let operations = fixture.operations();
+        assert_eq!(operations.matches("--run").count(), 2);
+        assert_eq!(operations.matches("--cleanup").count(), 1);
     }
 }
 
@@ -298,7 +562,7 @@ async fn deadline_includes_environment_cleanup() {
     assert_eq!(error.code, "JobDeadlineExceeded");
     assert_eq!(outcome.completed_cases, 1);
     assert!(executor.is_available());
-    assert_eq!(fixture.operations().matches("--cleanup").count(), 1);
+    assert_eq!(fixture.operations().matches("--cleanup").count(), 2);
 }
 
 /// Confirmed OOM takes precedence over a simultaneous timeout.
@@ -343,18 +607,7 @@ async fn output_limit_is_a_bounded_case_result() {
 #[tokio::test]
 #[ignore = "requires prepared Linux/Isolate and dedicated ACORN_ISOLATE_BOX_ID/ACORN_CHECKER_BOX_ID"]
 async fn real_executor_acceptance() {
-    let mut config =
-        acorn_worker::config::Config::parse(include_str!("../../../config/worker.example.toml"))
-            .unwrap();
-    config.sandbox.box_id = std::env::var("ACORN_ISOLATE_BOX_ID")
-        .expect("Set a dedicated unused box ID")
-        .parse()
-        .unwrap();
-    config.sandbox.checker_box_id = std::env::var("ACORN_CHECKER_BOX_ID")
-        .expect("Set a dedicated checker box ID")
-        .parse()
-        .unwrap();
-    config.validate().unwrap();
+    let config = real_config();
     let mut executor = Executor::new(config);
     let c = "#include <stdio.h>\nint main(void) { int a,b; scanf(\"%d%d\", &a,&b); printf(\"%d\\n\", a+b); }";
     for (id, language, source, expected, verdict, completed) in [
@@ -412,4 +665,142 @@ async fn real_executor_acceptance() {
         assert_eq!(result(outcome).verdict, verdict as i32);
         assert!(executor.is_available());
     }
+}
+
+/// Real metadata separates checker limits, Job deadlines and historical user memory.
+#[tokio::test]
+#[ignore = "requires prepared Linux/Isolate and dedicated ACORN_ISOLATE_BOX_ID/ACORN_CHECKER_BOX_ID"]
+async fn real_checker_acceptance() {
+    use acorn_protocol::worker::v1::CheckerLimits;
+
+    let config = real_config();
+    let mut executor = Executor::new(config.clone());
+    let mut request = job(
+        "real-checker-wa",
+        "python",
+        "import sys\nif sys.stdin.buffer.read() == b'first':\n    allocation = bytearray(32 * 1024 * 1024)\nprint('user')",
+        &[(b"first", b"different"), (b"second", b"different")],
+    );
+    request.checker_source = b"from pathlib import Path\np = Path('counter')\nn = int(p.read_text()) + 1 if p.exists() else 1\np.write_text(str(n))\nprint('{\"verdict\":\"AC\"}' if n == 1 else '{\"verdict\":\"WA\"}')".to_vec();
+    let (_sender, stop) = watch::channel(None);
+    let outcome = executor
+        .run(
+            request,
+            StageControl {
+                deadline: Instant::now() + Duration::from_secs(10),
+                stop,
+            },
+            |_| {},
+        )
+        .await;
+    assert_eq!(outcome.completed_cases, 2);
+    let judged = result(outcome);
+    assert_eq!(judged.verdict, Verdict::WrongAnswer as i32);
+    let case = judged.failed_case.unwrap();
+    assert_eq!(case.stdout, b"user\n");
+    assert!(case.resources.unwrap().peak_memory_bytes.unwrap() >= 32 * 1024 * 1024);
+
+    for (source, limits, reason) in [
+        (
+            "while True: pass",
+            CheckerLimits {
+                cpu_time_ms: Some(100),
+                ..Default::default()
+            },
+            "time limit",
+        ),
+        (
+            "import time\ntime.sleep(60)",
+            CheckerLimits {
+                wall_time_ms: Some(100),
+                ..Default::default()
+            },
+            "time limit",
+        ),
+        (
+            "allocation = bytearray(128 * 1024 * 1024)",
+            CheckerLimits {
+                memory_kib: Some(32 * 1024),
+                ..Default::default()
+            },
+            "memory limit",
+        ),
+        (
+            "import sys\nprint('{\"verdict\":\"AC\"}', flush=True)\nsys.exit(7)",
+            CheckerLimits::default(),
+            "exit code 7",
+        ),
+    ] {
+        let mut request = job(
+            "real-checker-limits",
+            "python",
+            "print('user')",
+            &[(b"", b"")],
+        );
+        request.checker_source = source.as_bytes().to_vec();
+        request.checker_limits = Some(limits);
+        let (_sender, stop) = watch::channel(None);
+        let outcome = executor
+            .run(
+                request,
+                StageControl {
+                    deadline: Instant::now() + Duration::from_secs(5),
+                    stop,
+                },
+                |_| {},
+            )
+            .await;
+        assert_eq!(outcome.completed_cases, 0);
+        let Terminal::Failure(error) = outcome.terminal else {
+            panic!("Expected checker execution failure")
+        };
+        assert_eq!(error.code, "CheckerFailed");
+        assert!(error.diagnostic.contains(reason), "{}", error.diagnostic);
+        assert!(executor.is_available());
+    }
+    let mut request = job(
+        "real-checker-deadline",
+        "python",
+        "print('user')",
+        &[(b"", b"")],
+    );
+    request.checker_source = b"import time\ntime.sleep(60)".to_vec();
+    request.checker_limits = Some(CheckerLimits::default());
+    let (_sender, stop) = watch::channel(None);
+    let outcome = executor
+        .run(
+            request,
+            StageControl {
+                deadline: Instant::now() + Duration::from_millis(300),
+                stop,
+            },
+            |_| {},
+        )
+        .await;
+    let Terminal::Failure(error) = outcome.terminal else {
+        panic!("Expected absolute deadline failure")
+    };
+    assert_eq!(error.code, "JobDeadlineExceeded");
+    assert_eq!(outcome.completed_cases, 0);
+    assert!(executor.is_available());
+    for id in [config.sandbox.box_id, config.sandbox.checker_box_id] {
+        assert!(!std::path::Path::new(&format!("/var/lib/isolate/{id}")).exists());
+    }
+}
+
+/// Select two deployment-reserved real Isolate IDs for serial acceptance checks.
+fn real_config() -> acorn_worker::config::Config {
+    let mut config =
+        acorn_worker::config::Config::parse(include_str!("../../../config/worker.example.toml"))
+            .unwrap();
+    config.sandbox.box_id = std::env::var("ACORN_ISOLATE_BOX_ID")
+        .expect("Set a dedicated unused box ID")
+        .parse()
+        .unwrap();
+    config.sandbox.checker_box_id = std::env::var("ACORN_CHECKER_BOX_ID")
+        .expect("Set a dedicated checker box ID")
+        .parse()
+        .unwrap();
+    config.validate().unwrap();
+    config
 }

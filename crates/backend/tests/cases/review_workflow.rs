@@ -368,8 +368,8 @@ async fn manual_http_rejections_preserve_records() {
             "failed" => {
                 let failure = TerminalOutcome::failed(
                     &acorn_protocol::worker::v1::JobFailure {
-                        code: "ControlledFailure".into(),
-                        diagnostic: String::new(),
+                        code: "CheckerFailed".into(),
+                        diagnostic: "Checker failed for case 2: exit code 1.".into(),
                     },
                     &harness.fixture.config.results,
                 )

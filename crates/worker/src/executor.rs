@@ -10,8 +10,9 @@ use anyhow::Context;
 use tracing::Instrument;
 
 use crate::{
+    checker,
     config::Config,
-    language::{self, LanguagePlan, ProgramFiles, StageLimits},
+    language::{self, CommandPlan, LanguagePlan, ProgramFiles, StageLimits},
     sandbox::{
         ArtifactSpec, IsolateSandbox, OutputPolicy, SandboxError, SandboxErrorKind, SandboxFile,
         SandboxRunOutcome, SandboxRunSpec, StageControl, StopReason,
@@ -260,15 +261,18 @@ impl Executor {
                 .await
                 .map_err(sandbox_failure)?;
             check_outcome_stop(&outcome, control)?;
-            if successful(&outcome) {
+            current.phase = JobPhase::Checking;
+            progress(*current);
+            let verdict = if let Some(verdict) = user_failure(&outcome) {
+                verdict
+            } else {
                 tokio::fs::write(context.directory.join("output.bin"), &outcome.stdout.bytes)
                     .await
                     .context("Save private user output for checking")
                     .map_err(preparation_failure)?;
-            }
-            current.phase = JobPhase::Checking;
-            progress(*current);
-            let verdict = verdict(&outcome, &case.expected_output);
+                self.check_case(context, case, index as u32 + 1, control)
+                    .await?
+            };
             check_stop(control)?;
             current.completed_cases += 1;
             progress(*current);
@@ -287,6 +291,89 @@ impl Executor {
             ..Default::default()
         })
     }
+
+    /// Execute the task's Python checker and accept its verdict only after confirmed completion.
+    async fn check_case(
+        &mut self,
+        context: &JobContext,
+        case: &TestCase,
+        index: u32,
+        control: &StageControl,
+    ) -> Result<Verdict, JobFailure> {
+        check_stop(control)?;
+        let limits = context
+            .request
+            .checker_limits
+            .as_ref()
+            .ok_or_else(|| failure("InvalidJob", "Missing checker limits"))?;
+        let files = checker_files(
+            &context.request,
+            case,
+            &context.directory.join("output.bin"),
+        )
+        .await
+        .map_err(preparation_failure)?;
+        let outcome = self
+            .checker
+            .run_in_environment(
+                SandboxRunSpec {
+                    command: CommandPlan {
+                        executable: self.config.languages.python.interpreter.clone(),
+                        arguments: [
+                            "-I", "-B", "-S", "checker.py", "input.bin", "answer.bin", "output.bin",
+                            "config.json",
+                        ]
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect(),
+                        environment: self.config.sandbox.environment.clone(),
+                    },
+                    files,
+                    stdin: vec![],
+                    limits: StageLimits {
+                        cpu_time_ms: limits.cpu_time_ms,
+                        wall_time_ms: limits.wall_time_ms,
+                        memory_kib: limits.memory_kib,
+                        process_max_count: self.config.execution.run_process_max_count,
+                    },
+                    output: OutputPolicy::Checker {
+                        result_max_bytes: self.config.checker.result_max_bytes,
+                        diagnostic_max_bytes: self.config.checker.diagnostic_max_bytes,
+                    },
+                    artifact: None,
+                },
+                control.clone(),
+            )
+            .await
+            .map_err(|error| {
+                tracing::error!(job = %context.request.job_id, case = index, %error, "Checker sandbox operation failed");
+                let mut failed = sandbox_failure(error);
+                failed.diagnostic = format!("Checker failed for case {index}: sandbox execution failed.");
+                failed
+            })?;
+        if let Err(error) = check_outcome_stop(&outcome, control) {
+            log_checker_failure(&context.request.job_id, index, &outcome, &error.code);
+            return Err(error);
+        }
+        checker::verdict(&outcome).map_err(|reason| {
+            log_checker_failure(&context.request.job_id, index, &outcome, &reason);
+            failure(
+                "CheckerFailed",
+                &format!("Checker failed for case {index}: {reason}"),
+            )
+        })
+    }
+}
+
+/// Log execution facts and bounded private stderr without publishing checker output.
+fn log_checker_failure(job_id: &str, index: u32, outcome: &SandboxRunOutcome, reason: &str) {
+    tracing::error!(job = job_id, case = index,
+        exit_code = ?outcome.exit_code, exit_signal = ?outcome.exit_signal,
+        memory_limit = outcome.memory_limit_exceeded, time_limit = outcome.time_limit_exceeded,
+        output_limit = outcome.output_limit_exceeded,
+        stdout_truncated = outcome.stdout.truncated, stderr_truncated = outcome.stderr.truncated,
+        stderr_summary = %checker::stderr_summary(&outcome.stderr.bytes),
+        reason, "Checker execution failed");
 }
 
 /// Prepare the checker script and four fixed inputs from task data and Worker-owned output.
@@ -350,30 +437,19 @@ fn successful(outcome: &SandboxRunOutcome) -> bool {
         && !outcome.time_limit_exceeded
 }
 
-/// Select confirmed limits in MLE, OLE, TLE order before exit and output comparison.
-fn verdict(outcome: &SandboxRunOutcome, expected: &[u8]) -> Verdict {
+/// Select user failures in MLE, OLE, TLE, RE order; successful runs require a checker.
+fn user_failure(outcome: &SandboxRunOutcome) -> Option<Verdict> {
     if outcome.memory_limit_exceeded {
-        Verdict::MemoryLimitExceeded
+        Some(Verdict::MemoryLimitExceeded)
     } else if outcome.output_limit_exceeded {
-        Verdict::OutputLimitExceeded
+        Some(Verdict::OutputLimitExceeded)
     } else if outcome.time_limit_exceeded {
-        Verdict::TimeLimitExceeded
+        Some(Verdict::TimeLimitExceeded)
     } else if !successful(outcome) {
-        Verdict::RuntimeError
-    } else if trim(&outcome.stdout.bytes) != trim(expected) {
-        Verdict::WrongAnswer
+        Some(Verdict::RuntimeError)
     } else {
-        Verdict::Accepted
+        None
     }
-}
-
-/// Remove only HT, LF, VT, FF, CR and SPACE at the end of the entire byte string.
-fn trim(bytes: &[u8]) -> &[u8] {
-    let end = bytes
-        .iter()
-        .rposition(|byte| !matches!(byte, b'\t' | b'\n' | 0x0b | 0x0c | b'\r' | b' '))
-        .map_or(0, |index| index + 1);
-    &bytes[..end]
 }
 
 /// Preserve available facts without adding unknown statistics or placeholder cases.

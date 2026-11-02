@@ -4,7 +4,7 @@
 
 基础判题的实际过程与检查见[Worker 与后端实施记录](d02-execution/04-development-execution.md#7-实施记录)，状态 RPC 和健康页面的交付见[前端与健康观测实施记录](d02-execution/06-frontend-development-execution.md#58-f08h01worker-状态-rpc)。
 
-本篇描述 Worker 的任务接纳与现行执行合同。统一 Python 校验的文件对接、同提交沙箱复用及 checker 执行遵守[判题脚本设计](13-checker-scripts-design.md)；固定比较的后续替换及当前实现状态见[脚本实施记录](d02-execution/13-checker-scripts-execution.md)。
+本篇描述 Worker 的任务接纳与现行执行合同。统一 Python 校验的文件对接、同提交沙箱复用及 checker 执行遵守[判题脚本设计](13-checker-scripts-design.md)；当前实现状态见[脚本实施记录](d02-execution/13-checker-scripts-execution.md)。
 
 ## 1. 目标与范围
 
@@ -38,7 +38,7 @@ Worker 继承启动它的用户身份，不创建账号，不内置切换用户�
 | ---------- | -------------------------------------------------------------------------------------------------------------- |
 | API        | 使用配置的测试用户归属、选取最新题目版本、保存提交、将任务数据交给 Scheduler、提供提交历史查询；当前不登录鉴权 |
 | Scheduler  | 维护本地待发队列及许可、发布任务、消费事件、保存首个有效终态并交接审查                                         |
-| Worker     | 去重与接纳、选择语言计划、组织可选编译和串行运行、比较输出、保存内存记录、输出日志                             |
+| Worker     | 去重与接纳、选择语言计划、组织可选编译、串行用户运行与 checker 校验、保存内存记录、输出日志                    |
 | 语言适配器 | 根据本地配置生成固定源码名、可选编译计划和运行计划                                                             |
 | 沙箱封装   | 初始化、传入文件、施加限额、执行、收集输出和产物、停止进程树、调用清理                                         |
 | 部署端     | 安装 C/Python 工具链和沙箱、配置权限与资源、收集日志、处理残留文件或环境问题                                   |
@@ -178,7 +178,7 @@ message JobFailure {
 
 源码、输入和答案直接放入有大小上限的请求，不使用外部下载地址或宿主文件路径。测试用例的数组顺序就是执行顺序，`case_index` 从 1 开始；不额外设置用例 ID 和排序字段。
 
-`language_id` 首版接受 `c` 和 `python`，后者表示 Python 3。答题者不能指定 checker，后端按题库装配其源码与参数；现行 trim 比较见第 5.2 节，脚本执行合同见第 13 篇。题目要求的单用例 CPU、墙钟时间和内存通过 `run_limits` 提交；Worker 配置其允许上限。编译预算、输出上限和其他门限由 Worker 配置文件提供。
+`language_id` 首版接受 `c` 和 `python`，后者表示 Python 3。答题者不能指定 checker，后端按题库装配其源码与参数；统一脚本校验见第 5.2 节及第 13 篇。题目要求的单用例 CPU、墙钟时间和内存通过 `run_limits` 提交；Worker 配置其允许上限。编译预算、输出上限和其他门限由 Worker 配置文件提供。
 
 内存限额使用正整数 `memory_kib`，单位为 KiB（1 KiB = 1024 字节），从题库到消息、语言计划和 Isolate 参数保持同一单位。当前开发阶段直接将字段号 3 的名称和单位改为 `memory_kib`，不保留旧字段或兼容处理；后端与 Worker 按当前协议同步构建运行。实际资源统计 `peak_memory_bytes` 仍使用字节。
 
@@ -186,7 +186,7 @@ checker 源码、JSON 对象参数与限额是 Job 级副本，不在用例中�
 
 `FINISHED` 表示取得判题结论，包含一个 `JudgeResult`；`FAILED` 表示执行基础设施或 Job 总期限导致失败，包含 `JobFailure`。CE、WA、RE、TLE、MLE、OLE 都是判题结论，不是基础设施失败。运行中不包含终态消息。
 
-AC 仅返回结论；CE 返回结论及有界编译诊断，不返回 `failed_case`；用例级错误返回结论及唯一的首个失败用例。输入和答案已在 Scheduler 中，不在结果中重复发送。未运行用例不生成占位记录。`completed_cases` 统计已经得到裁决的用例，包括首个失败用例；CE 时为 0。
+AC 仅返回结论；CE 返回结论及有界编译诊断，不返回 `failed_case`；用例级错误返回结论及唯一的首个失败用例。输入和答案已在 Scheduler 中，不在结果中重复发送。未运行用例不生成占位记录。`completed_cases` 统计已经得到裁决的用例，包括用户失败或 checker 返回 WA 的首败；checker 取得 AC／WA 后才增加本例数量，自身故障保留先前数量，CE 时为 0。
 
 `failed_case` 显式声明为 `optional`，用字段存在性区分“没有失败用例”和“包含失败用例”。Proto3 的单个 message 字段本身也具有存在性，见[Protobuf 字段存在性文档](https://protobuf.dev/programming-guides/field_presence/)。
 
@@ -236,15 +236,17 @@ Python 计划没有编译阶段，跳过步骤 2～5，以原始源码作为待�
 
 ### 5.2 按顺序运行与比较
 
-以下是现行固定比较流程；脚本版本的用户运行、checker 校验与结论归因见[第 13 篇第 4 节](13-checker-scripts-design.md#4-脚本协议)。
+用户运行、统一 checker 校验与结论归因遵守[第 13 篇第 4 节](13-checker-scripts-design.md#4-脚本协议)。
 
 程序准备完成后，对请求数组中的每个用例依次执行以下操作：
 
 1. 首例初始化用户环境；每例恢复 C 编译产物或 Python 源码的独立副本，接入当前 stdin。
 2. 按运行计划启动程序或解释器，实时收集有界 stdout/stderr，执行本用例时间、内存及配置中的其他限制。
 3. 程序结束或超限后，保存必要输出、退出原因和可用资源统计，确认进程树停止并完成输出收集；正常执行的有界 stdout 保存为 Worker 私有文件。
-4. 判定运行结果；正常退出时，在 Worker 中比较保存的 stdout 和期望输出。
-5. 当前用例 AC 才开始下一个用例；WA、RE、TLE、MLE、OLE 立即结束 Job，返回这个用例。
+4. 用户已确认 MLE、OLE、TLE 或 RE 时，保留原结论并跳过 checker。
+5. 正常用户运行后，以配置的 Python 执行 `-I -B -S checker.py input.bin answer.bin output.bin config.json`，stdin 为空，使用独立 checker 环境和有效限额。
+6. 等待 checker 实际退出、进程树停止及完整收集；无超限、无信号且元数据退出码为 0 时，才接受唯一合法 JSON 对象中的 AC／WA，否则形成 CheckerFailed。
+7. 取得本例结论后增加完成数量；只有 AC 才继续下一例，首败或执行故障结束 Job。WA 保留本次用户输出、退出事实和资源。
 
 每个用例只获得当前输入、独立程序文件副本和必要运行时。参考数据、checker 源码、私有参数及 Worker 私有目录不进入用户环境。运行副本的任何修改都不会改变 Worker 保存的文件或后续用例获得的副本；其他程序文件在同 Job 内保留，受磁盘和 inode 配额约束。Python 每例启动新解释器，其启动、解析和执行计入本次运行限额。
 
@@ -252,7 +254,9 @@ CPU 与墙钟直接采用 Isolate 本次运行元数据，不再次扣除累计 
 
 运行时持续读取输出是避免阻塞、及时执行输出上限的必要 I/O，不产生多个并行运行的用例。超出 stdout 或 stderr 上限时立即停止，不能只截断后继续判定 AC。
 
-输出比较规则固定为：删除整个字节串末尾的 ASCII 空白 HT、LF、VT、FF、CR、SPACE，再逐字节比较；内部空白保持原样。不提供自定义 checker、Token 或浮点比较。
+全部正常用户运行均由任务携带的 Python checker 判断；Worker 不内置比较器、不按名称查找本地脚本。正式两数求和题引用 trim 脚本，忽略输出末尾 ASCII 空白，其他题目可引用自定脚本。文件与严格 JSON 协议见[脚本协议](13-checker-scripts-design.md#4-脚本协议)。
+
+checker stdout 结果超过 `checker.result_max_bytes` 时停止并形成 CheckerFailed；stderr 超过 `checker.diagnostic_max_bytes` 时仅保留前缀、标记截断并继续排空，不改变合法裁决。stdout/stderr 不进入公开终态或 LLM 输入。失败内部日志保留运行事实、截断标记及最多 4096 UTF-8 字节的 stderr 摘要；非法字节替换后仍满足字节上限。公开诊断仅含用例序号与稳定原因。
 
 ### 5.3 结论与收尾
 
@@ -263,18 +267,20 @@ CPU 与墙钟直接采用 Isolate 本次运行元数据，不再次扣除累计 
 | 沙箱确认内存超限                                                       | MLE，返回当前用例        |
 | stdout 或 stderr 超限                                                  | OLE，返回当前用例        |
 | 非零退出或信号，且无已确认的上述超限；包括 Python 语法错误和未捕获异常 | RE，返回当前用例         |
-| 正常退出且输出不等                                                     | WA，返回当前用例         |
-| 全部用例正常退出且输出相等                                             | AC，无失败用例           |
+| 正常用户运行且 checker 返回 WA                                         | WA，返回当前用例         |
+| 全部用例正常用户运行且 checker 返回 AC                                 | AC，无失败用例           |
 | 沙箱初始化、启动、停止、输出收集或产物导出失败，或 Job 总期限到达      | Job 失败                 |
 | 已停止环境或 Job 私有文件的清理失败                                    | 记录警告，不改变判题结论 |
 
 不能仅凭 SIGKILL 推断 MLE。多个已确认的限额同时触发时，固定按 MLE、OLE、TLE 选择结论。可选统计拿不到时保持缺省，不伪造统计值。
 
+checker 语法、异常、非零退出、独立超限或 JSON 协议错误形成 `CheckerFailed`，无用户 verdict。Job 总期限、停机或停止未确认仍沿用原故障；基础设施错误保持相应分类。
+
 最后一个阶段的进程树已确认停止，或执行错误明确发生在本阶段执行进程启动前时，组装有界结果、调用沙箱和私有工作区清理，再写入终态并释放执行位置。清理失败不阻止释放；执行错误在发布终态前形成失败结论，不在结果发布后修改结论。停止未确认时仍发布 Job 失败，但跳过依赖停止的文件清理并保留执行位置，见第 6 节。正常释放后，结果等待 MQ 交接不占用执行位置；下一 Job 可随后开始，但仍受未确认结果数量上限约束。
 
 P04 的 [`Executor`](../crates/worker/src/executor.rs) 接收已接纳请求、绝对期限与内部停止通道，通过回调发布阶段和已裁决用例数，返回有界终态。Job 上下文保存服务端生成的私有目录、原始请求和编译产物；普通结束删除工作文件并释放数据，停止未确认则保留上下文及沙箱实例，`is_available()` 保持为 false。调用方等待执行完成，不取消执行 future；P05 负责终态登记与执行位置释放。
 
-执行失败代码为 `PreparationFailed`（私有文件或语言准备失败）、`InvalidJob`（内部调用缺少运行限额）、`SandboxError`（已停止或尚未启动的阶段故障）、`JobDeadlineExceeded`（总期限到达）、`WorkerShutdown`（内部停机）和 `StopUnconfirmed`（停止未确认）。诊断最多保留 512 个 UTF-8 字节，包含在配置预留的结果协议空间内；这些代码属于 Job 结果，不是 RPC 拒绝原因。
+执行失败代码为 `PreparationFailed`（私有文件或语言准备失败）、`InvalidJob`（内部调用缺少运行限额）、`SandboxError`（已停止或尚未启动的阶段故障）、`JobDeadlineExceeded`（总期限到达）、`WorkerShutdown`（内部停机）、`StopUnconfirmed`（停止未确认）和 `CheckerFailed`（脚本执行或协议错误）。诊断最多保留 512 个 UTF-8 字节，包含在配置预留的结果协议空间内；这些代码属于 Job 结果，不是 RPC 拒绝原因。
 
 ## 6. 统一沙箱接口
 
@@ -301,7 +307,7 @@ Worker 以 `SandboxRunSpec` 启动一个阶段，取得 `SandboxRunOutcome`。�
 
 实现位于 [`sandbox` 模块](../crates/worker/src/sandbox/mod.rs)。`IsolateSandbox::run_in_environment` 复用环境，`cleanup` 显式收尾；`run` 为编译等独立阶段组合两者。`StageControl` 携带接纳时确定的同一绝对期限和内部 watch 停止通道，涵盖准备、执行及清理，不随用例或环境刷新。调用方必须等待阶段调用结束，通过通道请求停止，不中止执行 future。`SandboxRunOutcome` 保留独立的 OOM、输出超限和超时事实及原始停止原因，由 P04 选择判题结论；统计仅来自实际元数据，进程树内存使用 `cg-mem`，不以单进程 RSS 代替。`SandboxErrorKind::Execution` 表示尚未启动或已确认停止的基础设施错误；`StopUnconfirmed` 保留元数据工作目录、管理器句柄和执行占用，同一个后端实例拒绝再次执行。
 
-固定条目重放先移除旧目录项，再以新常规文件独立复制，不跟随残留符号链接或复用硬链接；准备失败明确报告执行错误。每次运行清空旧元数据并新建输出收集状态，其他文件在同 Job 内保留。`executor::checker_files` 从任务和 Worker 私有 stdout 文件准备 checker.py、input.bin、answer.bin、output.bin、config.json；实际 checker 命令与裁决按脚本设计接入。
+固定条目重放先移除旧目录项，再以新常规文件独立复制，不跟随残留符号链接或复用硬链接；准备失败明确报告执行错误。每次运行清空旧元数据并新建输出收集状态，其他文件在同 Job 内保留。`executor::checker_files` 从任务和 Worker 私有 stdout 文件准备 checker.py、input.bin、answer.bin、output.bin、config.json；checker 命令和裁决由执行器按第 5.2 节接通。
 
 阶段 CPU、墙钟和内存限额逐项可选，缺失项不添加对应 Isolate 参数；编译与用户运行继续明确提供正限额。checker 缺失项不套用用户 `max_run` 或 Job 剩余额度；Job 总期限仍独立约束整个执行。
 
@@ -340,7 +346,7 @@ Worker 入口接收 Ctrl-C 和 SIGTERM，通过服务的内部停机方法等待
 | `program_files` | 运行沙箱需要的文件：编译产物或原始源码               |
 | `run`           | 程序或解释器命令、参数数组、有限环境及运行时文件需求 |
 
-`program_files` 是文件准备规则：有编译阶段时指向成功导出的产物，没有编译阶段时指向源码。执行器统一处理可选编译、沙箱生命周期、限额、输出比较、短路和结果保存，不在这些环节按语言复制流程。
+`program_files` 是文件准备规则：有编译阶段时指向成功导出的产物，没有编译阶段时指向源码。执行器统一处理可选编译、沙箱生命周期、限额、checker 校验、短路和结果保存，不在这些环节按语言复制流程。
 
 | 语言     | 源码      | 编译计划                                              | 用例运行计划                                            |
 | -------- | --------- | ----------------------------------------------------- | ------------------------------------------------------- |
@@ -422,6 +428,10 @@ memory_kib = 524_288
 process_max_count = 32
 diagnostic_max_bytes = 65_536
 artifact_max_bytes = 16_777_216
+
+[checker]
+result_max_bytes = 4_096
+diagnostic_max_bytes = 65_536
 
 [sandbox]
 backend = "isolate"

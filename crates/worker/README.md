@@ -7,7 +7,7 @@ acorn-worker 是独立的 C/Python 判题进程，从 Kafka 消费任务并发�
 - 每个 Worker 同时执行一个 Job；用例按输入顺序串行运行，首个失败用例结束本次判题。
 - C 源码以 `main.c` 编译一次，成功后每例恢复原始产物副本；Python 以 `main.py` 逐例启动解释器。
 - 编译环境独立初始化和清理；用户环境在同 Job 内复用，每例重新启动进程并恢复原始程序，其他文件保留至 Job 收尾。应用 CPU、墙钟、进程树内存、进程数、FD、文件和磁盘配额。
-- 输出比较先删除整个输出末尾的 ASCII 空白，再逐字节比较。
+- 用户正常退出后，在独立环境执行任务携带的 Python checker。脚本以退出码 0 和唯一 JSON 对象返回 AC／WA；CE、RE、TLE、MLE、OLE 跳过 checker。两数求和题使用末尾 ASCII 空白 trim 脚本。
 - 执行前预留结果名额，终态按 FIFO 发布；发布确认并成功入队原任务位点请求后释放名额。
 
 语言 ID 为 `c` 和 `python`。Python 使用部署提供的解释器与标准库，支持单文件提交。
@@ -89,6 +89,7 @@ target/debug/acorn-worker --config "$HOME/.config/acorn/worker.toml"
 | `languages.c`      | GCC 路径和编译参数                                              | `/usr/bin/gcc`，C17、`-O2`                           |
 | `languages.python` | Python 路径和运行参数                                           | `/usr/bin/python3`，`-I -B -S main.py`               |
 | `compile`          | 编译资源、诊断和导出产物预算                                    | CPU 10 秒、墙钟 20 秒、内存 512 MiB                  |
+| `checker`          | 结果 stdout 与私有诊断 stderr 保存预算                          | 4 KiB、64 KiB                                        |
 | `sandbox`          | Isolate 路径、两个 box ID、FD、文件／磁盘／inode 配额和收尾超时 | 文件 16 MiB，磁盘 64 MiB，4096 inode                 |
 | `results`          | 待交接结果容量                                                  | 128 条                                               |
 | `logging`          | stderr 日志级别                                                 | `info`                                               |
@@ -99,9 +100,13 @@ target/debug/acorn-worker --config "$HOME/.config/acorn/worker.toml"
 
 `checker_limits` 消息必须存在，内部缺失项表示不设限，空消息表示三项全部不设限；有限 CPU、墙钟毫秒和内存 KiB 均须为 `1..=2147483647`，独立于用户 `max_run` 上限。非法脚本数据或限额在接纳时形成 `InvalidJob`，接纳不检查 Python 语法。
 
-用户和 checker 使用独立环境；checker 环境在首次需要时初始化。底层文件接口从 Worker 私有 stdout 文件与任务副本准备 `checker.py`、`input.bin`、`answer.bin`、`output.bin`、`config.json`，参考数据和私有参数不进入用户环境。
+用户和 checker 使用独立环境；checker 环境在首次需要时初始化。Worker 从私有 stdout 文件与任务副本准备 `checker.py`、`input.bin`、`answer.bin`、`output.bin`、`config.json`，参考数据和私有参数不进入用户环境。
 
 CPU 与墙钟取本次用户运行元数据；内存取用户环境 `cg-mem` 历史峰值，可能包含此前用例。可选限额缺失时不传对应 Isolate 参数；用户与编译仍提供正限额。Job 接纳时确定的绝对期限覆盖准备、全部运行及清理。
+
+checker 固定命令为 `python3 -I -B -S checker.py input.bin answer.bin output.bin config.json`，解释器路径取配置，stdin 为空。结果 JSON 只允许一个 verdict 字段及 AC／WA 值，允许首尾空白，拒绝重复、未知字段或附加内容。
+
+checker 实际成功退出且无超限、信号时才接受结果。stdout 超出 `checker.result_max_bytes` 时停止并形成 CheckerFailed；stderr 超出 `checker.diagnostic_max_bytes` 时截断保存并继续排空。脚本错误、异常、独立超限或协议错误形成执行失败，仅返回用例序号与稳定原因；checker 原始输出不返回答题者，内部失败日志中的 stderr 摘要最多 4096 UTF-8 字节。checker 自身故障不计作本例已完成，WA 返回用户运行事实。
 
 ### Kafka 客户端配置
 
@@ -186,7 +191,7 @@ ACORN_ISOLATE_BOX_ID=200 ACORN_CHECKER_BOX_ID=201 ACORN_ISOLATION_SENTINEL=host-
 
 ```sh
 ACORN_ISOLATE_BOX_ID=202 ACORN_CHECKER_BOX_ID=203 \
-  cargo test -p acorn-worker --locked --test executor -- --ignored --nocapture
+  cargo test -p acorn-worker --locked --test executor -- --ignored --nocapture --test-threads=1
 ```
 
 完整协议、资源规则和失败处理见 [Worker 设计](../../docs/01-worker-design.md)。

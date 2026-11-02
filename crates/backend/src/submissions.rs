@@ -246,13 +246,13 @@ pub struct CompileDetails {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceUsage {
-    /// Actual process-tree CPU time in microseconds.
+    /// This user run's process-tree CPU microseconds, excluding checker execution.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu_time_us: Option<u64>,
-    /// Actual wall time in microseconds.
+    /// This user run's wall microseconds, excluding checker execution.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wall_time_us: Option<u64>,
-    /// Actual peak process-tree memory in bytes.
+    /// User environment historical cgroup peak bytes, possibly including earlier cases.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub peak_memory_bytes: Option<u64>,
 }

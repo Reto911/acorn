@@ -1,5 +1,6 @@
 //! Independent Worker service, serial judging and Isolate stage execution.
 
+mod checker;
 pub mod config;
 pub mod executor;
 mod jobs;

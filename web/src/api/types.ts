@@ -134,8 +134,11 @@ export interface SubmissionSource {
 
 /** Measurements use microseconds and bytes; absence differs from explicit zero. */
 export interface ResourceUsage {
+  /** Current user run, excluding checker execution. */
   cpu_time_us?: number
+  /** Current user run, excluding checker execution. */
   wall_time_us?: number
+  /** User environment historical peak; may include earlier cases in this submission. */
   peak_memory_bytes?: number
 }
 

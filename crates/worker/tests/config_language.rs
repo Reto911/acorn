@@ -15,6 +15,8 @@ fn example_builds_both_language_plans() {
     let config = Config::parse(EXAMPLE).unwrap();
     assert_eq!(config.request.checker_source_max_bytes, 65_536);
     assert_eq!(config.request.checker_config_max_bytes, 16_384);
+    assert_eq!(config.checker.result_max_bytes, 4096);
+    assert_eq!(config.checker.diagnostic_max_bytes, 65_536);
     let defaults = EXAMPLE
         .lines()
         .filter(|line| {
@@ -50,6 +52,18 @@ fn example_builds_both_language_plans() {
 /// An insufficient result envelope and a nonpositive execution budget block startup.
 #[test]
 fn invalid_resource_settings_are_explicit_errors() {
+    for (field, value) in [
+        ("result_max_bytes", "4_096"),
+        ("diagnostic_max_bytes", "65_536"),
+    ] {
+        let invalid = EXAMPLE.replace(&format!("{field} = {value}"), &format!("{field} = 0"));
+        assert!(
+            Config::parse(&invalid)
+                .unwrap_err()
+                .to_string()
+                .contains(&format!("checker.{field}"))
+        );
+    }
     assert!(Config::parse(&EXAMPLE.replace("checker_box_id = 1", "checker_box_id = 0")).is_err());
     let mut lifecycle = Config::parse(EXAMPLE).unwrap();
     lifecycle.sandbox.shutdown_timeout_ms =

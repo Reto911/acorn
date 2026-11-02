@@ -372,7 +372,7 @@ async fn collect(
             waited = child.wait(), if status.is_none() => {
                 let waited = waited.context("Wait for Isolate manager").map_err(|error| stop_error(error).with_stop(stop_reason))?;
                 if !matches!(waited.code(), Some(0 | 1)) {
-                    return Err(stop_error(anyhow::anyhow!("Isolate manager exited without confirming stop: {waited}; retained stderr: {}", String::from_utf8_lossy(&output.stderr.bytes))).with_stop(stop_reason));
+                    return Err(stop_error(anyhow::anyhow!("Isolate manager exited without confirming stop: {waited}")).with_stop(stop_reason));
                 }
                 status = Some(waited);
                 // Program input no longer needs to be written after a confirmed exit.

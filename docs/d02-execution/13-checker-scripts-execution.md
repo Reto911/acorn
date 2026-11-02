@@ -4,9 +4,9 @@
 
 ## 1. 当前状态
 
-PS01–PS03 已依次完成，交付结构版本 5、存储与初始化适配、完整 checker 任务合同、装配与两端接纳预算，以及双环境生命周期与文件接口，实际检查见第 5、6、9 节。checker 实际裁决与新增示例题仍待 PS04–PS05，整体联调由 PS06 验收；实际执行器继续使用原固定 trim 比较。
+PS01–PS04 已依次完成，交付结构版本 5、存储与初始化适配、完整 checker 任务装配与接纳预算、双环境生命周期与文件交接，以及统一 Python checker 裁决和资源展示，实际检查见第 5、6、9、10 节。预设编写材料、新增示例题及整体联调仍待 PS05–PS06。
 
-PS01、PS02 已分别提交为 f0f3bb7 和 e095f96。PS03 已完成并单独提交；PS04 的实施分解见第 2.4 节，尚未开始。验证安排见第 7 节。
+PS01、PS02、PS03 分别提交为 f0f3bb7、e095f96 和 fbce955。PS04 已完成并单独提交；实施分解见第 2.4 节，验证安排见第 7 节。
 
 ## 2. 任务状态
 
@@ -15,7 +15,7 @@ PS01、PS02 已分别提交为 f0f3bb7 和 e095f96。PS03 已完成并单独提�
 - [x] PS01 数据结构与存储。
 - [x] PS02 协议、任务装配与预算。
 - [x] PS03 沙箱生命周期与文件对接。
-- [ ] PS04 checker 执行与结果说明。
+- [x] PS04 checker 执行与结果说明。
 - [ ] PS05 预设、示例题与初始化说明。
 - [ ] PS06 定向验收与交付。
 
@@ -68,14 +68,14 @@ PS03.1 与 PS03.2 可分别推进，随后完成限额及文件接口，再衔�
 
 依赖 PS02、PS03，按[设计第 4 节](../13-checker-scripts-design.md#4-脚本协议)接通统一 Python 校验，并同步[资源展示语义](../13-checker-scripts-design.md#53-复用的计量语义与释放)。
 
-- [ ] **PS04.1 接入 checker 结果与诊断预算。** 在 Worker 配置及示例增加 checker.result_max_bytes = 4096、diagnostic_max_bytes = 65536 和必要正值校验。扩展[输出策略与收集器](../../crates/worker/src/sandbox/output.rs)：checker stdout 超限停止并形成故障，stderr 超限仅保留前缀、标记截断并继续排空，不改变合法裁决。现有 OutputPolicy::Run 会把任一流超限都视为用户 OLE，须按 checker 合同区分；每例使用新的收集状态。
-- [ ] **PS04.2 严格解析唯一 JSON 裁决。** 在 Worker 内定义具有 Rustdoc 的小型结果类型和解析入口，只接受完整 UTF-8 对象、唯一 verdict 字段及 AC／WA 值，允许首尾空白。拒绝缺失、重复、未知字段、错误类型、其他值、非对象、空输出、多个 JSON 值和调试文字。保留重复字段证据，不能先解析成会覆盖同名键的通用 Value；源码与参数的语义错误仍由脚本执行报告。
-- [ ] **PS04.3 接通 CHECKING 与固定命令。** 依赖 PS03、PS04.1–PS04.2；拆开 executor 中的用户运行事实裁决和固定 trim 比较。CE 或用户已确认 MLE／OLE／TLE／RE 时保持原结论并跳过 checker；正常用户运行后，使用配置的 Python 执行 -I -B -S checker.py input.bin answer.bin output.bin config.json，stdin 为空。接入 PS03 的独立环境及受控文件，沿用 CHECKING 阶段，移除内置比较器。
-- [ ] **PS04.4 对齐实际退出、故障归因和私有诊断。** 依赖 PS04.3；等待 checker 实际退出、进程树确认停止和完整收集后，只有无信号、无限额触发且 Isolate 元数据中的脚本退出码为 0 才解析裁决。语法、异常、非零退出、独立限额和协议错误归为 CheckerFailed，提前输出 AC 不能覆盖后续故障。初始化／准备／启动／停止／收集错误沿用既有相应故障；JobDeadlineExceeded、WorkerShutdown 和 StopUnconfirmed 保持原优先边界。内部英文日志记录运行事实、截断标记及最多 4096 UTF-8 字节的 stderr 摘要，非法字节转换后也须守住字节上限。公开 diagnostic 仅含用例序号和稳定原因，继续受 512 UTF-8 字节限制，不拼入原始 checker 输出或脚本内容。
-- [ ] **PS04.5 对齐完成数量、首败和用户资源。** 依赖 PS04.3–PS04.4；用户失败按既有裁决语义计数，checker 得到 AC／WA 后才增加本例 completed_cases，checker 自身故障保持先前数量。WA 首败短路，FailedCase 继续使用本次用户运行的输出、退出事实和资源，不误用 checker outcome。CPU／墙钟表示本次用户运行，内存表示用户环境观测到的历史峰值，可能包含此前用例；更新 Worker 与[后端资源类型](../../crates/backend/src/submissions.rs)的 Rustdoc，保留缺失与显式零的区别。
-- [ ] **PS04.6 衔接失败保存与私有数据边界。** 依赖 PS04.4–PS04.5；核对[后端终态类型](../../crates/backend/src/submissions.rs)、[事件校验](../../crates/backend/src/scheduler/validation.rs)及保存链路，复用已有 failed 分支接纳 CheckerFailed，验证无 verdict、稳定诊断、先前完成数量和首个有效终态保持。既有故障码已支持非空字符串，无需新增白名单或结果结构。LLM 继续使用原始用户源码、语言、固定公开题面和机器 verdict，checker 私有数据不进入输入；机器 failed 沿用既有不进入审查的合同。
-- [ ] **PS04.7 同步结果页面与现行说明。** 依赖 PS04.5–PS04.6；调整[结果组件](../../web/src/components/SubmissionOutcome.vue)、[前端资源类型](../../web/src/api/types.ts)及使用说明，明确用户环境历史内存峰值和当前用户运行的时间，执行失败继续使用既有展示。同步 Worker、后端、前端设计及相关服务、根双语说明，替换固定 trim、每阶段初始化及资源均为失败用例独占的旧描述。保留现有结果字段、单位、文本转义和私有诊断边界。
-- [ ] **PS04.8 完成定向裁决回归与阶段收口。** 依赖 PS04.1–PS04.7；按第 7.2 节验证严格 JSON、退出事实、两类输出预算、CheckerFailed、完成数量、WA 用户事实和已有 HTTP／LLM 投影。复用原用户错误、资源优先级、首败、期限、停机和停止未确认覆盖，以及现有前端结果检查。按第 7.3 节执行实际改动对应命令，记录真实／受控范围和失败；全部必要项完成后勾选任务。
+- [x] **PS04.1 接入 checker 结果与诊断预算。** 在 Worker 配置及示例增加 checker.result_max_bytes = 4096、diagnostic_max_bytes = 65536 和必要正值校验。扩展[输出策略与收集器](../../crates/worker/src/sandbox/output.rs)：checker stdout 超限停止并形成故障，stderr 超限仅保留前缀、标记截断并继续排空，不改变合法裁决。现有 OutputPolicy::Run 会把任一流超限都视为用户 OLE，须按 checker 合同区分；每例使用新的收集状态。
+- [x] **PS04.2 严格解析唯一 JSON 裁决。** 在 Worker 内定义具有 Rustdoc 的小型结果类型和解析入口，只接受完整 UTF-8 对象、唯一 verdict 字段及 AC／WA 值，允许首尾空白。拒绝缺失、重复、未知字段、错误类型、其他值、非对象、空输出、多个 JSON 值和调试文字。保留重复字段证据，不能先解析成会覆盖同名键的通用 Value；源码与参数的语义错误仍由脚本执行报告。
+- [x] **PS04.3 接通 CHECKING 与固定命令。** 依赖 PS03、PS04.1–PS04.2；拆开 executor 中的用户运行事实裁决和固定 trim 比较。CE 或用户已确认 MLE／OLE／TLE／RE 时保持原结论并跳过 checker；正常用户运行后，使用配置的 Python 执行 -I -B -S checker.py input.bin answer.bin output.bin config.json，stdin 为空。接入 PS03 的独立环境及受控文件，沿用 CHECKING 阶段，移除内置比较器。
+- [x] **PS04.4 对齐实际退出、故障归因和私有诊断。** 依赖 PS04.3；等待 checker 实际退出、进程树确认停止和完整收集后，只有无信号、无限额触发且 Isolate 元数据中的脚本退出码为 0 才解析裁决。语法、异常、非零退出、独立限额和协议错误归为 CheckerFailed，提前输出 AC 不能覆盖后续故障。初始化／准备／启动／停止／收集错误沿用既有相应故障；JobDeadlineExceeded、WorkerShutdown 和 StopUnconfirmed 保持原优先边界。内部英文日志记录运行事实、截断标记及最多 4096 UTF-8 字节的 stderr 摘要，非法字节转换后也须守住字节上限。公开 diagnostic 仅含用例序号和稳定原因，继续受 512 UTF-8 字节限制，不拼入原始 checker 输出或脚本内容。
+- [x] **PS04.5 对齐完成数量、首败和用户资源。** 依赖 PS04.3–PS04.4；用户失败按既有裁决语义计数，checker 得到 AC／WA 后才增加本例 completed_cases，checker 自身故障保持先前数量。WA 首败短路，FailedCase 继续使用本次用户运行的输出、退出事实和资源，不误用 checker outcome。CPU／墙钟表示本次用户运行，内存表示用户环境观测到的历史峰值，可能包含此前用例；更新 Worker 与[后端资源类型](../../crates/backend/src/submissions.rs)的 Rustdoc，保留缺失与显式零的区别。
+- [x] **PS04.6 衔接失败保存与私有数据边界。** 依赖 PS04.4–PS04.5；核对[后端终态类型](../../crates/backend/src/submissions.rs)、[事件校验](../../crates/backend/src/scheduler/validation.rs)及保存链路，复用已有 failed 分支接纳 CheckerFailed，验证无 verdict、稳定诊断、先前完成数量和首个有效终态保持。既有故障码已支持非空字符串，无需新增白名单或结果结构。LLM 继续使用原始用户源码、语言、固定公开题面和机器 verdict，checker 私有数据不进入输入；机器 failed 沿用既有不进入审查的合同。
+- [x] **PS04.7 同步结果页面与现行说明。** 依赖 PS04.5–PS04.6；按用户确认保留[结果组件](../../web/src/components/SubmissionOutcome.vue)的现有文案，在[前端资源类型](../../web/src/api/types.ts)及使用说明中明确用户环境历史内存峰值和当前用户运行的时间，执行失败继续使用既有展示。同步 Worker、后端、前端设计及相关服务、根双语说明，替换固定 trim、每阶段初始化及资源均为失败用例独占的旧描述。保留现有结果字段、单位、文本转义和私有诊断边界。
+- [x] **PS04.8 完成定向裁决回归与阶段收口。** 依赖 PS04.1–PS04.7；按第 7.2 节验证严格 JSON、退出事实、两类输出预算、CheckerFailed、完成数量、WA 用户事实和已有 HTTP／LLM 投影。复用原用户错误、资源优先级、首败、期限、停机和停止未确认覆盖，以及现有前端结果检查。按第 7.3 节执行实际改动对应命令，记录真实／受控范围和失败；全部必要项完成后勾选任务。
 
 PS04.1、PS04.2 可分别推进，PS03 文件与环境接口就绪后接通 PS04.3，再依次完成故障、进度资源、保存和展示。完成条件为统一 checker 已参与用例裁决，成功退出与严格 JSON 共同成立才形成 AC／WA，故障和公开结果符合合同。PS05 接续预设编写材料、浮点题及多解夹具；PS06 汇总真实 Kafka → Worker／Isolate → MySQL 和必要页面验收。此处的受控检查不替代真实隔离或整体交付。
 
@@ -257,3 +257,57 @@ ACORN_ISOLATE_BOX_ID=220 ACORN_CHECKER_BOX_ID=221 \
 PS03 及 8 项分解已完成；PS04–PS06 保持未完成。本阶段真实检查证明双环境底层生命周期与文件边界，生产执行器仍使用固定 trim；实际 checker 命令、严格 JSON、独立超限归因、CheckerFailed 保存与资源展示由 PS04 接入。未将 CV06–CV08 完整执行链路记为通过。
 
 本轮未运行真实 Kafka／MySQL 闭环、旧 real_stage_acceptance 全部配额场景、浏览器或外部模型检查；受影响的后端真实验收夹具已通过工作区全目标编译。整体链路与剩余验收仍由后续阶段完成。本阶段按用户要求单独提交。
+
+## 10. PS04 实施记录
+
+### 10.1 统一 checker 与输出边界
+
+在 Worker 增加 checker.result_max_bytes = 4096 和 diagnostic_max_bytes = 65536 及正值校验。输出收集器复用原异步排空流程：checker stdout 超限停止，stderr 超限只截断保存并继续排空，每例新建收集状态。
+
+[checker 模块](../../crates/worker/src/checker.rs)只接受单个完整 UTF-8 JSON 对象及唯一 verdict 字段，值限定为 AC／WA。通过保留重复字段证据的类型反序列化拒绝缺失、重复、未知字段和非法值，消费完整输入；额外限定对象形状，避免结构体反序列化接受数组。允许 JSON 首尾空白。
+
+[执行器](../../crates/worker/src/executor.rs)移除内置 trim，全部正常用户运行均交给任务中的脚本，解释器取配置，参数固定为 -I -B -S checker.py input.bin answer.bin output.bin config.json，stdin 为空。CE 或用户已确认 MLE／OLE／TLE／RE 跳过 checker。无信号、无限额触发且实际退出码为 0 后，才解析完整 stdout；提前输出 AC 后非零退出仍为故障。
+
+脚本语法、异常、非零退出、独立限额和协议错误统一形成 CheckerFailed；初始化／启动／停止／收集等错误沿用相应故障，JobDeadlineExceeded、WorkerShutdown 和 StopUnconfirmed 保持既有边界。公开诊断只含用例序号和稳定原因；内部英文日志保留实际退出、限额、截断事实及最多 4096 UTF-8 字节的 stderr 摘要。摘要在非法字节替换后计量；停止未确认的错误上下文不再拼接原始 stderr，防止通过故障诊断泄露脚本内容。
+
+checker 取得 AC／WA 后才推进完成数量，自身故障保留先前数量；WA 首败短路并保留用户输出、退出事实与资源。用户和 checker 不合并资源。后端复用既有非空故障码校验、failed 保存和首个有效终态合同，没有增加结果类型或白名单。HTTP 不返回 checker 原始输出，机器 failed 不进入 LLM 审查，LLM 继续使用原五字段输入。
+
+Rustdoc、TypeScript 资源类型及 Worker／后端／前端设计和使用说明已同步：CPU、墙钟为本次用户运行，内存为用户环境历史峰值，可能包含此前用例，均排除 checker 消耗。提交前用户确认保留结果组件的“峰值内存”等现有文案，不加入上一轮的页面说明；计量语义由类型与文档说明。保留原字段、单位、文本转义以及缺失和显式零的区别。根双语说明同步 checker 功能和输出预算。
+
+### 10.2 实际检查
+
+- cargo fmt --all -- --check、cargo check --workspace --all-targets --locked、cargo clippy --workspace --all-targets --locked -- -D warnings 通过。
+- cargo test -p acorn-worker --locked：34 项常规测试通过，9 项外部环境检查在常规命令中 ignored。覆盖严格 JSON、退出事实、诊断 UTF-8 摘要、两类输出预算、实际固定参数及文件、跨例复用、WA 用户统计、首例及后续 checker 故障、完成数量、期限、停机和停止未确认；原 CE、用户错误、首败和输出限额检查继续通过。
+- 真实 Isolate 的 real_checker_acceptance 和 real_executor_acceptance 串行执行，各 1 项通过。实际验证 checker 独立 CPU／墙钟／内存限额、三项缺失时的 Job 总期限、提前 AC 后非零退出，以及同用户环境先前用例产生的历史内存峰值；原 C／Python trim 脚本裁决继续通过。使用预先确认空闲的专用 ID 220／221，测试拥有的环境完成清理。
+- 后端 lib 22 项、config_results 10 项通过；llm_review 的 request_contract_and_valid_opinions 通过，受控 HTTP 端点核对原五字段输入，没有调用外部模型。
+- 真实 MySQL 的 terminal_storage_and_immutability 通过。真实 Kafka／MySQL 加受控终态夹具的 terminal_event_details、terminal_replay_bypasses_capacity_and_preserves_first_result 和 manual_http_rejections_preserve_records 各 1 项通过，覆盖 CheckerFailed 保存、公开 DTO、首个有效终态和审查拒绝；该夹具不执行真实 checker。
+- web 中 pnpm format、format:check、lint、typecheck、build 和 pnpm test src/components/SubmissionOutcome.test.ts 通过，4 项既有组件渲染回归继续验证缺失／显式零、单位、输出转义和执行失败。构建有 CodeEditor 大包体积提示，构建成功；本阶段未新增静态文案镜像测试。
+
+真实 Isolate 定向命令：
+
+```sh
+ACORN_ISOLATE_BOX_ID=220 ACORN_CHECKER_BOX_ID=221 \
+  cargo test -p acorn-worker --locked --test executor -- --ignored --nocapture --test-threads=1
+```
+
+后端环境沿用第 4.3 节的独立库和临时 Kafka 资源合同。实际筛选命令：
+
+```sh
+cargo test -p acorn-backend --locked --lib
+cargo test -p acorn-backend --locked --test config_results
+cargo test -p acorn-backend --locked --test llm_review request_contract_and_valid_opinions
+cargo test -p acorn-backend --locked --test database terminal_storage_and_immutability
+cargo test -p acorn-backend --locked --test workflow terminal_event_details
+cargo test -p acorn-backend --locked --test workflow terminal_replay_bypasses_capacity_and_preserves_first_result
+cargo test -p acorn-backend --locked --test workflow manual_http_rejections_preserve_records
+```
+
+9 份变更 Markdown 通过 Prettier，266 个本地链接有效，其中 109 个含锚点，162 个原有标题按顺序保留；代码围栏闭合，6 项主任务和 28 项分解的编号／状态一致（4 项主任务、28 项分解完成）。根双语说明的 15 组命令／配置代码块及互链有效；git diff --check 通过。
+
+### 10.3 检查修正与剩余范围
+
+扩展 Worker 回归首次在并发运行时，300 ms 的 checker 期限检查得到 StopUnconfirmed，单独执行则通过。该检查改为 2 秒总期限，停机请求等待受控 checker 的启动标记后再发送，随后常规回归通过；生产停止流程未增加重试或降级。
+
+存储测试首次直接访问 TerminalOutcome 私有字段导致编译失败，改为核对公开读取结果后通过。最初自选测试库前缀被 MySQL 1044 拒绝，数据库与 workflow 改用既有测试配置规定的 acorntest 前缀后通过，未扩大账户权限。LLM 输入检查首次因执行沙箱禁止本地监听失败，使用本地受控端点在获准环境重跑通过。Clippy 首次指出输出收集器测试模块后仍有实现项，调整模块顺序后通过，未添加 lint 豁免。
+
+PS04 及 8 项分解已完成，PS05–PS06 保持未完成。本阶段分别验证真实 checker／Isolate 与后端消息保存及 HTTP 合同；完整 Kafka → Worker／真实 checker → MySQL 链路仍由 PS06 验收，未将受控夹具记作该链路通过。浮点预设、新增商题、专用多解夹具与完整初始化使用材料由 PS05 接续。本轮未运行浏览器实际页面、外部模型或完整部署验收。PS04 按用户要求单独提交，结果组件保留用户确认的现有文案。

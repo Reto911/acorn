@@ -722,7 +722,14 @@ pub fn terminal_reply(id: &str, source: &[u8], total: u32) -> proto::GetJobReply
             ..Default::default()
         })),
     };
-    if source == b"ce" {
+    if source == b"checker-failed" {
+        reply.state = proto::JobState::Failed as i32;
+        reply.completed_cases = 1;
+        reply.terminal = Some(proto::get_job_reply::Terminal::Failure(proto::JobFailure {
+            code: "CheckerFailed".into(),
+            diagnostic: "Checker failed for case 2: exit code 1.".into(),
+        }));
+    } else if source == b"ce" {
         reply.completed_cases = 0;
         reply.terminal = Some(proto::get_job_reply::Terminal::Result(proto::JudgeResult {
             verdict: proto::Verdict::CompileError as i32,

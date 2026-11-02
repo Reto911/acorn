@@ -8,7 +8,7 @@ Acorn 是支持 C 和 Python 3 的单文件源码判题系统，提供浏览器�
 
 - 公开浏览题目，在 Monaco 编辑器中编写 C 或 Python 代码，登录后按用户、题目和语言保存本地草稿。
 - 通过浏览器或 HTTP 注册、登录、查询当前身份和退出，使用后端内存会话与持久 Cookie。
-- 在 Isolate 沙箱中编译、执行并比较输出，支持 CPU 时间、墙钟时间、内存、进程数、输出和磁盘限额。
+- 在 Isolate 沙箱中编译和执行，正常用户输出交由 MySQL 装配的 Python 判题脚本校验，支持独立 checker 限额及用户 CPU、墙钟、内存、进程数、输出和磁盘限额。
 - 通过多个 Worker 并行处理不同提交，保存判题结果、编译诊断和首个失败用例的输出。
 - 查询提交历史，按题目、执行状态、判题结论和审查状态筛选；历史结果关联实际判题的题目版本。
 - 在只读编辑器中查看本人历史提交的源码，通过审查行号按钮定位并高亮对应行段。
@@ -16,6 +16,8 @@ Acorn 是支持 C 和 Python 3 的单文件源码判题系统，提供浏览器�
 - 登录后查询后端接纳条件、调度队列、数据库和 Worker 的最近观测。
 
 题目和编辑器公开使用，提交、个人历史、结果、审查和健康要求登录。注册成功后手动登录；登录保留当前匿名编辑内容，由用户再次主动提交。账号变化会停止旧请求，并按用户隔离草稿和待确认提交。提交归属认证用户，历史、详情、源码和手动审查仅限该用户的提交。
+
+判题脚本实际成功退出后，通过严格 JSON 对象返回 AC 或 WA。脚本错误形成 `failed`／`CheckerFailed`，仅返回稳定故障摘要，原始 checker 输出保持私有。结果中的 CPU／墙钟表示本次用户运行，内存为用户环境历史峰值，可能包含此前用例；checker 消耗不计入这些统计。
 
 ## 项目结构
 
@@ -204,6 +206,8 @@ curl --fail-with-body -b "$ACORN_COOKIE_JAR" -c "$ACORN_COOKIE_JAR" \
 | Worker `server.listen`                  | `127.0.0.1:50051`            | gRPC 监听地址                      |
 | Worker `sandbox.box_id`                 | `0`                          | 编译／用户执行的 Isolate box ID    |
 | Worker `sandbox.checker_box_id`         | `1`                          | checker 独立的 Isolate box ID      |
+| Worker `checker.result_max_bytes`       | `4096`                       | checker 完整结果 stdout 预算       |
+| Worker `checker.diagnostic_max_bytes`   | `65536`                      | checker 私有 stderr 保存预算       |
 | 后端 `http.listen`                      | `127.0.0.1:8080`             | HTTP API 监听地址                  |
 | 后端 `http.public_origin`               | `http://127.0.0.1:8080`      | JSON 写请求必需的浏览器外部 Origin |
 | 后端 `http.cookie_secure`               | `false`                      | 按外部协议选择 Secure Cookie       |

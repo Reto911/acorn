@@ -38,12 +38,24 @@ pub struct Config {
     pub languages: LanguagesConfig,
     /// Compilation budgets and retained diagnostics.
     pub compile: CompileConfig,
+    /// Checker result and private diagnostic retention budgets.
+    pub checker: CheckerConfig,
     /// Isolate resources and lifecycle timeouts.
     pub sandbox: SandboxConfig,
     /// In-memory terminal record capacities.
     pub results: ResultsConfig,
     /// Worker log filtering.
     pub logging: LoggingConfig,
+}
+
+/// Checker output budgets, independent of user output limits and public results.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckerConfig {
+    /// Maximum stdout bytes containing one complete result JSON object.
+    pub result_max_bytes: usize,
+    /// Maximum retained stderr bytes; further diagnostics are drained.
+    pub diagnostic_max_bytes: usize,
 }
 
 /// gRPC listener and binary message limits.
@@ -287,6 +299,14 @@ impl Config {
                 self.execution.stderr_max_bytes as u64,
             ),
             ("compile.cpu_time_ms", self.compile.cpu_time_ms),
+            (
+                "checker.result_max_bytes",
+                self.checker.result_max_bytes as u64,
+            ),
+            (
+                "checker.diagnostic_max_bytes",
+                self.checker.diagnostic_max_bytes as u64,
+            ),
             ("compile.wall_time_ms", self.compile.wall_time_ms),
             ("compile.memory_kib", self.compile.memory_kib),
             (

@@ -677,10 +677,24 @@ async fn terminal_storage_and_immutability() {
         &config.results,
     )
     .unwrap();
+    let checker_failure = TerminalOutcome::failed(
+        &proto::JobFailure {
+            code: "CheckerFailed".into(),
+            diagnostic: "Checker failed for case 2: exit code 1.".into(),
+        },
+        &config.results,
+    )
+    .unwrap();
     let mut stored_results = vec![];
-    for (index, terminal) in [accepted(config), ce, wa, failure.clone()]
-        .into_iter()
-        .enumerate()
+    for (index, terminal) in [
+        accepted(config),
+        ce,
+        wa,
+        failure.clone(),
+        checker_failure.clone(),
+    ]
+    .into_iter()
+    .enumerate()
     {
         let submitted = request("c");
         let created = database.create_submission(submitted.clone()).await.unwrap();
@@ -771,6 +785,13 @@ async fn terminal_storage_and_immutability() {
     assert!(json["failed_case"].get("signal").is_none());
     assert_eq!(stored_results[3].info.state, SubmissionState::Failed);
     assert_eq!(stored_results[3].info.verdict, None);
+    assert_eq!(stored_results[4].info.state, SubmissionState::Failed);
+    assert_eq!(stored_results[4].info.verdict, None);
+    let Some(TerminalDetails::Failure(saved)) = &stored_results[4].terminal_details else {
+        panic!("Expected checker failure details")
+    };
+    assert_eq!(saved.code, "CheckerFailed");
+    assert_eq!(saved.diagnostic, "Checker failed for case 2: exit code 1.");
     assert_eq!(
         database
             .list_submissions(

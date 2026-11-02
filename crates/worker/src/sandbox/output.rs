@@ -1,16 +1,16 @@
-//! Shared bounded output retention for compilation and runtime collection.
+//! Shared bounded output retention for compilation, user execution and checking.
 
 use super::{CapturedOutput, OutputPolicy};
 
 /// Collection state shared by stdout and stderr in the stage's I/O loop.
 pub(super) struct OutputCollector {
-    /// Combined compilation or independent runtime budgets.
+    /// Stage-specific retention and overflow behavior.
     policy: OutputPolicy,
     /// Retained standard output prefix.
     pub stdout: CapturedOutput,
     /// Retained standard error prefix.
     pub stderr: CapturedOutput,
-    /// Whether an independent runtime budget was exceeded.
+    /// Whether a stream whose overflow stops execution exceeded its budget.
     pub exceeded: bool,
 }
 
@@ -25,7 +25,7 @@ impl OutputCollector {
         }
     }
 
-    /// Retain a bounded prefix; return overflow only for runtime streams.
+    /// Retain a bounded prefix; checker stderr overflow only marks truncation.
     pub fn append(&mut self, stderr: bool, bytes: &[u8]) {
         let remaining = match self.policy {
             OutputPolicy::Compile { max_bytes } => {
@@ -34,6 +34,10 @@ impl OutputCollector {
             OutputPolicy::Run {
                 stdout_max_bytes,
                 stderr_max_bytes,
+            }
+            | OutputPolicy::Checker {
+                result_max_bytes: stdout_max_bytes,
+                diagnostic_max_bytes: stderr_max_bytes,
             } => {
                 if stderr {
                     stderr_max_bytes.saturating_sub(self.stderr.bytes.len())
@@ -50,6 +54,35 @@ impl OutputCollector {
         let keep = bytes.len().min(remaining);
         output.bytes.extend_from_slice(&bytes[..keep]);
         output.truncated |= keep < bytes.len();
-        self.exceeded |= matches!(self.policy, OutputPolicy::Run { .. }) && output.truncated;
+        self.exceeded |= output.truncated
+            && match self.policy {
+                OutputPolicy::Compile { .. } => false,
+                OutputPolicy::Run { .. } => true,
+                OutputPolicy::Checker { .. } => !stderr,
+            };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Checker stderr truncation and complete-result overflow have different outcomes.
+
+    use super::*;
+
+    /// Drain diagnostic overflow while requiring all result bytes to fit their own budget.
+    #[test]
+    fn checker_output_budgets() {
+        let mut output = OutputCollector::new(OutputPolicy::Checker {
+            result_max_bytes: 4,
+            diagnostic_max_bytes: 3,
+        });
+        output.append(true, b"private long diagnostics");
+        output.append(false, b"1234");
+        assert_eq!(output.stderr.bytes, b"pri");
+        assert!(output.stderr.truncated);
+        assert!(!output.exceeded && !output.stdout.truncated);
+        output.append(false, b"5");
+        assert!(output.exceeded && output.stdout.truncated);
+        assert_eq!(output.stdout.bytes, b"1234");
     }
 }

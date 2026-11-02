@@ -229,7 +229,12 @@ async fn published_queries_and_history_shapes() {
 #[tokio::test]
 async fn terminal_event_details() {
     let harness = Harness::start(1, 8).await;
-    for (source, verdict) in [("ac", "AC"), ("ce", "CE"), ("wa", "WA")] {
+    for (source, verdict) in [
+        ("ac", "AC"),
+        ("ce", "CE"),
+        ("wa", "WA"),
+        ("checker-failed", ""),
+    ] {
         let id = create(&harness.app, "c", source).await;
         harness.terminal(&id).await;
         let (status, _, body) = call(
@@ -241,6 +246,19 @@ async fn terminal_event_details() {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
+        if source == "checker-failed" {
+            assert_eq!(body["state"], "failed");
+            assert!(body["verdict"].is_null());
+            assert_eq!(
+                body["terminal_details"],
+                json!({
+                    "code": "CheckerFailed",
+                    "diagnostic": "Checker failed for case 2: exit code 1."
+                })
+            );
+            assert!(body["terminal_at_ms"].is_i64());
+            continue;
+        }
         assert_eq!(body["state"], "finished");
         assert_eq!(body["verdict"], verdict);
         assert!(body["terminal_at_ms"].is_i64());
@@ -902,8 +920,8 @@ async fn terminal_replay_bypasses_capacity_and_preserves_first_result() {
         .await
         .unwrap();
     let failure = acorn_protocol::worker::v1::JobFailure {
-        code: "WorkerUnavailable".into(),
-        diagnostic: "Previously saved failure".into(),
+        code: "CheckerFailed".into(),
+        diagnostic: "Checker failed for case 2: exit code 1.".into(),
     };
     let terminal = TerminalOutcome::failed(&failure, &harness.fixture.config.results).unwrap();
     assert!(

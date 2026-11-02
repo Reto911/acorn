@@ -42,6 +42,9 @@ elif '--run' in args:
     if mode == 'manager_failure':
         sys.exit(2)
     command = args[args.index('--') + 1:]
+    checking = 'checker.py' in command
+    if mode == 'checker_manager_failure' and checking:
+        sys.exit(2)
     stopped = False
     child = None
     def stop(signum, frame):
@@ -54,7 +57,13 @@ elif '--run' in args:
     if stopped:
         child.terminate()
     code = child.wait()
-    if mode == 'limits':
+    if mode == 'checker_timeout' and checking:
+        meta.write_text('status:TO\nexitsig:9\n')
+    elif mode == 'checker_oom' and checking:
+        meta.write_text('cg-oom-killed:1\nexitsig:9\n')
+    elif mode == 'resources':
+        meta.write_text('exitcode:' + str(code) + '\ntime:' + ('0.999' if checking else '0.001') + '\ntime-wall:0.002\ncg-mem:' + ('999' if checking else '123') + '\n')
+    elif mode == 'limits':
         meta.write_text('status:TO\ncg-oom-killed:1\nexitsig:9\n')
     elif code < 0:
         meta.write_text('status:SG\nexitsig:' + str(-code) + '\n')
