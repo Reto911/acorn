@@ -102,7 +102,26 @@ fn worker_membership_defaults_and_bounds() {
 #[test]
 fn configuration_relationships() {
     let example = include_str!("../../../config/backend.example.toml");
-    Config::parse(example).unwrap();
+    let defaulted = Config::parse(
+        &example
+            .replace("checker_source_max_bytes = 65_536\n", "")
+            .replace("checker_config_max_bytes = 16_384\n", ""),
+    )
+    .unwrap();
+    assert_eq!(defaulted.request.checker_source_max_bytes, 65_536);
+    assert_eq!(defaulted.request.checker_config_max_bytes, 16_384);
+    for (before, after) in [
+        (
+            "checker_source_max_bytes = 65_536",
+            "checker_source_max_bytes = 0",
+        ),
+        (
+            "checker_config_max_bytes = 16_384",
+            "checker_config_max_bytes = 0",
+        ),
+    ] {
+        assert!(Config::parse(&example.replace(before, after)).is_err());
+    }
     assert!(
         Config::parse(&example.replace("max_request_bytes = 524_288", "max_request_bytes = 1"))
             .is_err()

@@ -15,7 +15,7 @@ acorn-backend 是 Acorn 的 HTTP 后端，使用 Axum、Tokio 和 SQLx。它管�
 | `health`                  | 数据库与 Worker 共享采集、最近观测缓存                     |
 | `config`、`logging`       | TOML 配置和英文 stderr 日志                                |
 
-一个后端进程运行一个 Scheduler，可连接多个 Worker。每个提交固定创建时的题目版本，源码和测试数据随任务交给 Worker；提交 ID 同时作为 Worker Job ID。
+一个后端进程运行一个 Scheduler，可连接多个 Worker。每个提交固定创建时的题目版本，源码、测试数据、checker 源码副本、版本参数和有效 checker 限额随任务交给 Worker；提交 ID 同时作为 Worker Job ID。当前执行器使用固定 trim 比较，checker 字段用于任务数据交接。
 
 库接口 `scheduler::kafka::Publisher` 和 `EventConsumer` 分别提供任务发布与事件消费，`EventProcessor` 共用状态持久化和审查交接。调用方先用 `Database::judging_recovery`／`Scheduler::restore` 恢复本地所有权，再运行两项服务，提供停止信号并监督错误。Kafka 组位点需由部署初始化，运行规则见 [Kafka 设计](../../docs/10-kafka-judging-design.md)。正式入口通过 Scheduler::start 恢复并监督两项 Kafka 服务。
 
@@ -46,22 +46,26 @@ target/debug/acorn-backend --config "$HOME/.config/acorn/backend.toml"
 
 完整字段见 [backend.example.toml](../../config/backend.example.toml)。已有部署配置须删除 `scheduler.poll_interval_ms` 及 `grpc.submit_timeout_ms/get_timeout_ms/ack_timeout_ms`。
 
-| 配置节       | 主要设置                                                  | 示例值                                                              |
-| ------------ | --------------------------------------------------------- | ------------------------------------------------------------------- |
-| `http`       | 监听地址、外部 Origin、Secure Cookie、JSON 请求上限及页长 | `127.0.0.1:8080`，`http://127.0.0.1:8080`，false，512 KiB，20 / 100 |
-| `auth`       | 每用户及全局会话容量                                      | 10 / 10000                                                          |
-| `database`   | 端点、库名、用户名、连接池上限及等待预算                  | `127.0.0.1:3306`、`appdb`、4 个连接、5000 ms 取得等待、3 秒锁等待   |
-| `scheduler`  | 状态地址列表、待接纳容量、Kafka 发布重试间隔              | 128 个名额，1000 ms                                                 |
-| `grpc`       | 状态 RPC 的消息发送及接收上限                             | 16 MiB / 1 MiB                                                      |
-| `request`    | 源码、用例、原始载荷及单用例资源上限                      | 源码 64 KiB，最多 128 个用例                                        |
-| `results`    | 编译诊断、stdout、stderr 和故障说明保留上限               | 前三项各 64 KiB，故障说明 512 字节                                  |
-| `health`     | 每轮采集后的间隔、单项探测超时                            | 5000 / 1000 ms                                                      |
-| `llm_review` | 审查开关、模型地址、凭据、并发和预算                      | 默认关闭；详见下文                                                  |
-| `logging`    | 日志过滤级别                                              | `info`                                                              |
+| 配置节       | 主要设置                                                        | 示例值                                                              |
+| ------------ | --------------------------------------------------------------- | ------------------------------------------------------------------- |
+| `http`       | 监听地址、外部 Origin、Secure Cookie、JSON 请求上限及页长       | `127.0.0.1:8080`，`http://127.0.0.1:8080`，false，512 KiB，20 / 100 |
+| `auth`       | 每用户及全局会话容量                                            | 10 / 10000                                                          |
+| `database`   | 端点、库名、用户名、连接池上限及等待预算                        | `127.0.0.1:3306`、`appdb`、4 个连接、5000 ms 取得等待、3 秒锁等待   |
+| `scheduler`  | 状态地址列表、待接纳容量、Kafka 发布重试间隔                    | 128 个名额，1000 ms                                                 |
+| `grpc`       | 状态 RPC 的消息发送及接收上限                                   | 16 MiB / 1 MiB                                                      |
+| `request`    | 用户及 checker 源码、checker 参数、用例、原始载荷及用户资源上限 | 用户源码 64 KiB，checker 源码 64 KiB／参数 16 KiB，最多 128 个用例  |
+| `results`    | 编译诊断、stdout、stderr 和故障说明保留上限                     | 前三项各 64 KiB，故障说明 512 字节                                  |
+| `health`     | 每轮采集后的间隔、单项探测超时                                  | 5000 / 1000 ms                                                      |
+| `llm_review` | 审查开关、模型地址、凭据、并发和预算                            | 默认关闭；详见下文                                                  |
+| `logging`    | 日志过滤级别                                                    | `info`                                                              |
 
 数据库密码由进程环境变量 `MYSQL_PASSWORD` 提供，TOML 只保存非秘密连接字段；正式程序不自动加载 `.env`。MySQL SSL 显式禁用。API、Scheduler、审查与健康采集共用连接池，每条新连接设置 utf8mb4_0900_bin、READ COMMITTED、严格模式及两类锁等待。取得连接的等待预算与查询、锁等待分别计量；模型和 Worker 网络等待不借用数据库连接。
 
-后端的任务、执行及结果预算须与所有 Worker 对齐。待接纳容量包含已预留、已排队和正在等待 Worker 接纳的提交；Worker 接纳后释放该名额。
+后端的任务、执行及结果预算须与所有 Worker 对齐。`request.checker_source_max_bytes` 和 `request.checker_config_max_bytes` 默认分别为 65536 和 16384，均须为正；`payload_max_bytes` 合计用户源码、用例输入与参考数据、checker 源码和参数的原始字节，Kafka 上限另检查完整编码长度。
+
+checker 源码要求非空 UTF-8，参数要求为 JSON 对象；CPU、墙钟和内存限额逐项采用题目覆盖、同版本 Python 语言限额、未设限的顺序，有限值必须为正且能由沙箱表示。新建、queued 重交接和启动装入均采用同一装配入口；数据库更新脚本不改变已装配任务，重新装配取得当时源码。普通 HTTP 响应和 LLM 输入不包含 checker 私有数据。
+
+待接纳容量包含已预留、已排队和正在等待 Worker 接纳的提交；Worker 接纳后释放该名额。
 
 `http.public_origin` 必填，必须为规范 HTTP(S) Origin，不带路径、末尾斜线、凭据、查询或片段；写请求必须发送与其精确相同的 `Origin`。Vite 开发访问通常填写 `http://localhost:5173`，直接使用下述 HTTP 示例则填写 `http://127.0.0.1:8080`。反向代理部署填写浏览器访问的外部 Origin。
 

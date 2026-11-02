@@ -4,7 +4,7 @@
 
 基础判题的实际过程与检查见[Worker 与后端实施记录](d02-execution/04-development-execution.md#7-实施记录)，状态 RPC 和健康页面的交付见[前端与健康观测实施记录](d02-execution/06-frontend-development-execution.md#58-f08h01worker-状态-rpc)。
 
-本篇描述现有 Worker 实现。下一版的统一 Python 校验、任务字段、文件对接、同提交沙箱复用及可选 checker 限额遵守[判题脚本设计](13-checker-scripts-design.md)；实施时同步替换下述固定比较和每阶段初始化合同，当前实现状态见[脚本实施记录](d02-execution/13-checker-scripts-execution.md)。
+本篇描述 Worker 的任务接纳与现行执行合同。统一 Python 校验的文件对接、同提交沙箱复用及 checker 执行遵守[判题脚本设计](13-checker-scripts-design.md)；实施时同步替换下述固定比较和每阶段初始化合同，当前实现状态见[脚本实施记录](d02-execution/13-checker-scripts-execution.md)。
 
 ## 1. 目标与范围
 
@@ -79,6 +79,14 @@ message SubmitJobRequest {
   bytes source = 3;
   repeated TestCase cases = 4;
   RunLimits run_limits = 5;
+  bytes checker_source = 6;
+  string checker_config_json = 7;
+  CheckerLimits checker_limits = 8;
+}
+message CheckerLimits {
+  optional uint64 cpu_time_ms = 1;
+  optional uint64 wall_time_ms = 2;
+  optional uint64 memory_kib = 3;
 }
 message TestCase {
   bytes input = 1;
@@ -170,9 +178,11 @@ message JobFailure {
 
 源码、输入和答案直接放入有大小上限的请求，不使用外部下载地址或宿主文件路径。测试用例的数组顺序就是执行顺序，`case_index` 从 1 开始；不额外设置用例 ID 和排序字段。
 
-`language_id` 首版接受 `c` 和 `python`，后者表示 Python 3。输出比较规则固定，不由请求选择 checker。题目要求的单用例 CPU、墙钟时间和内存通过 `run_limits` 提交；Worker 配置其允许上限。编译预算、输出上限和其他门限由 Worker 配置文件提供。
+`language_id` 首版接受 `c` 和 `python`，后者表示 Python 3。答题者不能指定 checker，后端按题库装配其源码与参数；现行 trim 比较见第 5.2 节，脚本执行合同见第 13 篇。题目要求的单用例 CPU、墙钟时间和内存通过 `run_limits` 提交；Worker 配置其允许上限。编译预算、输出上限和其他门限由 Worker 配置文件提供。
 
 内存限额使用正整数 `memory_kib`，单位为 KiB（1 KiB = 1024 字节），从题库到消息、语言计划和 Isolate 参数保持同一单位。当前开发阶段直接将字段号 3 的名称和单位改为 `memory_kib`，不保留旧字段或兼容处理；后端与 Worker 按当前协议同步构建运行。实际资源统计 `peak_memory_bytes` 仍使用字节。
+
+checker 源码、JSON 对象参数与限额是 Job 级副本，不在用例中重复。`checker_limits` 消息必须存在，其三项 `optional uint64` 缺失表示对应项目不设限，空消息表示三项均不设限；每个存在值均须在 `1..=2147483647`，匹配沙箱的毫秒与 KiB 数值范围。checker 不使用用户 `max_run` 门限，用户 `RunLimits` 的正值和上限合同保持不变。
 
 `FINISHED` 表示取得判题结论，包含一个 `JudgeResult`；`FAILED` 表示执行基础设施或 Job 总期限导致失败，包含 `JobFailure`。CE、WA、RE、TLE、MLE、OLE 都是判题结论，不是基础设施失败。运行中不包含终态消息。
 
@@ -182,7 +192,7 @@ AC 仅返回结论；CE 返回结论及有界编译诊断，不返回 `failed_ca
 
 ### 3.3 接纳与去重
 
-消费驱动先确认执行位置可用且有预留结果名额，再取得一条任务，校验编码字节上限、Job ID、语言、源码、用例及运行限额。至少一个用例，源码非空；单个输入、答案和合计字节不得超限。空输入、空答案允许；CPU、墙钟和内存必须显式提供正值且不超过配置上限。源码是否有效由编译器或解释器判断。
+消费驱动先确认执行位置可用且有预留结果名额，再取得一条任务，校验编码字节上限、Job ID、语言、用户与 checker 源码、checker 参数、用例及两类限额。至少一个用例，用户源码与 checker 源码非空；checker 源码须为 UTF-8，参数须为 UTF-8 JSON 对象。单个输入、答案、两种源码、参数和合计字节不得超限。空输入、空答案允许；用户 CPU、墙钟和内存必须显式提供正值且不超过配置上限。checker 限额按第 3.2 节独立校验。源码的语言语义由编译器或解释器判断。
 
 原归属下仍保留同 ID 时复用快照，不重新执行或延长期限；新分配的分区不使用旧归属的执行来确认新记录。接纳短锁内再次确认本机单槽和停止边界，建立 RUNNING/PREPARING 快照、绝对执行期限及内部停止通道后启动执行。驱动不另建待执行任务队列。
 
@@ -375,6 +385,8 @@ max_response_bytes = 1_048_576
 [request]
 job_id_max_bytes = 128
 source_max_bytes = 65_536
+checker_source_max_bytes = 65_536
+checker_config_max_bytes = 16_384
 case_max_count = 128
 input_max_bytes = 65_536
 expected_output_max_bytes = 65_536
@@ -440,7 +452,7 @@ Isolate box ID 由部署配置；同一宿主上不同 Worker 使用不同 ID。
 
 `sandbox.executable`、C 编译器和 Python 解释器使用绝对路径，启动时以当前用户执行各工具的 `--version` 检查可调用性；这不等同于真实沙箱权限、控制组或配额验收。配置示例见 [worker.example.toml](../config/worker.example.toml)。启动检查正值预算、CPU 不超过墙钟、运行单进程、产物大小不超过单文件和磁盘配额，以及停机预算覆盖停止与清理。传输预算为原始载荷另留协议空间：请求按用例各预留 32 字节，并加 Job ID 上限与 1 KiB；响应按编译诊断或失败 stdout/stderr 的较大载荷，加 Job ID 上限与 1 KiB。
 
-请求合计大小按源码与全部输入、答案的字节数计算；Kafka 编码记录另有上限，启动时须能容纳任务和有界结果。server 的消息上限仅用于状态 RPC。结果交接数量有上限，队列满时停止新接纳。
+`request.checker_source_max_bytes` 和 `request.checker_config_max_bytes` 缺省分别为 65,536 和 16,384。请求合计大小按用户源码、checker 源码、checker 参数与全部输入、答案的字节数计算，使用 checked_add 拒绝溢出；Kafka 编码记录另有上限，启动时须能容纳任务和有界结果。上述 checker 数据已计入合计载荷，协议空间不重复累加其单项预算。server 的消息上限仅用于状态 RPC。结果交接数量有上限，队列满时停止新接纳。
 
 ## 9. 日志
 

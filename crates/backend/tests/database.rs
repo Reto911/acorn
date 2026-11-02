@@ -162,15 +162,34 @@ async fn published_queries_and_fixed_version_creation() {
         .create_submission(submission_request.clone())
         .await
         .unwrap();
-    let task = created.task.unwrap();
-    assert_eq!(task.request.job_id, created.info.id);
-    assert_eq!(task.request.source, submission_request.source);
-    assert_eq!(task.request.cases.len(), 104);
+    let original_task = created.task.unwrap();
+    assert_eq!(original_task.request.job_id, created.info.id);
+    assert_eq!(original_task.request.source, submission_request.source);
+    assert_eq!(original_task.request.cases.len(), 104);
     assert_eq!(
-        task.request.run_limits.as_ref().unwrap().memory_kib,
+        original_task
+            .request
+            .run_limits
+            .as_ref()
+            .unwrap()
+            .memory_kib,
         256 * 1024
     );
-    assert_eq!(task.request.cases[2].input, b"-3 5\n");
+    assert_eq!(original_task.request.cases[2].input, b"-3 5\n");
+    assert_eq!(original_task.request.checker_config_json, "{}");
+    assert_eq!(
+        original_task.request.checker_limits,
+        Some(proto::CheckerLimits {
+            cpu_time_ms: Some(2000),
+            wall_time_ms: Some(5000),
+            memory_kib: Some(256 * 1024),
+        })
+    );
+    let encoded = acorn_protocol::records::encode_task(
+        &original_task.request,
+        fixture.config.kafka.max_task_record_bytes,
+    )
+    .unwrap();
     let stored = database
         .submission(&created.info.id)
         .await
@@ -182,13 +201,28 @@ async fn published_queries_and_fixed_version_creation() {
 
     let mut connection = fixture.connection().await;
     sqlx::raw_sql("START TRANSACTION;
-        INSERT INTO problem_versions (problem_id, version_no, title, statement, checker_script_id, checker_config_json, checker_cpu_time_ms, checker_wall_time_ms, checker_memory_kib, review_mode, published_at_ms) SELECT problem_id, 2, 'Version two', statement, checker_script_id, checker_config_json, checker_cpu_time_ms, checker_wall_time_ms, checker_memory_kib, 'ENABLE-ALL', published_at_ms + 1 FROM problem_versions WHERE problem_id = 1 AND version_no = 1;
+        INSERT INTO problem_versions (problem_id, version_no, title, statement, checker_script_id, checker_config_json, checker_cpu_time_ms, checker_wall_time_ms, checker_memory_kib, review_mode, published_at_ms) SELECT problem_id, 2, 'Version two', statement, checker_script_id, '{\"version\":2}', NULL, NULL, NULL, 'ENABLE-ALL', published_at_ms + 1 FROM problem_versions WHERE problem_id = 1 AND version_no = 1;
         INSERT INTO problem_version_languages SELECT problem_id, 2, language_id, cpu_time_ms, wall_time_ms, 1 FROM problem_version_languages WHERE problem_id = 1 AND version_no = 1 AND language_id = 'c';
         INSERT INTO test_cases VALUES (1, 2, 1, X'00FF010A', X'FF000A');
         UPDATE problems SET current_version_no = 2 WHERE id = 1;
         INSERT INTO problems VALUES (2, NULL, 0);
         COMMIT;").execute(&mut connection).await.unwrap();
+    let updated_source = b"print('{\"verdict\": \"WA\"}')\n";
+    sqlx::query("UPDATE checker_scripts SET source = ? WHERE id = 1")
+        .bind(updated_source.as_slice())
+        .execute(&mut connection)
+        .await
+        .unwrap();
     connection.close().await.unwrap();
+    assert_ne!(original_task.request.checker_source, updated_source);
+    assert_eq!(
+        acorn_protocol::records::decode_task(
+            encoded.payload(),
+            fixture.config.kafka.max_task_record_bytes
+        )
+        .unwrap(),
+        original_task.request
+    );
     assert_eq!(
         database
             .problem(1)
@@ -212,7 +246,14 @@ async fn published_queries_and_fixed_version_creation() {
     assert!(!repeated.created);
     assert_eq!(repeated.info.id, created.info.id);
     assert_eq!(repeated.info.version_no, 1);
-    assert_eq!(repeated.task.unwrap().request.cases.len(), 104);
+    let repeated_task = repeated.task.unwrap();
+    assert_eq!(repeated_task.request.cases.len(), 104);
+    assert_eq!(repeated_task.request.checker_source, updated_source);
+    assert_eq!(repeated_task.request.checker_config_json, "{}");
+    assert_eq!(
+        repeated_task.request.checker_limits,
+        original_task.request.checker_limits
+    );
     let new = database.create_submission(request("c")).await.unwrap();
     assert_eq!(new.info.version_no, 2);
     for (id, expected, mode) in [
@@ -226,6 +267,16 @@ async fn published_queries_and_fixed_version_creation() {
         assert_eq!(context.review_mode, mode);
     }
     let task = new.task.unwrap();
+    assert_eq!(task.request.checker_source, updated_source);
+    assert_eq!(task.request.checker_config_json, r#"{"version":2}"#);
+    assert_eq!(
+        task.request.checker_limits,
+        Some(proto::CheckerLimits {
+            cpu_time_ms: None,
+            wall_time_ms: None,
+            memory_kib: None,
+        })
+    );
     assert_eq!(task.request.run_limits.as_ref().unwrap().memory_kib, 1);
     assert_eq!(task.request.cases[0].input, [0, 255, 1, 10]);
     assert_eq!(task.request.cases[0].expected_output, [255, 0, 10]);
@@ -234,9 +285,8 @@ async fn published_queries_and_fixed_version_creation() {
             .queued_task(&created.info.id)
             .await
             .unwrap()
-            .unwrap()
-            .version_no,
-        1
+            .unwrap(),
+        repeated_task
     );
     assert!(matches!(
         database.create_submission(request("python")).await,
@@ -248,6 +298,152 @@ async fn published_queries_and_fixed_version_creation() {
         database.create_submission(unpublished).await,
         Err(Error::ProblemNotFound)
     ));
+    fixture.close().await;
+}
+
+/// Checker defaults, overrides and input budgets are enforced before persisting a task.
+#[tokio::test]
+async fn checker_limits_and_task_budgets() {
+    let fixture = Fixture::new().await;
+    let mut connection = fixture.connection().await;
+    let parameters = r#"{"label":"私有参数"}"#;
+    sqlx::query("UPDATE problem_versions SET checker_cpu_time_ms = 11, checker_memory_kib = 13, checker_config_json = ? WHERE problem_id = 1 AND version_no = 1")
+        .bind(parameters).execute(&mut connection).await.unwrap();
+    let task = fixture
+        .database
+        .create_submission(request("c"))
+        .await
+        .unwrap()
+        .task
+        .unwrap();
+    assert_eq!(
+        task.request.checker_limits,
+        Some(proto::CheckerLimits {
+            cpu_time_ms: Some(11),
+            wall_time_ms: Some(5000),
+            memory_kib: Some(13),
+        })
+    );
+    assert_eq!(task.request.checker_config_json, parameters);
+    assert_eq!(task.request.run_limits.as_ref().unwrap().cpu_time_ms, 1000);
+    let maximum = i64::from(i32::MAX);
+    sqlx::query("UPDATE problem_versions SET checker_cpu_time_ms = ?, checker_wall_time_ms = ?, checker_memory_kib = ? WHERE problem_id = 1 AND version_no = 1")
+        .bind(maximum).bind(maximum).bind(maximum)
+        .execute(&mut connection).await.unwrap();
+    let maximum_task = fixture
+        .database
+        .create_submission(request("c"))
+        .await
+        .unwrap()
+        .task
+        .unwrap();
+    assert_eq!(
+        maximum_task.request.checker_limits,
+        Some(proto::CheckerLimits {
+            cpu_time_ms: Some(i32::MAX as u64),
+            wall_time_ms: Some(i32::MAX as u64),
+            memory_kib: Some(i32::MAX as u64),
+        })
+    );
+    for statement in [
+        "UPDATE problem_versions SET checker_cpu_time_ms = ? WHERE problem_id = 1 AND version_no = 1",
+        "UPDATE problem_versions SET checker_wall_time_ms = ? WHERE problem_id = 1 AND version_no = 1",
+        "UPDATE problem_versions SET checker_memory_kib = ? WHERE problem_id = 1 AND version_no = 1",
+    ] {
+        sqlx::query(statement)
+            .bind(maximum + 1)
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        assert!(matches!(
+            fixture.database.create_submission(request("c")).await,
+            Err(Error::Data(_))
+        ));
+        sqlx::query(statement)
+            .bind(maximum)
+            .execute(&mut connection)
+            .await
+            .unwrap();
+    }
+    for source in [b"".as_slice(), b"\xff".as_slice()] {
+        sqlx::query("UPDATE checker_scripts SET source = ? WHERE id = 1")
+            .bind(source)
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        assert!(matches!(
+            fixture.database.create_submission(request("c")).await,
+            Err(Error::Data(_))
+        ));
+    }
+    sqlx::query("UPDATE checker_scripts SET source = ? WHERE id = 1")
+        .bind(&task.request.checker_source)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    // Corrupt only this owned database to exercise the assembly boundary independently of SQL.
+    sqlx::query("ALTER TABLE problem_versions ALTER CHECK problem_versions_checker_config_object NOT ENFORCED")
+        .execute(&mut connection).await.unwrap();
+    for parameters in ["[]", "{invalid}"] {
+        sqlx::query("UPDATE problem_versions SET checker_config_json = ? WHERE problem_id = 1 AND version_no = 1")
+            .bind(parameters).execute(&mut connection).await.unwrap();
+        assert!(matches!(
+            fixture.database.create_submission(request("c")).await,
+            Err(Error::Data(_))
+        ));
+    }
+    sqlx::query("UPDATE problem_versions SET checker_config_json = ? WHERE problem_id = 1 AND version_no = 1")
+        .bind(parameters).execute(&mut connection).await.unwrap();
+    sqlx::query(
+        "ALTER TABLE problem_versions ALTER CHECK problem_versions_checker_config_object ENFORCED",
+    )
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    let raw_bytes = task.request.source.len()
+        + task.request.checker_source.len()
+        + task.request.checker_config_json.len()
+        + task
+            .request
+            .cases
+            .iter()
+            .map(|case| case.input.len() + case.expected_output.len())
+            .sum::<usize>();
+    let mut source_budget = fixture.config.clone();
+    source_budget.request.checker_source_max_bytes = task.request.checker_source.len() - 1;
+    let mut parameter_budget = fixture.config.clone();
+    parameter_budget.request.checker_config_max_bytes = parameters.len() - 1;
+    let mut payload_budget = fixture.config.clone();
+    payload_budget.request.payload_max_bytes = raw_bytes - 1;
+    for config in [source_budget, parameter_budget, payload_budget] {
+        let database = Database::open(&config).await.unwrap();
+        assert!(matches!(
+            database.create_submission(request("c")).await,
+            Err(Error::Data(_))
+        ));
+        database.close().await;
+    }
+    let mut exact = fixture.config.clone();
+    exact.request.checker_source_max_bytes = task.request.checker_source.len();
+    exact.request.checker_config_max_bytes = parameters.len();
+    exact.request.payload_max_bytes = raw_bytes;
+    let database = Database::open(&exact).await.unwrap();
+    assert!(
+        database
+            .create_submission(request("c"))
+            .await
+            .unwrap()
+            .created
+    );
+    database.close().await;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM submissions")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap(),
+        3
+    );
+    connection.close().await.unwrap();
     fixture.close().await;
 }
 
@@ -642,10 +838,21 @@ async fn judging_recovery_and_once_only_permit_release() {
     assert!(Scheduler::restore(&config, recovery).is_err());
     limited.close().await;
 
+    let updated_source = b"print('{\"verdict\": \"AC\"}')\n";
+    let mut connection = fixture.connection().await;
+    sqlx::query("UPDATE checker_scripts SET source = ? WHERE id = 1")
+        .bind(updated_source.as_slice())
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    connection.close().await.unwrap();
+    let mut expected_queued = queued.task.clone().unwrap();
+    assert_ne!(expected_queued.request.checker_source, updated_source);
+    expected_queued.request.checker_source = updated_source.to_vec();
     config.scheduler.pending_max_count = 2;
     let database = Database::open(&config).await.unwrap();
     let recovery = database.judging_recovery().await.unwrap();
-    assert_eq!(recovery.queued, [queued.task.clone().unwrap()]);
+    assert_eq!(recovery.queued, [expected_queued]);
     assert_eq!(
         recovery.dispatching,
         std::slice::from_ref(&dispatching.info.id)

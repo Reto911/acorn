@@ -81,19 +81,23 @@ target/debug/acorn-worker --config "$HOME/.config/acorn/worker.toml"
 
 完整字段见 [worker.example.toml](../../config/worker.example.toml)。配置在启动时读取，修改后重启生效。
 
-| 配置节             | 主要设置                                                   | 示例值                                     |
-| ------------------ | ---------------------------------------------------------- | ------------------------------------------ |
-| `server`           | gRPC 监听及消息上限                                        | `127.0.0.1:50051`，请求 16 MiB、响应 1 MiB |
-| `request`          | ID、源码、用例数、输入、答案和总载荷上限                   | 源码 64 KiB、最多 128 例、总载荷 8 MiB     |
-| `execution`        | Job 总期限、单用例资源上限、进程数及输出保留               | Job 120 秒，运行进程数 1                   |
-| `languages.c`      | GCC 路径和编译参数                                         | `/usr/bin/gcc`，C17、`-O2`                 |
-| `languages.python` | Python 路径和运行参数                                      | `/usr/bin/python3`，`-I -B -S main.py`     |
-| `compile`          | 编译资源、诊断和导出产物预算                               | CPU 10 秒、墙钟 20 秒、内存 512 MiB        |
-| `sandbox`          | Isolate 路径、box ID、FD、文件／磁盘／inode 配额和收尾超时 | 文件 16 MiB，磁盘 64 MiB，4096 inode       |
-| `results`          | 待交接结果容量                                             | 128 条                                     |
-| `logging`          | stderr 日志级别                                            | `info`                                     |
+| 配置节             | 主要设置                                                   | 示例值                                               |
+| ------------------ | ---------------------------------------------------------- | ---------------------------------------------------- |
+| `server`           | gRPC 监听及消息上限                                        | `127.0.0.1:50051`，请求 16 MiB、响应 1 MiB           |
+| `request`          | ID、用户与 checker 源码、checker 参数、用例和总载荷上限    | 两种源码各 64 KiB、参数 16 KiB、128 例、总载荷 8 MiB |
+| `execution`        | Job 总期限、单用例资源上限、进程数及输出保留               | Job 120 秒，运行进程数 1                             |
+| `languages.c`      | GCC 路径和编译参数                                         | `/usr/bin/gcc`，C17、`-O2`                           |
+| `languages.python` | Python 路径和运行参数                                      | `/usr/bin/python3`，`-I -B -S main.py`               |
+| `compile`          | 编译资源、诊断和导出产物预算                               | CPU 10 秒、墙钟 20 秒、内存 512 MiB                  |
+| `sandbox`          | Isolate 路径、box ID、FD、文件／磁盘／inode 配额和收尾超时 | 文件 16 MiB，磁盘 64 MiB，4096 inode                 |
+| `results`          | 待交接结果容量                                             | 128 条                                               |
+| `logging`          | stderr 日志级别                                            | `info`                                               |
 
 请求中的单用例限额受 Worker 配置上限约束。内存、单文件和磁盘空间配置使用 KiB；源码、输出、消息和编译产物预算使用字节；时间使用毫秒。部署多个节点时，将各 Worker 预算与[后端配置](../backend/README.md#配置)对齐。
+
+任务接纳要求 checker 源码非空且为 UTF-8，`checker_config_json` 为 JSON 对象。`request.checker_source_max_bytes` 和 `request.checker_config_max_bytes` 缺省分别为 65,536 和 16,384 字节；两者连同用户源码、全部输入和参考数据计入 `payload_max_bytes`。完整 Protobuf 仍受 Kafka 记录上限约束。
+
+`checker_limits` 消息必须存在，内部缺失项表示不设限，空消息表示三项全部不设限；有限 CPU、墙钟毫秒和内存 KiB 均须为 `1..=2147483647`，独立于用户 `max_run` 上限。非法脚本数据或限额在接纳时形成 `InvalidJob`，接纳不检查 Python 语法。
 
 ### Kafka 客户端配置
 

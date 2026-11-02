@@ -2,7 +2,7 @@
 
 版本：v1。本文定义统一 Python 答案校验、数据库与任务增量、文件协议、沙箱复用、资源和错误归因，以及实施任务和验收要求。实施状态与实际检查见[实施记录](d02-execution/13-checker-scripts-execution.md)。
 
-本篇是下一版判题合同。现有结构版本 5、固定 trim 比较及每阶段沙箱初始化的实现，由[Worker](01-worker-design.md)、[数据库](02-database-design.md)、[后端](03-backend-design.md)和 [Kafka](10-kafka-judging-design.md)设计描述；实施本篇时按第 7 节同步替换相关实现与说明。
+本篇定义脚本判题的完整合同。结构版本 5、任务字段与装配合同同步见[数据库](02-database-design.md)、[后端](03-backend-design.md)和 [Kafka](10-kafka-judging-design.md)设计；[Worker 设计](01-worker-design.md)区分任务接纳与现行执行流程。统一脚本执行及同提交沙箱复用按第 7 节分阶段接入，实际交付范围见实施记录。
 
 ## 1. 目标与范围
 

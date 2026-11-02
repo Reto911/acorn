@@ -2,7 +2,7 @@
 
 版本：v20。本文规定后端与 Worker 之间的 Kafka 任务投递、状态回传、接纳容量及部署方案。消息发布等待 broker 确认，消费位点使用 safe 异步提交且不逐条等待回执；配套修复按第 12 节推进。实施时同步受影响的现行设计、协议、调用方和配置说明；进度及检查结果见[实施记录](d02-execution/10-kafka-judging-execution.md#4-任务清单)。
 
-下一版的 checker 任务字段和预算增量见[判题脚本设计第 3 节](13-checker-scripts-design.md#3-任务装配与消息)。它保持本篇 topic、交付、重复执行、位点与终态选择合同；当前消息结构尚未增加这些字段，实施进度见[脚本实施记录](d02-execution/13-checker-scripts-execution.md)。
+checker 任务字段和预算遵守[判题脚本设计第 3 节](13-checker-scripts-design.md#3-任务装配与消息)，沿用本篇 topic、交付、重复执行、位点与终态选择合同。任务数据的装配和接纳与实际脚本执行分别交付，当前实施范围见[脚本实施记录](d02-execution/13-checker-scripts-execution.md)。
 
 ## 1. 目标、依据与范围
 
@@ -106,14 +106,16 @@ flowchart LR
 
 ### 4.2 Protobuf 负载
 
-以下列出现行负载。脚本版本在 SubmitJobRequest 增加 checker 源码、参数和可选限额，GetJobReply 结构保持不变，按[第 13 篇消息合同](13-checker-scripts-design.md#32-proto-增量)同步生成协议并调整两端预算，不增加新的消息封装。
+SubmitJobRequest 的字段号 1–5 保持不变，字段号 6–8 分别为 `checker_source`、`checker_config_json` 和 `checker_limits`，均为 Job 级数据。GetJobReply 结构保持不变，具体字段合同见[第 13 篇消息合同](13-checker-scripts-design.md#32-proto-增量)。
 
 直接复用[现有协议](../proto/acorn/worker/v1/worker.proto)中的消息，通过现有 Cargo/Prost 流程生成。任务和事件分别由 topic 区分，消息主版本由 topic 后缀表达。
 
-| topic  | Protobuf 消息    | 内容与用途                                                                                   |
-| ------ | ---------------- | -------------------------------------------------------------------------------------------- |
-| tasks  | SubmitJobRequest | 沿用 job_id、language_id、source、cases 和 run_limits，携带完整任务                          |
-| events | GetJobReply      | 沿用 job_id、state、phase、completed_cases、total_cases 和终态 oneof，发送既有运行状态及终态 |
+| topic  | Protobuf 消息    | 内容与用途                                                                                               |
+| ------ | ---------------- | -------------------------------------------------------------------------------------------------------- |
+| tasks  | SubmitJobRequest | job_id、language_id、source、cases、run_limits，以及 checker_source、checker_config_json、checker_limits |
+| events | GetJobReply      | 沿用 job_id、state、phase、completed_cases、total_cases 和终态 oneof，发送既有运行状态及终态             |
+
+`checker_limits` 消息必须存在，其中 CPU、墙钟和内存各用 optional uint64 表示；空消息允许三个项目均未设限，存在的有限值必须为正且能由沙箱表示。后端按题目版本覆盖、同版本 Python 限额、未设限逐项求值，Worker 保留缺失语义。用户 RunLimits 仍要求正值并受原 max_run 上限约束。缺少 checker 源码、源码非 UTF-8、参数不是 JSON 对象、缺少限额消息或预算非法时，沿用 InvalidJob 接纳失败；接纳不检查 Python 语法或执行脚本。
 
 Worker 使用已有进度更新机制产生 GetJobReply 状态事件，Scheduler 沿用原[响应校验](../crates/backend/src/scheduler/validation.rs)及处理规则：
 
@@ -125,7 +127,7 @@ Worker 使用已有进度更新机制产生 GetJobReply 状态事件，Scheduler
 
 未收到新事件时继续等待，不生成 WorkerUnavailable；明确的通信及协议错误按第 8.3 节处理。
 
-消息直接使用 Protobuf 二进制编码，接收边界校验字段、身份及预算。任务中的用例来自提交固定版本并保持顺序；Worker 从任务取得全部执行输入。后端按 job_id 读取提交及固定版本的语言、总用例数和 review_mode，供事件校验及自动审查使用。
+消息直接使用 Protobuf 二进制编码，接收边界校验字段、身份及预算。任务中的用例来自提交固定版本并保持顺序，checker 源码与参数采用装配时的副本；Worker 从任务取得全部执行输入，不访问数据库。后端按 job_id 读取提交及固定版本的语言、总用例数和 review_mode，供事件校验及自动审查使用。
 
 ## 5. MySQL 交接与接纳容量
 
@@ -139,7 +141,7 @@ Worker 使用已有进度更新机制产生 GetJobReply 状态事件，Scheduler
 
 1. 预检查请求，按用户及幂等键读取已有提交，比较题目、语言和原始源码；相同沿用原 ID，必要时继续 queued 交接，不同返回冲突。
 2. 确实需要新建或重新交接 queued 记录时，先通过 Scheduler 信号量预留名额；无名额返回 QueueFull。
-3. 在现有短事务中再次查重，仅新建时固定最新版本、装配校验任务并插入 queued；已有 queued 保留原固定版本。保留唯一键裁定及 1062 回滚后读取规则。
+3. 在现有短事务中再次查重，仅新建时固定最新版本、装配校验任务并插入 queued；已有 queued 保留原固定版本。新建、queued 重交接与启动装入共用 `load_task`，读取脚本源码、参数与有效限额。保留唯一键裁定及 1062 回滚后读取规则。
 4. 提交并归还连接，将完整任务及预留名额交给 Scheduler 的有界本地队列。
 5. 完成本地交接后返回原有 202、submission_id 和 Location。回滚、校验失败或重复合并释放多余预留。
 
@@ -148,7 +150,7 @@ Worker 使用已有进度更新机制产生 GetJobReply 状态事件，Scheduler
 使用已有状态、内存队列和启动装入处理交接窗口：
 
 1. Scheduler 从有界本地队列取得任务，在本地记录发送占用，以既有 Submission ID 去重；确认该提交仍允许发送，编码 SubmitJobRequest。此时数据库仍为 queued。
-2. 不持有数据库连接或事务地向 Kafka 发送。临时错误或结果不明时保留本地待发送数据及许可，在发布服务中重试同一任务；若已收到合法运行或终态事件，则停止安排后续重发，已经在途的一次发送仍可能完成。配置或不可继续的错误明确报告并走受监督故障处理，不把缺少 Worker 事件当作发送失败证据。
+2. 不持有数据库连接或事务地向 Kafka 发送。临时错误或结果不明时保留本地待发送数据及许可，在发布服务中重试同一任务；若已收到合法运行或终态事件，则停止安排后续重发，已经在途的一次发送仍可能完成。随后更新脚本源码不影响内存任务中的源码和参数副本；只有 queued 确实需要重新装配时才取得当时的源码。配置或不可继续的错误明确报告并走受监督故障处理，不把缺少 Worker 事件当作发送失败证据。
 3. broker 确认后，以 queued 为条件保存 dispatching。若运行或终态事件已经把记录推进，则不回退，不因此重新发送。
 4. 若进程在确认前退出，或者 broker 已收到但确认／状态更新尚未完成，记录仍可能是 queued；下次启动及同键重传使用现有装配入口重交，允许因此重复执行。
 5. 已保存 dispatching 的记录表示曾取得投递确认，running 表示曾取得合法运行事件；重启时恢复对它们的等待，不再次批量发布。Kafka 继续按消费位点处理未完成消息。
@@ -319,14 +321,16 @@ Kafka 端点采用 `host:port` 或 `[IPv6]:port`，不带 URL 协议；topic 使
 
 ### 8.2 资源与部署边界
 
-| 资源           | 约束                                                                                               |
-| -------------- | -------------------------------------------------------------------------------------------------- |
-| 原始任务       | 保留源码 65,536 字节、最多 128 个用例、单项 65,536 字节及合计 8 MiB 的现有示例预算                 |
-| Kafka 编码记录 | SubmitJobRequest 最多 16 MiB，GetJobReply 最多 1 MiB，按实际 Protobuf 字节检查                     |
-| 传输与缓冲     | producer、topic/broker、复制和 consumer 的大小配置一致覆盖记录及协议开销；SDK 缓冲单独有界         |
-| 判题           | 保留每 Worker 一个位置、Job 总期限和每阶段限额；消息网络等待不借出数据库连接                       |
-| 结果           | 保留现有单项预算；有界队列复用 max_unacknowledged_results，示例 128 项，仅保存终态和消费记录元数据 |
-| broker         | 单 broker 部署及内部位点 topic 配置见第 10 节；该部署不提供 broker 副本容错                        |
+两端 `request.checker_source_max_bytes` 和 `request.checker_config_max_bytes` 默认分别为 65536 和 16384，均须为正。`request.payload_max_bytes` 按原始字节合计用户源码、各例输入与参考数据、checker 源码及参数；单项预算与合计预算分别校验。完整任务编码后继续受 `kafka.max_task_record_bytes` 和收发预算约束，不以原始载荷预算代替 Protobuf 编码长度检查。
+
+| 资源           | 约束                                                                                                       |
+| -------------- | ---------------------------------------------------------------------------------------------------------- |
+| 原始任务       | 用户及 checker 源码各 65,536 字节、checker 参数 16,384 字节、最多 128 个用例、单项 65,536 字节，合计 8 MiB |
+| Kafka 编码记录 | SubmitJobRequest 最多 16 MiB，GetJobReply 最多 1 MiB，按实际 Protobuf 字节检查                             |
+| 传输与缓冲     | producer、topic/broker、复制和 consumer 的大小配置一致覆盖记录及协议开销；SDK 缓冲单独有界                 |
+| 判题           | 保留每 Worker 一个位置、Job 总期限和每阶段限额；消息网络等待不借出数据库连接                               |
+| 结果           | 保留现有单项预算；有界队列复用 max_unacknowledged_results，示例 128 项，仅保存终态和消费记录元数据         |
+| broker         | 单 broker 部署及内部位点 topic 配置见第 10 节；该部署不提供 broker 副本容错                                |
 
 Kafka 使用 PLAINTEXT 连接。
 

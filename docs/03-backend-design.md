@@ -1,6 +1,6 @@
 # 后端与 Scheduler 设计
 
-本篇描述现有后端合同。下一版脚本源码、参数与可选 checker 限额的装配按[判题脚本设计第 3 节](13-checker-scripts-design.md#3-任务装配与消息)实施；HTTP 不新增用户可指定的 checker 字段，认证、幂等、Kafka 交接和审查职责保持不变。实施状态见[脚本实施记录](d02-execution/13-checker-scripts-execution.md)。
+本篇描述后端合同，包括[判题脚本设计第 3 节](13-checker-scripts-design.md#3-任务装配与消息)规定的脚本源码、参数与可选 checker 限额装配。HTTP 不接受用户指定的 checker 字段，认证、幂等、Kafka 交接和审查职责保持不变。checker 沙箱与实际执行遵守[脚本执行合同](13-checker-scripts-design.md#4-脚本协议)，阶段交付范围见[脚本实施记录](d02-execution/13-checker-scripts-execution.md)。
 
 本文定义 HTTP、Scheduler、共享数据库、健康采集及服务生命周期的职责和合同。自动及手动 LLM 审查的策略、独立队列、最新意见及页面合同见[LLM 代码审查设计](08-llm-code-review-design.md)。
 
@@ -76,9 +76,9 @@ HTTP 请求与响应结构也称 DTO（Data Transfer Object，数据传输对象
 
 HTTP 层通过 `ServiceBuilder` 组合公共中间件，`TraceLayer` 统一记录方法、路径、状态码和耗时；请求体上限使用 Axum 的 `DefaultBodyLimit`。JSON 提取、路径与查询参数解析和路由拒绝均转换为第 5.4 节的错误结构。任务去重、发布重试和事件处理由 Scheduler 控制；状态 RPC 使用健康采集预算。
 
-完整任务包含 Submission ID、固定题目版本、语言、源码字节、有序用例和限额。源码从 HTTP 字符串按 UTF-8 编码，不调整换行、不裁剪内容；入库字节与发送给 Worker 的字节一致。
+完整任务包含 Submission ID、固定题目版本、语言、用户源码字节、有序用例、用户运行限额，以及 Job 级的 `checker_source`、`checker_config_json` 和 `checker_limits`。源码从 HTTP 字符串按 UTF-8 编码，不调整换行、不裁剪内容；入库字节与发送给 Worker 的字节一致。
 
-LLM 增量在创建及启动装入 JudgingTask 时携带固定版本的 review_mode，仅供后端判断自动门槛，不加入 Worker 请求或 Proto。llm_review 的队列只携带提交、审查身份及必要元数据，执行时独立读取源码、固定公开题面及 verdict。
+LLM 增量在创建及启动装入 JudgingTask 时携带固定版本的 review_mode，仅供后端判断自动门槛，不加入 Worker 请求或 Proto。llm_review 的队列只携带提交、审查身份及必要元数据，执行时独立读取原始提交源码、固定公开题面及 verdict，不取得 checker 源码、参数或限额。
 
 业务 HTTP 查询读取数据库中的业务状态和结果。前端轮询不触发 Worker RPC；Worker 的阶段和逐点进度不写库，首版 HTTP 也不提供这些临时信息。
 
@@ -98,11 +98,13 @@ llm_review 复用该共享池和 Tokio runtime。读取审查输入后先归还�
 
 题目按数据库设计在事务内发布，包含至少一个用例和允许语言的正值预算。开发用户 test 可按需预置，密码为 Acorn-Test-Only-123!，脚本保存由正式密码实现生成的 Argon2id PHC；正式程序不自动创建账号。database/users 提供账号创建和按用户名查询，auth 提供输入校验及密码计算；凭据查询返回后先释放连接，再进入密码验证。HTTP 认证接口复用这些能力；会话存储在同一 HTTP 路由实例共享的进程内存中，认证不逐请求查 users。业务归属来自认证用户，完整登录、会话及个人隔离合同见[用户设计](11-user-authentication-design.md)。
 
-后端仍验证语言、用例数量、数据大小和限额：源码按 UTF-8 编码后的长度计量；输入、期望输出及总载荷按原始字节计量。HTTP 请求体、Kafka 消息和原始任务载荷各有独立上限。
+后端验证语言、用例数量、数据大小和限额：用户源码按 UTF-8 编码后的长度计量；checker 源码要求非空 UTF-8，参数要求为 JSON 对象。`request.checker_source_max_bytes` 和 `request.checker_config_max_bytes` 默认分别为 65536 和 16384，均为正值；`request.payload_max_bytes` 将用户源码、各例输入与参考数据、checker 源码和参数的原始字节计入合计。HTTP 请求体、Kafka 编码消息和原始任务载荷各有独立上限。
 
 内存限额从 MySQL `memory_kib`、配置 `request.max_run_memory_kib` 到 RPC `RunLimits.memory_kib` 统一使用 KiB，不进行字节除法。初始化结构为版本 5，采用空库全新部署。后端与 Worker 使用同一版 KiB 协议；实际资源统计和结果字节字段的单位保持原契约。
 
-同一版本的测试数据在一次任务装配中按 `case_index` 读取。正常新提交由 API 将内存中的完整任务直接交给 Scheduler，Scheduler 不再次读源码或题库。启动装入排队任务时才由 Scheduler 读取其固定版本数据。
+新建、queued 重交接与启动装入共用 `load_task`，按提交固定版本读取有序用例、当时的脚本源码、版本参数及有效 checker 限额。CPU、墙钟、内存逐项采用题目覆盖值、同版本 Python 语言限额、未设限的顺序；即使提交语言为 C，也从 Python 行取默认值，没有 Python 行时保留缺失。有限值必须为正且能由沙箱表示，checker 未设限项保持缺失，用户 `RunLimits` 继续服从正值及 `max_run` 上限。
+
+新提交在创建操作中完成装配，随后将完整内存任务直接交给 Scheduler，发布端不再次读取题库。脚本原地 UPDATE 不改变已装配任务或已编码消息中的源码与参数副本；queued 确实需要重新装配时取得当时的源码，Kafka 重放同一消息沿用消息中的副本。
 
 [`Database`](../crates/backend/src/database/mod.rs) 提供题目、提交查询、固定版本任务装配、条件状态更新及终态保存。create_submission 在短事务中查重和装配，提交并归还连接后交给 CreationService；judging_recovery 只装配 queued，仅读取 dispatching/running 的 ID，并校验 queued 与 dispatching 的合计容量。Scheduler::restore 在启动发布和事件消费前恢复这些任务的许可及去重记录。
 
@@ -140,7 +142,7 @@ llm_review 复用该共享池和 Tokio runtime。读取审查输入后先归还�
 
 健康 GET 不执行 SQL 或 Worker RPC；`failed`、`stale`、`full` 和 `stopping` 均作为响应中的组件状态，组装失败沿用 `500 InternalError`。返回后端 UTC 组装时间及各项实际完成时间，不包含内部地址、数据库路径或原始异常。
 
-列表使用 `limit`、`offset`，默认页长和最大页长由配置提供。题目按题号排序，历史按 `created_at_ms DESC, id DESC` 排序；列表不附带源码、题面正文或终态诊断。题目查询不返回测试输入和答案。
+列表使用 `limit`、`offset`，默认页长和最大页长由配置提供。题目按题号排序，历史按 `created_at_ms DESC, id DESC` 排序；列表不附带源码、题面正文或终态诊断。题目查询不返回测试输入、参考数据、checker 源码、私有参数或 checker 限额。
 
 两个列表的顶层 JSON 均为 `{"items":[...],"limit":20,"offset":0}`，`limit` 是生效的页长，`offset` 默认 0，不额外计算总条数。题目列表项包含 `problem_id`、`version_no`、`title`；题目详情增加 `statement` 和 `languages`，每个语言项包含 `language_id`、`cpu_time_ms`、`wall_time_ms`、`memory_kib`。提交历史项采用第 5.3 节的身份、状态、结论和时间戳字段，省略 `terminal_details`。请求字段、分页及筛选参数不接受未规定字段。
 

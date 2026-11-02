@@ -182,6 +182,17 @@ async fn published_queries_and_history_shapes() {
     assert_eq!(detail["languages"][0]["memory_kib"], 262144);
     assert_eq!(detail["review_mode"], "DISABLED");
     assert!(detail.get("cases").is_none());
+    for field in [
+        "checker_source",
+        "checker_script_id",
+        "checker_config_json",
+        "checker_limits",
+        "checker_cpu_time_ms",
+        "checker_wall_time_ms",
+        "checker_memory_kib",
+    ] {
+        assert!(detail.get(field).is_none());
+    }
     harness.fixture.publish_next().await;
     let (_, _, latest) = call(&harness.app, "GET", "/api/v1/problems/1", None, None).await;
     let (_, _, old) = call(

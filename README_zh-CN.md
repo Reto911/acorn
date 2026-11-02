@@ -199,33 +199,35 @@ curl --fail-with-body -b "$ACORN_COOKIE_JAR" -c "$ACORN_COOKIE_JAR" \
 
 后端与 Worker 均通过 `--config <PATH>` 读取 TOML，修改后重启生效。题目 HTTP 接口公开；提交接口要求有效会话及匹配的 `X-Acorn-User-Id`，健康接口要求登录。JSON 写请求还要求 `Origin` 与 `http.public_origin` 精确匹配。会话身份确定提交归属，不存在或属于其他用户的提交统一返回 `404 SubmissionNotFound`。gRPC 访问范围继续由部署端限制。
 
-| 配置项                                 | 示例值                       | 用途                               |
-| -------------------------------------- | ---------------------------- | ---------------------------------- |
-| Worker `server.listen`                 | `127.0.0.1:50051`            | gRPC 监听地址                      |
-| Worker `sandbox.box_id`                | `0`                          | 本机独占的 Isolate box ID          |
-| 后端 `http.listen`                     | `127.0.0.1:8080`             | HTTP API 监听地址                  |
-| 后端 `http.public_origin`              | `http://127.0.0.1:8080`      | JSON 写请求必需的浏览器外部 Origin |
-| 后端 `http.cookie_secure`              | `false`                      | 按外部协议选择 Secure Cookie       |
-| 后端 `auth.max_sessions_per_user`      | `10`                         | 每用户会话容量                     |
-| 后端 `auth.max_sessions`               | `10000`                      | 全局会话容量                       |
-| 后端 `database.endpoint`               | `127.0.0.1:3306`             | MySQL 主机和 TCP 端口              |
-| 后端 `database.name`                   | `appdb`                      | 已初始化的结构版本 5 数据库        |
-| 后端 `database.username`               | `example_user`               | 业务读写账户                       |
-| 后端 `MYSQL_PASSWORD`                  | 进程环境变量                 | 数据库密码                         |
-| 后端 `database.max_connections`        | `4`                          | 共享应用连接池上限                 |
-| 后端 `database.acquire_timeout_ms`     | `5000`                       | 整个连接取得过程的预算             |
-| 后端 `database.lock_wait_timeout_secs` | `3`                          | 会话行锁与元数据锁等待             |
-| 后端 `scheduler.workers`               | `["http://127.0.0.1:50051"]` | Worker 地址列表                    |
-| 后端 `scheduler.pending_max_count`     | `128`                        | 等待 Worker 接纳的提交容量         |
-| 后端 `llm_review.enabled`              | `false`                      | LLM 审查开关                       |
-| 前端 `API_PROXY_TARGET`                | `http://127.0.0.1:8080`      | 开发服务的 API 代理目标            |
-| 前端 `VITE_SOURCE_MAX_BYTES`           | `65536`                      | 提交源码字节上限预检               |
+| 配置项                                  | 示例值                       | 用途                               |
+| --------------------------------------- | ---------------------------- | ---------------------------------- |
+| Worker `server.listen`                  | `127.0.0.1:50051`            | gRPC 监听地址                      |
+| Worker `sandbox.box_id`                 | `0`                          | 本机独占的 Isolate box ID          |
+| 后端 `http.listen`                      | `127.0.0.1:8080`             | HTTP API 监听地址                  |
+| 后端 `http.public_origin`               | `http://127.0.0.1:8080`      | JSON 写请求必需的浏览器外部 Origin |
+| 后端 `http.cookie_secure`               | `false`                      | 按外部协议选择 Secure Cookie       |
+| 后端 `auth.max_sessions_per_user`       | `10`                         | 每用户会话容量                     |
+| 后端 `auth.max_sessions`                | `10000`                      | 全局会话容量                       |
+| 后端 `database.endpoint`                | `127.0.0.1:3306`             | MySQL 主机和 TCP 端口              |
+| 后端 `database.name`                    | `appdb`                      | 已初始化的结构版本 5 数据库        |
+| 后端 `database.username`                | `example_user`               | 业务读写账户                       |
+| 后端 `MYSQL_PASSWORD`                   | 进程环境变量                 | 数据库密码                         |
+| 后端 `database.max_connections`         | `4`                          | 共享应用连接池上限                 |
+| 后端 `database.acquire_timeout_ms`      | `5000`                       | 整个连接取得过程的预算             |
+| 后端 `database.lock_wait_timeout_secs`  | `3`                          | 会话行锁与元数据锁等待             |
+| 后端 `scheduler.workers`                | `["http://127.0.0.1:50051"]` | Worker 地址列表                    |
+| 后端 `scheduler.pending_max_count`      | `128`                        | 等待 Worker 接纳的提交容量         |
+| 两端 `request.checker_source_max_bytes` | `65536`                      | checker 源码字节上限               |
+| 两端 `request.checker_config_max_bytes` | `16384`                      | checker JSON 参数字节上限          |
+| 后端 `llm_review.enabled`               | `false`                      | LLM 审查开关                       |
+| 前端 `API_PROXY_TARGET`                 | `http://127.0.0.1:8080`      | 开发服务的 API 代理目标            |
+| 前端 `VITE_SOURCE_MAX_BYTES`            | `65536`                      | 提交源码字节上限预检               |
 
 `http.public_origin` 必须为规范 HTTP(S) Origin，不含路径、末尾斜线、凭据、查询或片段。通过 Vite 发浏览器写请求时使用 `http://localhost:5173`，反向代理部署时填写外部 Origin。`http.cookie_secure` 默认 `false`；外部 HTTPS 部署设为 `true`，代理通过 HTTP 连接后端时也适用。可省略的 `[auth]` 默认每用户 10 条、全局 10000 条会话，两个容量均须为正；容量满时淘汰最久未使用的会话。会话在闲置 24 小时后过期，有效认证请求同步续期服务端与持久 Cookie；后端重启使全部会话失效。
 
 后端从进程环境读取 `MYSQL_PASSWORD`，MySQL SSL 显式禁用，程序不自动加载 `.env`。连接使用 utf8mb4_0900_bin、READ COMMITTED、严格 SQL 模式和有限锁等待。
 
-请求、消息和结果预算需要在后端与各 Worker 之间对齐。字段以 `_ms`、`_kib`、`_bytes` 标明单位。完整配置见[后端示例](config/backend.example.toml)、[Worker 示例](config/worker.example.toml)和[前端配置说明](web/README.md#配置与-api-代理)。
+请求、消息和结果预算需要在后端与各 Worker 之间对齐。`request.checker_source_max_bytes` 和 `request.checker_config_max_bytes` 必须为正，默认分别为 65536 和 16384 字节。原始 `request.payload_max_bytes` 合计用户源码、用例输入与参考数据、checker 源码和参数，Kafka 另外校验完整任务的编码长度。字段以 `_ms`、`_kib`、`_bytes` 标明单位。完整配置见[后端示例](config/backend.example.toml)、[Worker 示例](config/worker.example.toml)和[前端配置说明](web/README.md#配置与-api-代理)。
 
 后端与 Worker 的配置均要求 `[kafka]`，包含端点、两个 topic 和标识各自消费组的 `group_id`；预算可使用默认值。后端另有独立的 `[worker_membership]` 采集配置。字段、客户端选项与消息编解码接口见[后端说明](crates/backend/README.md#kafka-客户端配置)、[Worker 说明](crates/worker/README.md#kafka-客户端配置)和[协议说明](crates/protocol/README.md#kafka-消息编解码)。 已使用早先 Kafka 配置的，将后端 `[kafka].events_group_id` 或 Worker `[kafka].tasks_group_id` 改名为 `group_id`，保留原值。使用已有配置时，将示例中的 `[kafka]` 节合并到实际 `--config` 指定的文件，保留数据库及审查等已有配置；`[worker_membership]` 可省略并使用默认值。
 

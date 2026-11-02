@@ -289,13 +289,19 @@ impl WorkerMembershipConfig {
 pub struct RequestConfig {
     /// Maximum source length in bytes.
     pub source_max_bytes: usize,
+    /// Maximum UTF-8 Python checker source length in bytes.
+    #[serde(default = "default_checker_source_max_bytes")]
+    pub checker_source_max_bytes: usize,
+    /// Maximum UTF-8 JSON object parameter text length in bytes.
+    #[serde(default = "default_checker_config_max_bytes")]
+    pub checker_config_max_bytes: usize,
     /// Maximum ordered case count.
     pub case_max_count: u32,
     /// Maximum input length per case.
     pub input_max_bytes: usize,
     /// Maximum expected output length per case.
     pub expected_output_max_bytes: usize,
-    /// Combined source, input and expected-output byte limit.
+    /// Combined user/checker source, parameters, input and expected-output byte limit.
     pub payload_max_bytes: usize,
     /// Per-case CPU ceiling in milliseconds.
     pub max_run_cpu_time_ms: u64,
@@ -303,6 +309,16 @@ pub struct RequestConfig {
     pub max_run_wall_time_ms: u64,
     /// Per-case memory ceiling in KiB.
     pub max_run_memory_kib: u64,
+}
+
+/// Use the documented 64 KiB checker source budget when omitted.
+fn default_checker_source_max_bytes() -> usize {
+    65_536
+}
+
+/// Use the documented 16 KiB checker parameter text budget when omitted.
+fn default_checker_config_max_bytes() -> usize {
+    16_384
 }
 
 /// Raw result limits, distinct from Base64 JSON size and event encoding overhead.
@@ -517,6 +533,14 @@ impl Config {
             (
                 "request.source_max_bytes",
                 self.request.source_max_bytes as u64,
+            ),
+            (
+                "request.checker_source_max_bytes",
+                self.request.checker_source_max_bytes as u64,
+            ),
+            (
+                "request.checker_config_max_bytes",
+                self.request.checker_config_max_bytes as u64,
             ),
             (
                 "request.case_max_count",

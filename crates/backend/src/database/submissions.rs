@@ -1,6 +1,6 @@
 //! Owner-scoped reads, atomic creation, fixed tasks and conditional business-state writes.
 
-use acorn_protocol::worker::v1::{SubmitJobRequest, TestCase};
+use acorn_protocol::worker::v1::{CheckerLimits, SubmitJobRequest, TestCase};
 use sqlx::{AssertSqlSafe, MySql, MySqlConnection, Row, Transaction, mysql::MySqlRow};
 use uuid::Uuid;
 
@@ -434,7 +434,7 @@ async fn load_task(
     config: &Config,
 ) -> Result<JudgingTask> {
     validate_source(&source, config)?;
-    let language = sqlx::query("SELECT v.review_mode, l.cpu_time_ms, l.wall_time_ms, l.memory_kib FROM problem_versions v JOIN problem_version_languages l USING (problem_id, version_no) WHERE v.problem_id = ? AND v.version_no = ? AND l.language_id = ?")
+    let language = sqlx::query("SELECT v.review_mode, l.cpu_time_ms, l.wall_time_ms, l.memory_kib, c.source AS checker_source, v.checker_config_json, COALESCE(v.checker_cpu_time_ms, py.cpu_time_ms) AS checker_cpu_time_ms, COALESCE(v.checker_wall_time_ms, py.wall_time_ms) AS checker_wall_time_ms, COALESCE(v.checker_memory_kib, py.memory_kib) AS checker_memory_kib FROM problem_versions v JOIN problem_version_languages l USING (problem_id, version_no) JOIN checker_scripts c ON c.id = v.checker_script_id LEFT JOIN problem_version_languages py ON py.problem_id = v.problem_id AND py.version_no = v.version_no AND py.language_id = 'python' WHERE v.problem_id = ? AND v.version_no = ? AND l.language_id = ?")
         .bind(info.problem_id).bind(info.version_no).bind(&info.language_id).fetch_optional(&mut *connection).await?.ok_or(Error::LanguageNotAllowed)?;
     let limits = run_limits(&language)?;
     let policy = &config.request;
@@ -449,6 +449,31 @@ async fn load_task(
             "Stored task limits exceed deployment ceilings"
         )));
     }
+    let checker_source: Vec<u8> = language.try_get("checker_source")?;
+    if checker_source.is_empty() || checker_source.len() > policy.checker_source_max_bytes {
+        return Err(Error::Data(anyhow::anyhow!(
+            "Stored checker source is empty or exceeds deployment ceiling"
+        )));
+    }
+    std::str::from_utf8(&checker_source).map_err(|error| Error::Data(error.into()))?;
+    let checker_config_json: String = language.try_get("checker_config_json")?;
+    if checker_config_json.len() > policy.checker_config_max_bytes {
+        return Err(Error::Data(anyhow::anyhow!(
+            "Stored checker parameters exceed deployment ceiling"
+        )));
+    }
+    let parameters: serde_json::Value =
+        serde_json::from_str(&checker_config_json).map_err(|error| Error::Data(error.into()))?;
+    if !parameters.is_object() {
+        return Err(Error::Data(anyhow::anyhow!(
+            "Stored checker parameters must be a JSON object"
+        )));
+    }
+    let checker_limits = CheckerLimits {
+        cpu_time_ms: checker_limit(language.try_get("checker_cpu_time_ms")?)?,
+        wall_time_ms: checker_limit(language.try_get("checker_wall_time_ms")?)?,
+        memory_kib: checker_limit(language.try_get("checker_memory_kib")?)?,
+    };
     let rows = sqlx::query("SELECT case_index, input, expected_output FROM test_cases WHERE problem_id = ? AND version_no = ? ORDER BY case_index LIMIT ?")
         .bind(info.problem_id).bind(info.version_no).bind(i64::from(policy.case_max_count) + 1).fetch_all(connection).await?;
     if rows.is_empty() || rows.len() > policy.case_max_count as usize {
@@ -457,7 +482,11 @@ async fn load_task(
         )));
     }
     let mut cases = Vec::with_capacity(rows.len());
-    let mut payload = source.len();
+    let mut payload = source
+        .len()
+        .checked_add(checker_source.len())
+        .and_then(|size| size.checked_add(checker_config_json.len()))
+        .ok_or_else(|| Error::Data(anyhow::anyhow!("Task payload size overflow")))?;
     for (index, row) in rows.iter().enumerate() {
         if row.try_get::<i64, _>("case_index")? != index as i64 + 1 {
             return Err(Error::Data(anyhow::anyhow!(
@@ -497,6 +526,23 @@ async fn load_task(
             source,
             cases,
             run_limits: Some(limits),
+            checker_source,
+            checker_config_json,
+            checker_limits: Some(checker_limits),
         },
     })
+}
+
+/// Preserve an unset checker budget and reject values outside Isolate's positive range.
+fn checker_limit(value: Option<i64>) -> Result<Option<u64>> {
+    value
+        .map(|value| {
+            if !(1..=i64::from(i32::MAX)).contains(&value) {
+                return Err(Error::Data(anyhow::anyhow!(
+                    "Stored checker limit is outside Isolate's supported range"
+                )));
+            }
+            Ok(value as u64)
+        })
+        .transpose()
 }

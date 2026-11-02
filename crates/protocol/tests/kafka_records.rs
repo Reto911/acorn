@@ -3,13 +3,13 @@
 use acorn_protocol::{
     records::{self, MAX_EVENT_RECORD_BYTES, MAX_TASK_RECORD_BYTES, RecordError},
     worker::v1::{
-        GetJobReply, JobFailure, JobPhase, JobState, RunLimits, SubmitJobRequest, TestCase,
-        get_job_reply::Terminal,
+        CheckerLimits, GetJobReply, JobFailure, JobPhase, JobState, RunLimits, SubmitJobRequest,
+        TestCase, get_job_reply::Terminal,
     },
 };
 use prost::Message;
 
-/// Source and ordered case bytes survive encoding without text normalization or envelopes.
+/// User/checker sources, parameter text and ordered cases survive encoding without normalization.
 #[test]
 fn task_bytes_and_derived_key_are_preserved() {
     let task = SubmitJobRequest {
@@ -29,6 +29,13 @@ fn task_bytes_and_derived_key_are_preserved() {
         run_limits: Some(RunLimits {
             memory_kib: 1,
             ..Default::default()
+        }),
+        checker_source: "# 校验\r\nprint('ok')\n".as_bytes().to_vec(),
+        checker_config_json: "{ \"note\": \"参数\" }\n".into(),
+        checker_limits: Some(CheckerLimits {
+            cpu_time_ms: Some(1),
+            wall_time_ms: None,
+            memory_kib: Some(0),
         }),
     };
     let encoded = records::encode_task(&task, MAX_TASK_RECORD_BYTES).unwrap();

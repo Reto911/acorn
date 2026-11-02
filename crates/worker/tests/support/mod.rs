@@ -2,7 +2,7 @@
 
 use std::{fs, os::unix::fs::PermissionsExt};
 
-use acorn_protocol::worker::v1::{RunLimits, SubmitJobRequest, TestCase};
+use acorn_protocol::worker::v1::{CheckerLimits, RunLimits, SubmitJobRequest, TestCase};
 use acorn_worker::config::Config;
 
 /// Test-owned manager and files; only trusted test programs run on the host.
@@ -98,6 +98,21 @@ pub fn job(id: &str, language: &str, source: &str, cases: &[(&[u8], &[u8])]) -> 
             cpu_time_ms: 1000,
             wall_time_ms: 2000,
             memory_kib: 128 * 1024,
+        }),
+        checker_source: br#"import json
+import sys
+from pathlib import Path
+trailing = b"\t\n\v\f\r "
+actual = Path(sys.argv[3]).read_bytes()
+expected = Path(sys.argv[2]).read_bytes()
+print(json.dumps({"verdict": "AC" if actual.rstrip(trailing) == expected.rstrip(trailing) else "WA"}))
+"#
+        .to_vec(),
+        checker_config_json: "{}".into(),
+        checker_limits: Some(CheckerLimits {
+            cpu_time_ms: Some(1000),
+            wall_time_ms: Some(2000),
+            memory_kib: Some(128 * 1024),
         }),
     }
 }

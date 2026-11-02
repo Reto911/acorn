@@ -1,10 +1,36 @@
 //! Verify field presence and terminal variants across Protobuf encoding.
 
 use acorn_protocol::worker::v1::{
-    FailedCase, GetJobReply, JobFailure, JobPhase, JobState, JudgeResult, ResourceUsage, Verdict,
-    failed_case::Exit, get_job_reply::Terminal,
+    CheckerLimits, FailedCase, GetJobReply, JobFailure, JobPhase, JobState, JudgeResult,
+    ResourceUsage, SubmitJobRequest, Verdict, failed_case::Exit, get_job_reply::Terminal,
 };
 use prost::Message;
+
+/// Checker limit messages retain absence, empty messages and explicit zero without validation.
+#[test]
+fn checker_limit_presence_and_values_survive_encoding() {
+    for checker_limits in [
+        None,
+        Some(CheckerLimits::default()),
+        Some(CheckerLimits {
+            cpu_time_ms: Some(0),
+            wall_time_ms: Some(0),
+            memory_kib: Some(0),
+        }),
+        Some(CheckerLimits {
+            cpu_time_ms: Some(1),
+            wall_time_ms: Some(u64::MAX),
+            memory_kib: None,
+        }),
+    ] {
+        let task = SubmitJobRequest {
+            checker_limits,
+            ..Default::default()
+        };
+        let decoded = SubmitJobRequest::decode(task.encode_to_vec().as_slice()).unwrap();
+        assert_eq!(decoded.checker_limits, task.checker_limits);
+    }
+}
 
 /// Zero-valued statistics and exit codes must remain distinct from absent fields.
 #[test]

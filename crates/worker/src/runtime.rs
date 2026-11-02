@@ -93,7 +93,7 @@ impl WorkerService {
         Ok(())
     }
 
-    /// Check only new-request language, byte budgets, case count and resource ceilings.
+    /// Validate task data, checker inputs and resource limits at the admission boundary.
     pub(crate) fn validate_job(&self, request: &SubmitJobRequest) -> Result<(), Status> {
         if !matches!(request.language_id.as_str(), "c" | "python") {
             return Err(Status::invalid_argument("UnsupportedLanguage"));
@@ -101,12 +101,41 @@ impl WorkerService {
         let limits = &self.shared.config.request;
         if request.source.is_empty()
             || request.source.len() > limits.source_max_bytes
+            || request.checker_source.is_empty()
+            || request.checker_source.len() > limits.checker_source_max_bytes
+            || std::str::from_utf8(&request.checker_source).is_err()
+            || request.checker_config_json.len() > limits.checker_config_max_bytes
             || request.cases.is_empty()
             || request.cases.len() > limits.case_max_count
         {
             return Err(Status::invalid_argument("InvalidJob"));
         }
-        let mut payload = request.source.len();
+        if !serde_json::from_str::<serde_json::Value>(&request.checker_config_json)
+            .is_ok_and(|value| value.is_object())
+        {
+            return Err(Status::invalid_argument("InvalidJob"));
+        }
+        let Some(checker) = &request.checker_limits else {
+            return Err(Status::invalid_argument("InvalidJob"));
+        };
+        for value in [
+            checker.cpu_time_ms,
+            checker.wall_time_ms,
+            checker.memory_kib,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if value == 0 || value > i32::MAX as u64 {
+                return Err(Status::invalid_argument("InvalidJob"));
+            }
+        }
+        let mut payload = request
+            .source
+            .len()
+            .checked_add(request.checker_source.len())
+            .and_then(|size| size.checked_add(request.checker_config_json.len()))
+            .ok_or_else(|| Status::invalid_argument("InvalidJob"))?;
         for case in &request.cases {
             if case.input.len() > limits.input_max_bytes
                 || case.expected_output.len() > limits.expected_output_max_bytes
@@ -263,7 +292,7 @@ async fn execute(shared: Arc<Shared>, request: SubmitJobRequest, control: StageC
 mod tests {
     //! Admission validation retained after retiring the business RPC adapter.
     use super::*;
-    use acorn_protocol::worker::v1::{RunLimits, TestCase};
+    use acorn_protocol::worker::v1::{CheckerLimits, RunLimits, TestCase};
 
     /// Invalid language, limits and payload never register work; empty case bytes remain valid.
     #[test]
@@ -282,6 +311,9 @@ mod tests {
                 wall_time_ms: 1,
                 memory_kib: 1,
             }),
+            checker_source: b"pass".to_vec(),
+            checker_config_json: "{}".into(),
+            checker_limits: Some(CheckerLimits::default()),
         };
         assert!(worker.validate_job(&valid).is_ok());
         let mut language = valid.clone();
@@ -297,6 +329,90 @@ mod tests {
             );
         }
         assert!(worker.validate_id("").is_err());
+        assert!(worker.shared.jobs.lock().unwrap().records.is_empty());
+    }
+
+    /// Checker data and optional finite limits are validated without changing user ceilings.
+    #[test]
+    fn checker_data_limits_and_byte_budgets_are_enforced() {
+        let mut config =
+            Config::parse(include_str!("../../../config/worker.example.toml")).unwrap();
+        config.request.checker_source_max_bytes = 8;
+        config.request.checker_config_max_bytes = 8;
+        config.request.payload_max_bytes = 14;
+        let worker = WorkerService::new(config);
+        let valid = SubmitJobRequest {
+            job_id: "checker".into(),
+            language_id: "python".into(),
+            source: b"pass".to_vec(),
+            cases: vec![TestCase::default()],
+            run_limits: Some(RunLimits {
+                cpu_time_ms: 1,
+                wall_time_ms: 1,
+                memory_kib: 1,
+            }),
+            checker_source: b"#ok\npass".to_vec(),
+            checker_config_json: "{}".into(),
+            checker_limits: Some(CheckerLimits::default()),
+        };
+        assert!(worker.validate_job(&valid).is_ok());
+        let mut parameter_boundary = valid.clone();
+        parameter_boundary.checker_source = b"#".to_vec();
+        parameter_boundary.checker_config_json = "{\"x\":1} ".into();
+        assert!(worker.validate_job(&parameter_boundary).is_ok());
+        let mut invalid = Vec::new();
+        for source in [vec![], vec![0xff], b"#long\npass".to_vec()] {
+            let mut request = valid.clone();
+            request.checker_source = source;
+            invalid.push(request);
+        }
+        for parameters in ["", "{", "[]", "null", "{\"x\":1} ", "{}       "] {
+            let mut request = valid.clone();
+            request.checker_config_json = parameters.into();
+            invalid.push(request);
+        }
+        let mut missing = valid.clone();
+        missing.checker_limits = None;
+        invalid.push(missing);
+        for finite in [0, i32::MAX as u64 + 1] {
+            for checker in [
+                CheckerLimits {
+                    cpu_time_ms: Some(finite),
+                    ..Default::default()
+                },
+                CheckerLimits {
+                    wall_time_ms: Some(finite),
+                    ..Default::default()
+                },
+                CheckerLimits {
+                    memory_kib: Some(finite),
+                    ..Default::default()
+                },
+            ] {
+                let mut request = valid.clone();
+                request.checker_limits = Some(checker);
+                invalid.push(request);
+            }
+        }
+        let mut over_total = valid.clone();
+        over_total.cases[0].expected_output = vec![0];
+        invalid.push(over_total);
+        let mut user_limit = valid.clone();
+        user_limit.run_limits.as_mut().unwrap().cpu_time_ms =
+            worker.shared.config.execution.max_run_cpu_time_ms + 1;
+        invalid.push(user_limit);
+        for request in invalid {
+            let error = worker.validate_job(&request).unwrap_err();
+            assert_eq!(error.code(), tonic::Code::InvalidArgument);
+            assert_eq!(error.message(), "InvalidJob");
+        }
+        let mut finite = valid;
+        finite.checker_limits = Some(CheckerLimits {
+            cpu_time_ms: Some(i32::MAX as u64),
+            wall_time_ms: Some(1),
+            memory_kib: Some(i32::MAX as u64),
+        });
+        assert!(worker.validate_job(&finite).is_ok());
         assert!(worker.shared.jobs.lock().unwrap().records.is_empty());
     }
 }

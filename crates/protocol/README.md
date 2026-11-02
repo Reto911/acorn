@@ -8,7 +8,11 @@ acorn-protocol 提供后端与 Worker 共用的 Protobuf 消息、Tonic gRPC 客
 | ----------------- | ------------------------------------------------ |
 | `GetWorkerStatus` | 查询执行状态、停机标记及待 MQ 交接终态数量／容量 |
 
-Kafka 任务使用 `SubmitJobRequest`，运行与终态事件使用 `GetJobReply`，数据字段及编号保持不变。源码、用例输入和期望输出使用 `bytes`。CPU 与墙钟限额使用毫秒，内存限额使用 KiB；结果中的时间统计使用微秒，内存统计使用字节。可选统计字段保留“未提供”和数值 0 的区别，终态使用 `oneof` 区分判题结果与执行失败。
+Kafka 任务使用 `SubmitJobRequest`，运行与终态事件使用 `GetJobReply`。用户源码、checker 源码、用例输入和期望输出使用 `bytes`，checker 参数使用保存原始文本的 UTF-8 JSON 对象字符串。checker 源码、参数及限额按 Job 携带一次，字段号分别为 6、7、8，原字段号和结果结构保持不变。
+
+CPU 与墙钟限额使用毫秒，内存限额使用 KiB。用户 `RunLimits` 三项必须为正值并遵守 Worker 的 `max_run` 上限；`checker_limits` 消息必须存在，其三个 `optional uint64` 缺失表示该项不设限，空消息表示全部不设限。checker 的有限值必须处于 `1..=2147483647`，匹配 Isolate 的数值范围。编码层保留缺失、显式零及正值，业务合法性由接纳入口判断。
+
+结果中的时间统计使用微秒，内存统计使用字节。可选统计字段保留“未提供”和数值 0 的区别，终态使用 `oneof` 区分判题结果与执行失败。
 
 字段定义见 [worker.proto](../../proto/acorn/worker/v1/worker.proto)，业务语义见 [Worker RPC 契约](../../docs/01-worker-design.md#3-rpc-契约)。
 
@@ -65,4 +69,4 @@ use acorn_protocol::worker::v1::{
 cargo test -p acorn-protocol --locked
 ```
 
-测试检查 Protobuf 编解码中的可选字段及终态分支。格式、编译和 Clippy 命令见[根说明](../../README_zh-CN.md#开发检查)。
+测试检查源码、参数和用例的原始字节、checker 限额存在性、结果可选字段、终态分支及 Kafka 编码预算。格式、编译和 Clippy 命令见[根说明](../../README_zh-CN.md#开发检查)。

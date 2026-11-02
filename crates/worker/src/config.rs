@@ -66,14 +66,30 @@ pub struct RequestConfig {
     pub job_id_max_bytes: usize,
     /// Maximum source length in bytes.
     pub source_max_bytes: usize,
+    /// Maximum UTF-8 checker source length in bytes.
+    #[serde(default = "default_checker_source_max_bytes")]
+    pub checker_source_max_bytes: usize,
+    /// Maximum checker JSON object text length in UTF-8 bytes.
+    #[serde(default = "default_checker_config_max_bytes")]
+    pub checker_config_max_bytes: usize,
     /// Maximum number of ordered test cases.
     pub case_max_count: usize,
     /// Maximum input length per case in bytes.
     pub input_max_bytes: usize,
     /// Maximum expected output length per case in bytes.
     pub expected_output_max_bytes: usize,
-    /// Maximum combined source, input and answer length in bytes.
+    /// Maximum combined user/checker sources, checker parameters, inputs and answers.
     pub payload_max_bytes: usize,
+}
+
+/// Default maximum size of the Python checker source copied into a task.
+fn default_checker_source_max_bytes() -> usize {
+    65_536
+}
+
+/// Default maximum size of the task's UTF-8 checker parameter object.
+fn default_checker_config_max_bytes() -> usize {
+    16_384
 }
 
 /// Execution limits independent of the selected language.
@@ -222,6 +238,14 @@ impl Config {
             (
                 "request.source_max_bytes",
                 self.request.source_max_bytes as u64,
+            ),
+            (
+                "request.checker_source_max_bytes",
+                self.request.checker_source_max_bytes as u64,
+            ),
+            (
+                "request.checker_config_max_bytes",
+                self.request.checker_config_max_bytes as u64,
             ),
             ("request.case_max_count", self.request.case_max_count as u64),
             (

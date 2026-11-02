@@ -13,6 +13,19 @@ const EXAMPLE: &str = include_str!("../../../config/worker.example.toml");
 #[test]
 fn example_builds_both_language_plans() {
     let config = Config::parse(EXAMPLE).unwrap();
+    assert_eq!(config.request.checker_source_max_bytes, 65_536);
+    assert_eq!(config.request.checker_config_max_bytes, 16_384);
+    let defaults = EXAMPLE
+        .lines()
+        .filter(|line| {
+            !line.starts_with("checker_source_max_bytes =")
+                && !line.starts_with("checker_config_max_bytes =")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let defaults = Config::parse(&defaults).unwrap();
+    assert_eq!(defaults.request.checker_source_max_bytes, 65_536);
+    assert_eq!(defaults.request.checker_config_max_bytes, 16_384);
     let c = language::plan("c", &config).unwrap();
     assert_eq!(c.source_name, "main.c");
     assert_eq!(c.program_files, ProgramFiles::CompiledArtifact);
@@ -54,6 +67,18 @@ fn invalid_resource_settings_are_explicit_errors() {
             .to_string()
             .contains("execution.job_wall_time_ms")
     );
+    for (field, value) in [
+        ("checker_source_max_bytes", "65_536"),
+        ("checker_config_max_bytes", "16_384"),
+    ] {
+        let zero = EXAMPLE.replace(&format!("{field} = {value}"), &format!("{field} = 0"));
+        assert!(
+            Config::parse(&zero)
+                .unwrap_err()
+                .to_string()
+                .contains(&format!("request.{field}"))
+        );
+    }
 }
 
 /// A missing deployment executable must fail its startup tool check.

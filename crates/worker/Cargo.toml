@@ -22,6 +22,7 @@ clap.workspace = true
 nix.workspace = true
 rdkafka.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 tonic.workspace = true

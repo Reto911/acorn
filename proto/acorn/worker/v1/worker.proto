@@ -11,6 +11,14 @@ message SubmitJobRequest {
   bytes source = 3;
   repeated TestCase cases = 4;
   RunLimits run_limits = 5;
+  bytes checker_source = 6;
+  string checker_config_json = 7;
+  CheckerLimits checker_limits = 8;
+}
+message CheckerLimits {
+  optional uint64 cpu_time_ms = 1;
+  optional uint64 wall_time_ms = 2;
+  optional uint64 memory_kib = 3;
 }
 message TestCase {
   bytes input = 1;

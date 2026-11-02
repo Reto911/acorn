@@ -35,6 +35,8 @@ timeout_ms = 1_000
 
 [request]
 source_max_bytes = 65_536
+checker_source_max_bytes = 65_536
+checker_config_max_bytes = 16_384
 case_max_count = 128
 input_max_bytes = 65_536
 expected_output_max_bytes = 65_536

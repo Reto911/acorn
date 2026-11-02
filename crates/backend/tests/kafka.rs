@@ -6,8 +6,8 @@ use acorn_backend::{config::Config, scheduler::kafka as backend_kafka};
 use acorn_protocol::{
     records::{self, EncodedRecord},
     worker::v1::{
-        GetJobReply, JobFailure, JobPhase, JobState, RunLimits, SubmitJobRequest, TestCase,
-        get_job_reply::Terminal,
+        CheckerLimits, GetJobReply, JobFailure, JobPhase, JobState, RunLimits, SubmitJobRequest,
+        TestCase, get_job_reply::Terminal,
     },
 };
 use acorn_worker::kafka as worker_kafka;
@@ -135,8 +135,8 @@ async fn real_kafka_message_roundtrip() -> Result<()> {
             source: vec![b'#'; 65_536],
             cases: (1_u8..=127)
                 .map(|index| TestCase {
-                    input: vec![index; 32_768],
-                    expected_output: vec![255 - index; 32_768],
+                    input: vec![index; 32_767],
+                    expected_output: vec![255 - index; 32_767],
                 })
                 .collect(),
             run_limits: Some(RunLimits {
@@ -144,6 +144,9 @@ async fn real_kafka_message_roundtrip() -> Result<()> {
                 wall_time_ms: 2000,
                 memory_kib: 65536,
             }),
+            checker_source: b"print('{\"verdict\":\"AC\"}')\n".to_vec(),
+            checker_config_json: "{}".into(),
+            checker_limits: Some(CheckerLimits::default()),
         };
         let encoded = records::encode_task(&task, backend.kafka.max_task_record_bytes)?;
         let bytes = transfer(

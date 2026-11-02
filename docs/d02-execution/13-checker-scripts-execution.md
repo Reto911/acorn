@@ -4,14 +4,14 @@
 
 ## 1. 当前状态
 
-PS01 已完成结构版本 5、存储与初始化适配及相应检查，实际结果见第 5 节。PS02–PS06 尚未交付，任务分解见第 2.1、2.2 节；实际执行器继续使用原固定 trim 比较。
+PS01、PS02 已依次完成，交付结构版本 5、存储与初始化适配、完整 checker 任务合同、装配与两端接纳预算，实际检查见第 5、6 节。checker 执行、沙箱复用及新增示例题仍待 PS03–PS05，整体联调由 PS06 验收；实际执行器继续使用原固定 trim 比较。
 
 ## 2. 任务状态
 
 任务定义与依赖见[设计第 7 节](../13-checker-scripts-design.md#7-实施任务)。
 
 - [x] PS01 数据结构与存储。
-- [ ] PS02 协议、任务装配与预算。
+- [x] PS02 协议、任务装配与预算。
 - [ ] PS03 沙箱生命周期与文件对接。
 - [ ] PS04 checker 执行与结果说明。
 - [ ] PS05 预设、示例题与初始化说明。
@@ -35,13 +35,13 @@ PS01 中的最小 trim 种子是维持初始化可用所需的结构适配。PS0
 
 依赖 PS01，按[设计第 3 节](../13-checker-scripts-design.md#3-任务装配与消息)接入完整任务。复用既有 JudgingTask、数据库 load_task 和 Scheduler 发布流程。
 
-- [ ] **PS02.1 扩展 Proto 并生成共享类型。** 在 [worker.proto](../../proto/acorn/worker/v1/worker.proto)为 SubmitJobRequest 增加字段号 6–8 的 checker_source、checker_config_json、checker_limits，新增含三个 optional uint64 的 CheckerLimits，保留现有字段号和结果结构。按[现有生成流程](../../crates/protocol/README.md#构建与生成)重新构建生成代码，并同步受影响的任务构造点；生成输出由 Cargo／Prost 管理。
-- [ ] **PS02.2 装配脚本副本与有效限额。** 依赖 PS01、PS02.1；在[数据库任务装配](../../crates/backend/src/database/submissions.rs)按提交固定版本读取脚本源码、版本参数和覆盖值，以及该版本可选的 Python 语言限额。每项独立采用“题目覆盖 → Python 同项限额 → 不设限”，保留 NULL 与正值的区别，拒绝不能转换为沙箱数值的有限值。即使提交语言为 C，也从 Python 行取得 checker 默认值；缺少 Python 行不妨碍装配。脚本只在 Job 级携带，沿用短连接／事务和自有数据返回方式。
-- [ ] **PS02.3 衔接全部装配入口与副本语义。** 依赖 PS02.2；核对新建、queued 幂等复用／重交接及启动装入均使用同一 load_task 合同。新建完成装配后将完整任务交给[创建服务](../../crates/backend/src/submissions/creation.rs)与 [Scheduler](../../crates/backend/src/scheduler/mod.rs)，发布端直接编码内存任务。dispatching、running 启动时仅恢复等待状态。内存任务和已编码消息保留装配时的源码与参数，确实需要重新装配 queued 时读取当前脚本。
-- [ ] **PS02.4 接入后端配置与任务预算。** 在[后端配置](../../crates/backend/src/config.rs)及[示例](../../config/backend.example.toml)增加 request.checker_source_max_bytes = 65536 和 checker_config_max_bytes = 16384。装配时校验 checker 源码非空、UTF-8 和单项预算，校验参数为 UTF-8 JSON 对象并满足文本字节预算；合计预算在现有用户源码、用例输入和参考数据上计入这两项，沿用 checked_add 与错误报告。完整 Protobuf 继续通过现有 Kafka 编码预算检查，普通 HTTP DTO 和 LLM 输入保持既有投影。
-- [ ] **PS02.5 接入 Worker 接纳与可选限额校验。** 依赖 PS02.1；同步 [Worker 配置](../../crates/worker/src/config.rs)、[示例](../../config/worker.example.toml)和[公共接纳入口](../../crates/worker/src/runtime.rs)的新增请求预算、UTF-8、JSON 对象和合计预算校验。checker_limits 消息必须存在，空消息表示三项均不设限；存在的有限值必须为正且可由沙箱表示。用户 RunLimits 仍必须为正并服从原 max_run 上限；checker 未设限项保持缺失。沿用 InvalidJob 接纳失败合同，Python 语法与运行错误留给执行阶段处理。
-- [ ] **PS02.6 完成协议与装配定向回归。** 依赖 PS02.2–PS02.5；按第 4.2 节扩展现有协议、数据库、配置、Worker 和 workflow 检查，同步所有受影响的任务夹具。覆盖新增字段往返、限额缺失语义、共享脚本与版本参数、源码副本与重新装配、三类装配入口，以及新增字节预算和公开响应边界；复用原有幂等、固定版本和 Kafka 大消息检查，不重复完整故障矩阵。
-- [ ] **PS02.7 同步合同并收口阶段交付。** 依赖 PS02.6；同步受影响的[Worker 设计](../01-worker-design.md)、[数据库设计](../02-database-design.md)、[后端设计](../03-backend-design.md)、[Kafka 设计](../10-kafka-judging-design.md)、协议及服务说明和两端配置示例。按第 4.3 节完成格式、编译、Clippy 与相关测试，在本记录登记实际通过、失败和未测范围；所有新写 Rust 项补齐 Rustdoc。
+- [x] **PS02.1 扩展 Proto 并生成共享类型。** 在 [worker.proto](../../proto/acorn/worker/v1/worker.proto)为 SubmitJobRequest 增加字段号 6–8 的 checker_source、checker_config_json、checker_limits，新增含三个 optional uint64 的 CheckerLimits，保留现有字段号和结果结构。按[现有生成流程](../../crates/protocol/README.md#构建与生成)重新构建生成代码，并同步受影响的任务构造点；生成输出由 Cargo／Prost 管理。
+- [x] **PS02.2 装配脚本副本与有效限额。** 依赖 PS01、PS02.1；在[数据库任务装配](../../crates/backend/src/database/submissions.rs)按提交固定版本读取脚本源码、版本参数和覆盖值，以及该版本可选的 Python 语言限额。每项独立采用“题目覆盖 → Python 同项限额 → 不设限”，保留 NULL 与正值的区别，拒绝不能转换为沙箱数值的有限值。即使提交语言为 C，也从 Python 行取得 checker 默认值；缺少 Python 行不妨碍装配。脚本只在 Job 级携带，沿用短连接／事务和自有数据返回方式。
+- [x] **PS02.3 衔接全部装配入口与副本语义。** 依赖 PS02.2；核对新建、queued 幂等复用／重交接及启动装入均使用同一 load_task 合同。新建完成装配后将完整任务交给[创建服务](../../crates/backend/src/submissions/creation.rs)与 [Scheduler](../../crates/backend/src/scheduler/mod.rs)，发布端直接编码内存任务。dispatching、running 启动时仅恢复等待状态。内存任务和已编码消息保留装配时的源码与参数，确实需要重新装配 queued 时读取当前脚本。
+- [x] **PS02.4 接入后端配置与任务预算。** 在[后端配置](../../crates/backend/src/config.rs)及[示例](../../config/backend.example.toml)增加 request.checker_source_max_bytes = 65536 和 checker_config_max_bytes = 16384。装配时校验 checker 源码非空、UTF-8 和单项预算，校验参数为 UTF-8 JSON 对象并满足文本字节预算；合计预算在现有用户源码、用例输入和参考数据上计入这两项，沿用 checked_add 与错误报告。完整 Protobuf 继续通过现有 Kafka 编码预算检查，普通 HTTP DTO 和 LLM 输入保持既有投影。
+- [x] **PS02.5 接入 Worker 接纳与可选限额校验。** 依赖 PS02.1；同步 [Worker 配置](../../crates/worker/src/config.rs)、[示例](../../config/worker.example.toml)和[公共接纳入口](../../crates/worker/src/runtime.rs)的新增请求预算、UTF-8、JSON 对象和合计预算校验。checker_limits 消息必须存在，空消息表示三项均不设限；存在的有限值必须为正且可由沙箱表示。用户 RunLimits 仍必须为正并服从原 max_run 上限；checker 未设限项保持缺失。沿用 InvalidJob 接纳失败合同，Python 语法与运行错误留给执行阶段处理。
+- [x] **PS02.6 完成协议与装配定向回归。** 依赖 PS02.2–PS02.5；按第 4.2 节扩展现有协议、数据库、配置、Worker 和 workflow 检查，同步所有受影响的任务夹具。覆盖新增字段往返、限额缺失语义、共享脚本与版本参数、源码副本与重新装配、三类装配入口，以及新增字节预算和公开响应边界；复用原有幂等、固定版本和 Kafka 大消息检查，不重复完整故障矩阵。
+- [x] **PS02.7 同步合同并收口阶段交付。** 依赖 PS02.6；同步受影响的[Worker 设计](../01-worker-design.md)、[数据库设计](../02-database-design.md)、[后端设计](../03-backend-design.md)、[Kafka 设计](../10-kafka-judging-design.md)、协议及服务说明和两端配置示例。按第 4.3 节完成格式、编译、Clippy 与相关测试，在本记录登记实际通过、失败和未测范围；所有新写 Rust 项补齐 Rustdoc。
 
 PS02.1 可在 PS01 数据库工作期间先推进协议定义；装配接线须在 PS01 就绪后完成。PS02.4、PS02.5 可以分别推进，随后完成调用方回归和阶段检查。完成条件为所有装配入口产生同一合同的完整任务，源码／参数副本、可选限额与两端预算经过定向验证。
 
@@ -113,3 +113,33 @@ PS01 主要执行后端相关检查；PS02 增加协议及 Worker 相关检查�
 | cargo test -p acorn-backend --locked --lib --test config_results --test database --test workflow -- --test-threads=1 | 22 项库测试、10 项配置测试、14 项真实 MySQL 数据库测试和 32 项常规 workflow 通过；12 项需 Kafka／Isolate 等环境的集成用例保持忽略。 |
 
 数据库及 workflow 使用 MySQL 8.4.11，每例以正式 SQL 初始化独立测试库并在完成后删除。开发临时入口按既有约定向测试进程供给连接配置及密码，正式程序和测试未增加 .env 加载。格式、编译、Clippy 和实际检查通过后完成 PS01；未运行 checker、真实 Kafka／Isolate、浏览器或模型验收，PS02–PS06 当时仍未交付。
+
+## 6. PS02 实施与检查
+
+SubmitJobRequest 新增字段号 6–8 的 checker_source、checker_config_json 和 checker_limits，CheckerLimits 三项使用 optional uint64；原字段号及结果结构保持不变。按既有 Cargo／Prost 构建生成代码。Worker 引用 workspace 已有 serde_json，Cargo.lock 通过 Cargo 刷新，仅增加该 crate 的依赖关系。
+
+后端 load_task 联查固定题目版本、脚本源码与参数，以及逐项 COALESCE 的覆盖值／同版本 Python 限额。缺少 Python 行时保留对应 None；即使提交语言为 C，也使用 Python 默认。有限 checker 值要求 1..=2147483647，不套用用户 max_run 门限。新建、queued 幂等复用／重交接和启动装入继续共用该入口，Scheduler 使用完整内存任务，dispatching／running 启动只恢复等待身份。
+
+后端和 Worker 均增加默认 65536／16384 字节的 checker 源码／参数预算，验证源码非空 UTF-8、参数 JSON 对象和新增数据参与原始载荷合计。Worker 拒绝缺少 checker_limits 消息，接受空消息，并独立验证三项有限值；用户 RunLimits 正值和 max_run 约束保持不变。完整 Protobuf 编码仍由既有 Kafka 记录预算检查。
+
+定向检查扩展既有协议、配置、固定版本、启动恢复与 Worker 接纳用例，并新增一个合并数据库场景验证限额、非法输入和精确字节边界。已验证数据库 UPDATE 不改变装配任务或已编码消息，queued 重新装配读取当前源码；共享脚本的不同题目版本分别取得自己的参数。公开题目响应增加私有字段不泄漏断言，LLM 沿用既有明确输入投影及审查 workflow。所有合法任务夹具同步新字段；用于真实 Kafka 消息往返的夹具也已适配，但本轮未运行其真实 broker 检查。
+
+| 实际检查                                                                                                             | 结果与范围                                                                                                |
+| -------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| cargo build -p acorn-protocol --locked                                                                               | 通过，生成新协议类型。                                                                                    |
+| cargo fmt --all -- --check                                                                                           | 协议测试导入经统一格式化后通过。                                                                          |
+| cargo check --workspace --all-targets --locked                                                                       | 通过。                                                                                                    |
+| cargo clippy --workspace --all-targets --locked -- -D warnings                                                       | 通过。                                                                                                    |
+| cargo test -p acorn-protocol --locked                                                                                | 6 项通过，覆盖新增字段、存在性和编码预算。                                                                |
+| cargo test -p acorn-worker --locked                                                                                  | 22 项常规检查通过；7 项需要真实 Kafka／Isolate 的检查保持忽略，受控执行器检查不作为隔离证据。             |
+| cargo test -p acorn-backend --locked --lib --test config_results --test database --test workflow -- --test-threads=1 | 22 项库测试、10 项配置测试、15 项真实 MySQL 数据库测试及 32 项常规 workflow 通过；12 项集成用例保持忽略。 |
+
+数据库验证继续使用独立测试库和正式初始化 SQL，MySQL 为 8.4.11。测试仅在其自有库临时解除参数 CHECK 来验证后端自身的 JSON 边界，完成后恢复约束；所有正常及拒绝创建的数量核对通过，测试库正常收尾。
+
+PS01、PS02 的任务及分解清单已完成。CV05 的共享引用、版本参数和装配副本要求，以及 CV06 的限额来源／缺失／可表示范围、CV08 的原始／编码预算与既有 HTTP／审查合同已有对应检查。实际 checker 运行、独立限额生效、Job 总期限、双环境复用及真实 Kafka → Worker／Isolate → MySQL 流程仍待 PS03–PS06，本轮未运行真实 Kafka／Isolate、浏览器、外部模型、静态链接构建或部署验收。
+
+17 份变更 Markdown 通过 Prettier，377 个本地链接有效，其中 158 个包含锚点；333 个原有标题按原顺序保留，新增章节、任务编号和代码围栏检查通过。主任务为 2 项完成／4 项未完成，12 项 PS01／PS02 分解均完成；中英文根说明互链及 15 组命令／配置代码块一致，仅提示和占位说明按语言翻译。git diff --check 通过。
+
+PS01 的结构与存储改动已单独提交为 f0f3bb7；PS02 的协议、完整任务装配与接纳预算随本节单独提交。拆分后的 PS01 暂存内容另经 cargo fmt --all -- --check 和 cargo check --workspace --all-targets --locked 检查通过，完整工作树保留已验证的 PS02 实现。
+
+拆分检查曾复用同一构建目录，随后首次检查 PS02 时读取旧协议生成缓存，出现缺少 checker 字段的编译错误。通过 cargo clean -p acorn-protocol 清理该包构建缓存并按现有流程重新生成后，cargo build -p acorn-protocol --locked、cargo check --workspace --all-targets --locked 及 6 项协议测试均通过；源码未作修改，首次失败保留在本记录。

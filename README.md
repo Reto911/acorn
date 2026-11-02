@@ -217,6 +217,8 @@ Both the backend and Worker read TOML through `--config <PATH>`; restart the ser
 | Backend `database.lock_wait_timeout_secs` | `3`                          | Session row and metadata lock wait                 |
 | Backend `scheduler.workers`               | `["http://127.0.0.1:50051"]` | Worker endpoint list                               |
 | Backend `scheduler.pending_max_count`     | `128`                        | Capacity for submissions awaiting Worker admission |
+| Both `request.checker_source_max_bytes`   | `65536`                      | Checker source byte limit                          |
+| Both `request.checker_config_max_bytes`   | `16384`                      | Checker JSON parameter byte limit                  |
 | Backend `llm_review.enabled`              | `false`                      | Enable LLM reviews                                 |
 | Frontend `API_PROXY_TARGET`               | `http://127.0.0.1:8080`      | API proxy target for the development server        |
 | Frontend `VITE_SOURCE_MAX_BYTES`          | `65536`                      | Source byte limit checked before submission        |
@@ -225,7 +227,7 @@ Both the backend and Worker read TOML through `--config <PATH>`; restart the ser
 
 The backend reads `MYSQL_PASSWORD` from its process environment and uses MySQL with SSL disabled. It does not load `.env` automatically. Connections use utf8mb4_0900_bin, READ COMMITTED, strict SQL mode, and finite lock waits.
 
-Align request, message, and result budgets between the backend and all Workers. Field suffixes `_ms`, `_kib`, and `_bytes` indicate units. See the [backend example](config/backend.example.toml), [Worker example](config/worker.example.toml), and [frontend configuration guide](web/README.md#配置与-api-代理) for the complete settings.
+Align request, message, and result budgets between the backend and all Workers. The positive `request.checker_source_max_bytes` and `request.checker_config_max_bytes` settings default to 65536 and 16384 bytes. The raw `request.payload_max_bytes` total includes user source, case input and reference data, checker source, and checker parameters; Kafka separately checks the complete encoded task size. Field suffixes `_ms`, `_kib`, and `_bytes` indicate units. See the [backend example](config/backend.example.toml), [Worker example](config/worker.example.toml), and [frontend configuration guide](web/README.md#配置与-api-代理) for the complete settings.
 
 Both backend and Worker configurations require `[kafka]` with bootstrap endpoints, both topics, and `group_id` for their own consumer group; budgets have defaults. The backend also provides independent `[worker_membership]` observation settings. See the [backend guide](crates/backend/README.md#kafka-客户端配置), [Worker guide](crates/worker/README.md#kafka-客户端配置), and [protocol guide](crates/protocol/README.md#kafka-消息编解码) for fields, client options, and message codecs. For configurations using the earlier Kafka field names, rename `[kafka].events_group_id` (backend) or `[kafka].tasks_group_id` (Worker) to `group_id`, preserving its value. For existing configurations, merge the example `[kafka]` section into the file passed to `--config`, preserving database, review, and other settings. `[worker_membership]` may be omitted to use its defaults.
 

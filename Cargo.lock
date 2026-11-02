@@ -67,6 +67,7 @@ dependencies = [
  "nix",
  "rdkafka",
  "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "toml",
