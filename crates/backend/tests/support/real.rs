@@ -42,10 +42,12 @@ pub struct RealWorker {
 
 impl RealWorker {
     /// Bind status transport and keep the Kafka result queue bounded to one terminal.
-    async fn start(box_id: u32, broker: &super::broker::Broker) -> Self {
+    async fn start(box_id: u32, checker_box_id: u32, broker: &super::broker::Broker) -> Self {
         let mut config =
             WorkerConfig::parse(include_str!("../../../../config/worker.example.toml")).unwrap();
         config.sandbox.box_id = box_id;
+        config.sandbox.checker_box_id = checker_box_id;
+        config.validate().unwrap();
         config.results.max_unacknowledged_results = 1;
         config.kafka = broker.config.clone();
         config.kafka.group_id = broker.task_group.clone();
@@ -90,7 +92,7 @@ pub struct RealHarness {
     pub fixture: Fixture,
     /// Scheduler state used to wait until persistence and the bounded event handoff have completed.
     pub scheduler: Scheduler,
-    /// Independent Workers, each owning its explicitly selected Isolate box.
+    /// Independent Workers, each owning its explicitly selected user/checker box pair.
     pub workers: Vec<RealWorker>,
     /// Owned topic pair and initial offsets for both services.
     pub broker: super::broker::Broker,
@@ -120,12 +122,21 @@ pub struct RealHarness {
 
 impl RealHarness {
     /// Assemble production services, keeping periodic retry outside the acceptance wait.
-    pub async fn start(box_ids: &[u32]) -> Self {
+    pub async fn start(box_ids: &[(u32, u32)]) -> Self {
+        let unique: std::collections::HashSet<_> = box_ids
+            .iter()
+            .flat_map(|&(user, checker)| [user, checker])
+            .collect();
+        assert_eq!(
+            unique.len(),
+            box_ids.len() * 2,
+            "All real Worker box IDs must differ"
+        );
         let mut fixture = Fixture::new().await;
         let broker = super::broker::Broker::start(&mut fixture).await;
         let mut workers = Vec::new();
-        for &box_id in box_ids {
-            workers.push(RealWorker::start(box_id, &broker).await);
+        for &(box_id, checker_box_id) in box_ids {
+            workers.push(RealWorker::start(box_id, checker_box_id, &broker).await);
         }
         broker.assigned(box_ids.len()).await;
         fixture.config.scheduler.workers = workers.iter().map(|w| w.address.clone()).collect();

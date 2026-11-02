@@ -289,18 +289,18 @@ ACORN_TEST_DATABASE_CONFIG=/path/to/mysql-test.toml \
 
 启用 binlog 时，服务器还须允许该账户创建测试触发器，否则可能返回 1419。由管理员预先准备开发实例，所需设置及影响范围见[迁移测试环境说明](../../docs/09-mysql-migration-design.md#112-命令与环境)；测试本身不修改服务器全局变量。
 
-使用已配置 Kafka 和沙箱的主机检查真实 Worker 链路，选择空闲的专用 box ID：
+使用已配置 Kafka 和沙箱的主机检查真实 Worker 链路，为 Worker 选择两个空闲的专用 box ID：
 
 ```sh
-ACORN_TEST_KAFKA_SERVERS=localhost:9092 ACORN_TEST_DATABASE_CONFIG=/path/to/mysql-test.toml ACORN_ISOLATE_BOX_ID=204 \
+ACORN_TEST_KAFKA_SERVERS=localhost:9092 ACORN_TEST_DATABASE_CONFIG=/path/to/mysql-test.toml ACORN_ISOLATE_BOX_ID=204 ACORN_CHECKER_BOX_ID=205 \
   cargo test -p acorn-backend --locked --test workflow real_http_worker_acceptance -- --ignored --nocapture
 ```
 
-双 Worker 并行检查还需第二个空闲的专用 box ID，两者不能相同：
+双 Worker 并行检查需分配四个互不冲突的专用 box ID：
 
 ```sh
 ACORN_TEST_KAFKA_SERVERS=localhost:9092 ACORN_TEST_DATABASE_CONFIG=/path/to/mysql-test.toml \
-  ACORN_ISOLATE_BOX_ID=204 ACORN_ISOLATE_BOX_ID_2=210 \
+  ACORN_ISOLATE_BOX_ID=204 ACORN_CHECKER_BOX_ID=205 ACORN_ISOLATE_BOX_ID_2=210 ACORN_CHECKER_BOX_ID_2=211 \
   cargo test -p acorn-backend --locked --test workflow real_two_workers_overlap -- --ignored --nocapture
 ```
 

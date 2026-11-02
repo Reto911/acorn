@@ -1,9 +1,9 @@
-//! Isolate lifecycle and bounded asynchronous I/O for one stage at a time.
+//! Reusable Isolate environments and bounded asynchronous I/O for serial processes.
 
 use std::{
     fs::OpenOptions,
     io::Read,
-    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Component, Path, PathBuf},
     process::{ExitStatus, Stdio},
     time::Duration,
@@ -30,7 +30,7 @@ use super::{
 
 /// Serial stage backend; a stop failure permanently retains this instance's slot.
 ///
-/// Callers must await `run` to completion and request stops through `StageControl`,
+/// Callers must await `run` or `run_in_environment` to completion and request stops through `StageControl`,
 /// rather than aborting its future. Cancellation during execution also leaves the
 /// instance occupied and private files retained; there is no automatic recovery.
 pub struct IsolateSandbox {
@@ -40,6 +40,10 @@ pub struct IsolateSandbox {
     occupied: bool,
     /// Keep an unconfirmed manager handle alive without sending SIGKILL on drop.
     retained_manager: Option<Child>,
+    /// Trusted Isolate root after successful initialization; reused until explicit cleanup.
+    root: Option<PathBuf>,
+    /// Worker-owned metadata retained for the entire environment lifetime.
+    workspace: Option<PathBuf>,
 }
 
 impl IsolateSandbox {
@@ -49,6 +53,8 @@ impl IsolateSandbox {
             config,
             occupied: false,
             retained_manager: None,
+            root: None,
+            workspace: None,
         }
     }
 
@@ -57,31 +63,71 @@ impl IsolateSandbox {
         !self.occupied
     }
 
-    /// Initialize, copy, execute, confirm stopping, export and attempt cleanup.
+    /// Execute a standalone stage, then clean its stopped environment, as used by compilation.
     pub async fn run(
+        &mut self,
+        spec: SandboxRunSpec,
+        control: StageControl,
+    ) -> std::result::Result<SandboxRunOutcome, SandboxError> {
+        let result = self.run_in_environment(spec, control).await;
+        if self.is_available() {
+            self.cleanup().await?;
+        }
+        result
+    }
+
+    /// Initialize on first use and run a new process, retaining the environment for later cases.
+    ///
+    /// Callers finish a Job through `cleanup`; no environment crosses Job boundaries.
+    pub async fn run_in_environment(
         &mut self,
         spec: SandboxRunSpec,
         mut control: StageControl,
     ) -> std::result::Result<SandboxRunOutcome, SandboxError> {
         if self.occupied {
-            return Err(SandboxError {
-                kind: SandboxErrorKind::StopUnconfirmed,
-                source: anyhow::anyhow!(
-                    "Isolate execution slot is retained after an unconfirmed stop"
-                ),
-                retained_workspace: None,
-                stop_reason: None,
-            });
+            return Err(stop_error(anyhow::anyhow!(
+                "Isolate execution slot is retained after an unconfirmed stop"
+            )));
         }
         validate(&spec, &self.config).map_err(execution_error)?;
-        // Explicit removal below is essential: dropping a future must not delete
-        // files that an unconfirmed execution may still be using.
+        if let Some(reason) = control.current_stop() {
+            return Err(execution_error(anyhow::anyhow!(
+                "Stage stopped before initialization: {reason:?}"
+            ))
+            .with_stop(Some(reason)));
+        }
+        if self.root.is_none() {
+            self.initialize(&mut control).await?;
+        }
+        let root = self.root.as_ref().expect("initialized environment").clone();
+        let workspace = self
+            .workspace
+            .as_ref()
+            .expect("environment metadata")
+            .clone();
+        self.run_initialized(&root, &workspace, &spec, &mut control)
+            .await
+            .map_err(|mut error| {
+                if error.kind == SandboxErrorKind::StopUnconfirmed {
+                    error.retained_workspace = Some(workspace);
+                }
+                error
+            })
+    }
+
+    /// Acquire one quota-backed environment and metadata directory for this Job.
+    async fn initialize(
+        &mut self,
+        control: &mut StageControl,
+    ) -> std::result::Result<(), SandboxError> {
+        // Explicit cleanup keeps metadata alive if an execution future is dropped.
         let workspace = tempfile::Builder::new()
-            .prefix("acorn-stage-")
+            .prefix("acorn-environment-")
             .tempdir()
-            .context("Create private stage metadata directory")
+            .context("Create private environment metadata directory")
             .map_err(execution_error)?
             .keep();
+        self.workspace = Some(workspace);
         let mut init = self.command("--init");
         init.arg(format!(
             "--quota={},{}",
@@ -101,27 +147,9 @@ impl IsolateSandbox {
                 Err(anyhow::anyhow!("Stage stopped during initialization: {reason:?}"))
             },
         };
-        let result = match initialized {
-            Ok(root) => {
-                self.run_initialized(&root, &workspace, &spec, &mut control)
-                    .await
-            }
-            Err(error) => Err(execution_error(error).with_stop(early_stop)),
-        };
-        if result
-            .as_ref()
-            .is_err_and(|error| error.kind == SandboxErrorKind::StopUnconfirmed)
-        {
-            return result.map_err(|mut error| {
-                error.retained_workspace = Some(workspace);
-                error
-            });
-        }
-        self.cleanup().await;
-        if let Err(error) = tokio::fs::remove_dir_all(&workspace).await {
-            tracing::warn!(path = %workspace.display(), %error, "Failed to remove stopped stage metadata");
-        }
-        result
+        self.root =
+            Some(initialized.map_err(|error| execution_error(error).with_stop(early_stop))?);
+        Ok(())
     }
 
     /// Configure all Isolate operations with identical box ownership and cgroup mode.
@@ -149,18 +177,9 @@ impl IsolateSandbox {
     ) -> std::result::Result<SandboxRunOutcome, SandboxError> {
         let work = root.join("box");
         for file in &spec.files {
-            let path = work.join(&file.name);
-            tokio::fs::write(&path, &file.bytes)
+            replace_file(&work.join(&file.name), &file.bytes, file.executable)
                 .await
-                .context("Copy stage input file")
                 .map_err(execution_error)?;
-            tokio::fs::set_permissions(
-                &path,
-                std::fs::Permissions::from_mode(if file.executable { 0o700 } else { 0o600 }),
-            )
-            .await
-            .context("Set stage input permissions")
-            .map_err(execution_error)?;
         }
         if let Some(reason) = control.current_stop() {
             return Err(execution_error(anyhow::anyhow!(
@@ -169,18 +188,28 @@ impl IsolateSandbox {
             .with_stop(Some(reason)));
         }
         let meta_path = workspace.join("metadata");
+        tokio::fs::write(&meta_path, b"")
+            .await
+            .context("Clear previous execution metadata")
+            .map_err(execution_error)?;
         let mut command = self.command("--run");
         command.args([
             "--silent".to_owned(),
             format!("--meta={}", meta_path.display()),
-            format!("--time={}", seconds(spec.limits.cpu_time_ms)),
-            format!("--wall-time={}", seconds(spec.limits.wall_time_ms)),
-            format!("--cg-mem={}", spec.limits.memory_kib),
             format!("--processes={}", spec.limits.process_max_count),
             format!("--open-files={}", self.config.fd_max_count),
             format!("--fsize={}", self.config.file_size_max_kib),
             "--dir=/dev/shm:tmp".to_owned(),
         ]);
+        if let Some(value) = spec.limits.cpu_time_ms {
+            command.arg(format!("--time={}", seconds(value)));
+        }
+        if let Some(value) = spec.limits.wall_time_ms {
+            command.arg(format!("--wall-time={}", seconds(value)));
+        }
+        if let Some(value) = spec.limits.memory_kib {
+            command.arg(format!("--cg-mem={value}"));
+        }
         for (key, value) in &spec.command.environment {
             command.arg(format!("--env={key}={value}"));
         }
@@ -242,8 +271,19 @@ impl IsolateSandbox {
         })
     }
 
-    /// Cleanup failures after a safe stop are warnings and do not change the result.
-    async fn cleanup(&self) {
+    /// Release a stopped environment; cleanup failures warn, while an unconfirmed stop refuses release.
+    pub async fn cleanup(&mut self) -> std::result::Result<(), SandboxError> {
+        if self.occupied {
+            let mut error = stop_error(anyhow::anyhow!(
+                "Cannot clean an environment while execution stop remains unconfirmed"
+            ));
+            error.retained_workspace = self.workspace.clone();
+            return Err(error);
+        }
+        let Some(workspace) = self.workspace.take() else {
+            return Ok(());
+        };
+        self.root = None;
         let mut command = self.command("--cleanup");
         command.kill_on_drop(true);
         match timeout(
@@ -261,6 +301,10 @@ impl IsolateSandbox {
             }
             Err(_) => tracing::warn!(box_id = self.config.box_id, "Isolate cleanup timed out"),
         }
+        if let Err(error) = tokio::fs::remove_dir_all(&workspace).await {
+            tracing::warn!(box_id = self.config.box_id, %error, "Failed to remove stopped environment metadata");
+        }
+        Ok(())
     }
 }
 
@@ -392,10 +436,20 @@ fn validate(spec: &SandboxRunSpec, config: &SandboxConfig) -> Result<()> {
         filename(&artifact.name)?;
         ensure!(artifact.max_bytes > 0, "Artifact budget must be positive");
     }
+    for value in [
+        spec.limits.cpu_time_ms,
+        spec.limits.wall_time_ms,
+        spec.limits.memory_kib,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        ensure!(
+            value > 0 && value <= i32::MAX as u64,
+            "Stage limit is outside Isolate's supported range"
+        );
+    }
     for (name, value) in [
-        ("CPU milliseconds", spec.limits.cpu_time_ms),
-        ("wall milliseconds", spec.limits.wall_time_ms),
-        ("memory KiB", spec.limits.memory_kib),
         ("process count", u64::from(spec.limits.process_max_count)),
         ("file size KiB", config.file_size_max_kib),
         ("FD count", u64::from(config.fd_max_count)),
@@ -418,6 +472,24 @@ fn filename(name: &str) -> Result<()> {
         "Stage file must have a single relative filename"
     );
     Ok(())
+}
+
+/// Replace only a fixed entry without following a leftover link or reusing its inode.
+async fn replace_file(path: &Path, bytes: &[u8], executable: bool) -> Result<()> {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => (),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+        Err(error) => return Err(error).context("Remove previous fixed input entry"),
+    }
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(if executable { 0o700 } else { 0o600 })
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(path)
+        .await
+        .context("Create independent stage input file")?;
+    file.write_all(bytes).await.context("Copy stage input file")
 }
 
 /// Serialize millisecond budgets into Isolate's fractional seconds.

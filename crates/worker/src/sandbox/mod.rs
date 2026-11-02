@@ -1,4 +1,4 @@
-//! Complete, serial Isolate stages with bounded output and explicit stop failures.
+//! Serial Isolate execution in reusable environments with explicit safe cleanup.
 
 mod isolate;
 mod metadata;
@@ -12,7 +12,7 @@ use crate::language::{CommandPlan, StageLimits};
 
 pub use isolate::IsolateSandbox;
 
-/// An independent file copied into a fresh stage under a deployment-chosen name.
+/// An independent file restored before execution under a deployment-chosen name.
 #[derive(Debug)]
 pub struct SandboxFile {
     /// Single relative filename; never derived from a Job ID or user path.
@@ -54,7 +54,7 @@ pub struct ArtifactSpec {
 pub struct SandboxRunSpec {
     /// Deployment-controlled executable, arguments and finite environment.
     pub command: CommandPlan,
-    /// Independent copies placed in the newly initialized working directory.
+    /// Independent copies replacing only these fixed entries in the environment.
     pub files: Vec<SandboxFile>,
     /// Only the current stage's standard input.
     pub stdin: Vec<u8>,
@@ -95,7 +95,7 @@ pub struct ResourceUsage {
     pub cpu_time_us: Option<u64>,
     /// Elapsed execution time in microseconds.
     pub wall_time_us: Option<u64>,
-    /// Peak cgroup memory in bytes, without substituting single-process RSS.
+    /// Cgroup historical peak bytes within this environment, without substituting RSS.
     pub memory_bytes: Option<u64>,
 }
 

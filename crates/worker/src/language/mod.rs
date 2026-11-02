@@ -10,12 +10,12 @@ use crate::config::Config;
 /// CPU, wall-clock, process-tree memory and process-count budgets for one stage.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StageLimits {
-    /// Maximum process-tree CPU time, in milliseconds.
-    pub cpu_time_ms: u64,
-    /// Maximum elapsed wall time, in milliseconds.
-    pub wall_time_ms: u64,
-    /// Maximum process-tree memory, in KiB.
-    pub memory_kib: u64,
+    /// Maximum process-tree CPU milliseconds; absent only for an unlimited checker item.
+    pub cpu_time_ms: Option<u64>,
+    /// Maximum elapsed milliseconds; the absolute Job deadline also applies when absent.
+    pub wall_time_ms: Option<u64>,
+    /// Maximum process-tree KiB; absent only for an unlimited checker item.
+    pub memory_kib: Option<u64>,
     /// Maximum number of processes and threads.
     pub process_max_count: u32,
 }
@@ -42,7 +42,7 @@ pub struct CompilePlan {
     pub artifact_name: String,
 }
 
-/// Which original file must be copied into each fresh runtime sandbox.
+/// Which original file must be restored before each user process starts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProgramFiles {
     /// Use the untouched source bytes under the fixed source filename.
@@ -77,9 +77,9 @@ pub fn plan(language_id: &str, config: &Config) -> Result<LanguagePlan> {
                     environment: environment.clone(),
                 },
                 limits: StageLimits {
-                    cpu_time_ms: config.compile.cpu_time_ms,
-                    wall_time_ms: config.compile.wall_time_ms,
-                    memory_kib: config.compile.memory_kib,
+                    cpu_time_ms: Some(config.compile.cpu_time_ms),
+                    wall_time_ms: Some(config.compile.wall_time_ms),
+                    memory_kib: Some(config.compile.memory_kib),
                     process_max_count: config.compile.process_max_count,
                 },
                 artifact_name: "program".into(),

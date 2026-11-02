@@ -76,9 +76,9 @@ fn spec() -> SandboxRunSpec {
         files: vec![],
         stdin: vec![],
         limits: StageLimits {
-            cpu_time_ms: 1000,
-            wall_time_ms: 2000,
-            memory_kib: 16 * 1024,
+            cpu_time_ms: Some(1000),
+            wall_time_ms: Some(2000),
+            memory_kib: Some(16 * 1024),
             process_max_count: 1,
         },
         output: OutputPolicy::Compile { max_bytes: 1024 },
@@ -160,8 +160,67 @@ async fn unconfirmed_stop_retains_resources_and_blocks_reuse() {
         before,
         fs::read_to_string(directory.path().join("operations")).unwrap()
     );
+    assert_eq!(
+        sandbox.cleanup().await.unwrap_err().kind,
+        SandboxErrorKind::StopUnconfirmed
+    );
+    assert!(retained.exists());
+    assert_eq!(
+        before,
+        fs::read_to_string(directory.path().join("operations")).unwrap()
+    );
     // The substitute has exited without creating a user process; test-owned cleanup is safe.
     fs::remove_dir_all(retained).unwrap();
+}
+
+/// Repeated runs retain one environment, replace fixed links and omit unset stage limits.
+#[tokio::test]
+async fn reusable_environment_files_and_optional_limits() {
+    let (directory, mut sandbox) = fixture("normal", 16 * 1024);
+    let (_sender, control) = control();
+    let mut stage = spec();
+    stage.files.push(acorn_worker::sandbox::SandboxFile {
+        name: "fixed".into(),
+        bytes: b"original".to_vec(),
+        executable: false,
+    });
+    sandbox
+        .run_in_environment(stage, control.clone())
+        .await
+        .unwrap();
+    let target = directory.path().join("keep");
+    fs::write(&target, b"untouched").unwrap();
+    let fixed = directory.path().join("box/fixed");
+    fs::remove_file(&fixed).unwrap();
+    std::os::unix::fs::symlink(&target, &fixed).unwrap();
+    let mut stage = spec();
+    stage.files.push(acorn_worker::sandbox::SandboxFile {
+        name: "fixed".into(),
+        bytes: b"restored".to_vec(),
+        executable: false,
+    });
+    stage.limits.cpu_time_ms = Some(7);
+    stage.limits.wall_time_ms = None;
+    stage.limits.memory_kib = None;
+    sandbox.run_in_environment(stage, control).await.unwrap();
+    assert_eq!(fs::read(&target).unwrap(), b"untouched");
+    assert_eq!(fs::read(&fixed).unwrap(), b"restored");
+    assert!(
+        !fs::symlink_metadata(&fixed)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    let operations = fs::read_to_string(directory.path().join("operations")).unwrap();
+    assert_eq!(operations.matches("--init").count(), 1);
+    assert_eq!(operations.matches("--run").count(), 2);
+    assert!(!operations.contains("--cleanup"));
+    let last = operations.lines().last().unwrap();
+    assert!(last.contains("--time=0.007"));
+    assert!(!last.contains("--wall-time=") && !last.contains("--cg-mem="));
+    assert!(last.contains("--processes=1") && last.contains("--open-files=64"));
+    sandbox.cleanup().await.unwrap();
+    assert!(directory.path().join("cleaned").exists());
 }
 
 /// A Worker shutdown signal uses SIGTERM and preserves its cause through manager interruption.
@@ -198,7 +257,7 @@ async fn small_kib_limits_are_passed_without_division() {
     for kib in [1, 1023] {
         let (directory, mut sandbox) = fixture("normal", kib);
         let mut stage = spec();
-        stage.limits.memory_kib = kib;
+        stage.limits.memory_kib = Some(kib);
         let (_sender, control) = control();
         sandbox.run(stage, control).await.unwrap();
         let operations = fs::read_to_string(directory.path().join("operations")).unwrap();
@@ -220,7 +279,7 @@ async fn invalid_kib_limits_do_not_start_isolate() {
     for (memory_kib, file_kib) in [(0, 1), (1, 0), (too_large, 1), (1, too_large)] {
         let (directory, mut sandbox) = fixture("normal", file_kib);
         let mut stage = spec();
-        stage.limits.memory_kib = memory_kib;
+        stage.limits.memory_kib = Some(memory_kib);
         let (_sender, control) = control();
         assert_eq!(
             sandbox.run(stage, control).await.unwrap_err().kind,

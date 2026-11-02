@@ -381,13 +381,17 @@ async fn real_kafka_blocked_worker_leaves_group_for_replacement() -> Result<()> 
 
 /// One real Isolate execution crosses the complete Worker Kafka boundary.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires ACORN_TEST_KAFKA_SERVERS and a prepared dedicated ACORN_ISOLATE_BOX_ID"]
+#[ignore = "requires ACORN_TEST_KAFKA_SERVERS and dedicated user/checker Isolate box IDs"]
 async fn real_kafka_isolate_execution() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let mut config = Config::parse(include_str!("../../../config/worker.example.toml"))?;
     config.sandbox.box_id = std::env::var("ACORN_ISOLATE_BOX_ID")
         .context("Set a dedicated unused Isolate box ID")?
         .parse()?;
+    config.sandbox.checker_box_id = std::env::var("ACORN_CHECKER_BOX_ID")
+        .context("Set a dedicated checker box ID")?
+        .parse()?;
+    config.validate()?;
     let broker = Broker::new(
         config,
         directory.path().file_name().unwrap().to_str().unwrap(),

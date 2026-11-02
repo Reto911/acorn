@@ -107,7 +107,7 @@ cp config/worker.example.toml "$HOME/.config/acorn/worker.toml"
 cp config/backend.example.toml "$HOME/.config/acorn/backend.toml"
 ```
 
-编辑 `worker.toml`，核对 `sandbox.executable`、`languages.c.compiler` 和 `languages.python.interpreter`，为 `sandbox.box_id` 选择本机空闲且专用于该 Worker 的 ID。后端示例配置连接 `http://127.0.0.1:50051`，数据库由 `database.endpoint`、`name` 和 `username` 指定。以下浏览器流程须将后端的 `http.public_origin` 改为 `"http://localhost:5173"`；下述 HTTP 示例直连后端时也发送该 Origin。若选择其他外部 Origin，配置及每个写请求须一起修改，主机名和端口必须完全一致。
+编辑 `worker.toml`，核对 `sandbox.executable`、`languages.c.compiler` 和 `languages.python.interpreter`，为 `sandbox.box_id`（编译／用户执行）与 `sandbox.checker_box_id`（checker）选择两个本机空闲且专用于该 Worker 的 ID。后端示例配置连接 `http://127.0.0.1:50051`，数据库由 `database.endpoint`、`name` 和 `username` 指定。以下浏览器流程须将后端的 `http.public_origin` 改为 `"http://localhost:5173"`；下述 HTTP 示例直连后端时也发送该 Origin。若选择其他外部 Origin，配置及每个写请求须一起修改，主机名和端口必须完全一致。
 
 ### 初始化数据库
 
@@ -202,7 +202,8 @@ curl --fail-with-body -b "$ACORN_COOKIE_JAR" -c "$ACORN_COOKIE_JAR" \
 | 配置项                                  | 示例值                       | 用途                               |
 | --------------------------------------- | ---------------------------- | ---------------------------------- |
 | Worker `server.listen`                  | `127.0.0.1:50051`            | gRPC 监听地址                      |
-| Worker `sandbox.box_id`                 | `0`                          | 本机独占的 Isolate box ID          |
+| Worker `sandbox.box_id`                 | `0`                          | 编译／用户执行的 Isolate box ID    |
+| Worker `sandbox.checker_box_id`         | `1`                          | checker 独立的 Isolate box ID      |
 | 后端 `http.listen`                      | `127.0.0.1:8080`             | HTTP API 监听地址                  |
 | 后端 `http.public_origin`               | `http://127.0.0.1:8080`      | JSON 写请求必需的浏览器外部 Origin |
 | 后端 `http.cookie_secure`               | `false`                      | 按外部协议选择 Secure Cookie       |
@@ -235,7 +236,7 @@ curl --fail-with-body -b "$ACORN_COOKIE_JAR" -c "$ACORN_COOKIE_JAR" \
 
 ### 多 Worker
 
-为每个 Worker 分别配置监听地址和本机独占的 `sandbox.box_id`，所有 Worker 共用 Kafka 任务组，再将状态地址加入后端：
+为每个 Worker 分别配置监听地址，以及本机独占的 `sandbox.box_id` 和 `sandbox.checker_box_id`。同机全部 ID 必须不同，例如第一个 Worker 使用 0/1，第二个使用 2/3。所有 Worker 共用 Kafka 任务组，再将状态地址加入后端：
 
 ```toml
 [scheduler]

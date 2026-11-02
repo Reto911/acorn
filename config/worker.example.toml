@@ -42,6 +42,7 @@ artifact_max_bytes = 16_777_216
 backend = "isolate"
 executable = "/usr/bin/isolate"
 box_id = 0
+checker_box_id = 1
 fd_max_count = 64
 file_size_max_kib = 16_384
 disk_quota_kib = 65_536

@@ -1283,12 +1283,16 @@ async fn stopping_preserves_creation_started_before_preflight() {
 
 /// Source samples through real HTTP, Kafka and Isolate, observed through persisted results.
 #[tokio::test]
-#[ignore = "Requires host Isolate privileges, cgroups, quotas and ACORN_ISOLATE_BOX_ID"]
+#[ignore = "Requires host Isolate privileges, cgroups, quotas and dedicated user/checker box IDs"]
 async fn real_http_worker_acceptance() {
     use base64::Engine;
     use support::real::{RealHarness, box_id};
 
-    let harness = RealHarness::start(&[box_id("ACORN_ISOLATE_BOX_ID")]).await;
+    let harness = RealHarness::start(&[(
+        box_id("ACORN_ISOLATE_BOX_ID"),
+        box_id("ACORN_CHECKER_BOX_ID"),
+    )])
+    .await;
     for (language, source, verdict, completed) in [
         (
             "c",
@@ -1360,7 +1364,7 @@ async fn real_http_worker_acceptance() {
 
 /// Two real execution positions overlap on distinct submissions and persist both accepted results.
 #[tokio::test]
-#[ignore = "requires prepared Isolate, Kafka/MySQL and two dedicated ACORN_ISOLATE_BOX_ID/ACORN_ISOLATE_BOX_ID_2"]
+#[ignore = "requires prepared Isolate, Kafka/MySQL and two dedicated user/checker box pairs"]
 async fn real_two_workers_overlap() {
     use acorn_protocol::worker::v1::{
         GetWorkerStatusRequest, judge_worker_client::JudgeWorkerClient,
@@ -1369,10 +1373,15 @@ async fn real_two_workers_overlap() {
     use support::real::{RealHarness, box_id};
 
     let boxes = [
-        box_id("ACORN_ISOLATE_BOX_ID"),
-        box_id("ACORN_ISOLATE_BOX_ID_2"),
+        (
+            box_id("ACORN_ISOLATE_BOX_ID"),
+            box_id("ACORN_CHECKER_BOX_ID"),
+        ),
+        (
+            box_id("ACORN_ISOLATE_BOX_ID_2"),
+            box_id("ACORN_CHECKER_BOX_ID_2"),
+        ),
     ];
-    assert_ne!(boxes[0], boxes[1]);
     let harness = RealHarness::start(&boxes).await;
     let mut ids = Vec::new();
     // Stable range assignment of eight partitions to two Workers puts 0 and 7

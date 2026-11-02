@@ -1,5 +1,8 @@
 //! Opt-in acceptance checks requiring a prepared Linux host and a dedicated Isolate box.
 
+#[path = "support/reuse.rs"]
+mod reuse;
+
 use std::{fs, net::TcpListener, os::fd::AsRawFd, time::Duration};
 
 use acorn_worker::{
@@ -34,9 +37,9 @@ async fn python(config: &Config, source: &str) -> SandboxRunOutcome {
 /// Small case budgets suitable for these acceptance commands.
 fn limits() -> StageLimits {
     StageLimits {
-        cpu_time_ms: 2000,
-        wall_time_ms: 3000,
-        memory_kib: 128 * 1024,
+        cpu_time_ms: Some(2000),
+        wall_time_ms: Some(3000),
+        memory_kib: Some(128 * 1024),
         process_max_count: 1,
     }
 }
@@ -215,5 +218,25 @@ except OSError as e:
             String::from_utf8_lossy(&ran.stderr.bytes)
         );
         assert!(ran.stdout.bytes.starts_with(b"shared-quota "));
+    }
+}
+
+/// Real boxes keep checker files private, reuse each Job and rebuild both environments afterward.
+#[tokio::test]
+#[ignore = "requires prepared Isolate and dedicated ACORN_ISOLATE_BOX_ID/ACORN_CHECKER_BOX_ID"]
+async fn real_environment_reuse_and_checker_files() {
+    let mut config = Config::parse(include_str!("../../../config/worker.example.toml")).unwrap();
+    config.sandbox.box_id = std::env::var("ACORN_ISOLATE_BOX_ID")
+        .expect("Set dedicated user box ID")
+        .parse()
+        .unwrap();
+    config.sandbox.checker_box_id = std::env::var("ACORN_CHECKER_BOX_ID")
+        .expect("Set dedicated checker box ID")
+        .parse()
+        .unwrap();
+    config.validate().unwrap();
+    reuse::environment_file_contract(&config).await;
+    for box_id in [config.sandbox.box_id, config.sandbox.checker_box_id] {
+        assert!(!std::path::Path::new(&format!("/var/lib/isolate/{box_id}")).exists());
     }
 }

@@ -1,10 +1,10 @@
 //! Serial judging over complete sandbox stages, with one common Job cleanup path.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use acorn_protocol::worker::v1::{
-    FailedCase, JobFailure, JobPhase, JudgeResult, ResourceUsage, SubmitJobRequest, Verdict,
-    failed_case::Exit, get_job_reply::Terminal,
+    FailedCase, JobFailure, JobPhase, JudgeResult, ResourceUsage, SubmitJobRequest, TestCase,
+    Verdict, failed_case::Exit, get_job_reply::Terminal,
 };
 use anyhow::Context;
 use tracing::Instrument;
@@ -45,7 +45,7 @@ struct JobContext {
     directory: PathBuf,
     /// Owned source, ordered inputs, answers and case budgets.
     request: SubmitJobRequest,
-    /// Original compiler artifact, copied independently into each case sandbox.
+    /// Original compiler artifact, restored before each user execution.
     artifact: Option<Vec<u8>>,
 }
 
@@ -53,8 +53,10 @@ struct JobContext {
 pub struct Executor {
     /// Validated deployment settings and output budgets.
     config: Config,
-    /// One serial backend for this Worker's dedicated box ID.
+    /// Compilation and user environment, reused across cases after compilation cleanup.
     sandbox: IsolateSandbox,
+    /// Isolated checker environment, initialized on its first execution by the checking stage.
+    checker: IsolateSandbox,
     /// Resources that must not be dropped or cleaned while stopping is unconfirmed.
     retained_job: Option<JobContext>,
 }
@@ -62,8 +64,11 @@ pub struct Executor {
 impl Executor {
     /// Construct the executor without initializing a sandbox or running user code.
     pub fn new(config: Config) -> Self {
+        let mut checker = config.sandbox.clone();
+        checker.box_id = checker.checker_box_id;
         Self {
             sandbox: IsolateSandbox::new(config.sandbox.clone()),
+            checker: IsolateSandbox::new(checker),
             config,
             retained_job: None,
         }
@@ -71,7 +76,7 @@ impl Executor {
 
     /// Whether another Job can safely use this executor.
     pub fn is_available(&self) -> bool {
-        self.retained_job.is_none() && self.sandbox.is_available()
+        self.retained_job.is_none() && self.sandbox.is_available() && self.checker.is_available()
     }
 
     /// Execute an admitted Job; callers must await completion and stop via the channel.
@@ -101,15 +106,30 @@ impl Executor {
             request,
             artifact: None,
         };
-        let result = self
+        let mut result = self
             .execute(&mut context, &control, &mut current, &mut progress)
             .instrument(tracing::info_span!("job", job = %job_id, language = %language_id))
             .await;
-        if self.sandbox.is_available() {
+        let cleaned = async {
+            self.sandbox.cleanup().await?;
+            self.checker.cleanup().await
+        }
+        .await;
+        if let Err(error) = cleaned
+            && result.is_ok()
+        {
+            result = Err(sandbox_failure(error));
+        }
+        if self.sandbox.is_available() && self.checker.is_available() {
             if let Err(error) = tokio::fs::remove_dir_all(&context.directory).await {
                 tracing::warn!(job = %job_id, %error, "Failed to remove stopped Job workspace; continuing");
             }
             drop(context);
+            if result.is_ok()
+                && let Err(error) = check_stop(&control)
+            {
+                result = Err(error);
+            }
         } else {
             self.retained_job = Some(context);
         }
@@ -211,9 +231,9 @@ impl Executor {
             .as_ref()
             .ok_or_else(|| failure("InvalidJob", "Missing run limits"))?;
         let limits = StageLimits {
-            cpu_time_ms: limits.cpu_time_ms,
-            wall_time_ms: limits.wall_time_ms,
-            memory_kib: limits.memory_kib,
+            cpu_time_ms: Some(limits.cpu_time_ms),
+            wall_time_ms: Some(limits.wall_time_ms),
+            memory_kib: Some(limits.memory_kib),
             process_max_count: self.config.execution.run_process_max_count,
         };
         for (index, case) in context.request.cases.iter().enumerate() {
@@ -223,7 +243,7 @@ impl Executor {
             tracing::debug!(job = %context.request.job_id, language = %context.request.language_id, phase = "running_case", case = index + 1, "Case started");
             let outcome = self
                 .sandbox
-                .run(
+                .run_in_environment(
                     SandboxRunSpec {
                         command: plan.run.clone(),
                         files: vec![program_file(&plan, context)],
@@ -240,6 +260,12 @@ impl Executor {
                 .await
                 .map_err(sandbox_failure)?;
             check_outcome_stop(&outcome, control)?;
+            if successful(&outcome) {
+                tokio::fs::write(context.directory.join("output.bin"), &outcome.stdout.bytes)
+                    .await
+                    .context("Save private user output for checking")
+                    .map_err(preparation_failure)?;
+            }
             current.phase = JobPhase::Checking;
             progress(*current);
             let verdict = verdict(&outcome, &case.expected_output);
@@ -263,7 +289,34 @@ impl Executor {
     }
 }
 
-/// Copy the original program independently; a previous case cannot modify this source.
+/// Prepare the checker script and four fixed inputs from task data and Worker-owned output.
+///
+/// `output` must identify the private file saved after a confirmed, successful user run.
+pub async fn checker_files(
+    request: &SubmitJobRequest,
+    case: &TestCase,
+    output: &Path,
+) -> anyhow::Result<Vec<SandboxFile>> {
+    let actual = tokio::fs::read(output)
+        .await
+        .context("Read private user output for checking")?;
+    Ok([
+        ("checker.py", request.checker_source.as_slice()),
+        ("input.bin", case.input.as_slice()),
+        ("answer.bin", case.expected_output.as_slice()),
+        ("output.bin", actual.as_slice()),
+        ("config.json", request.checker_config_json.as_bytes()),
+    ]
+    .into_iter()
+    .map(|(name, bytes)| SandboxFile {
+        name: name.into(),
+        bytes: bytes.to_vec(),
+        executable: false,
+    })
+    .collect())
+}
+
+/// Restore the original program independently; a previous case cannot modify this source.
 fn program_file(plan: &LanguagePlan, context: &JobContext) -> SandboxFile {
     match plan.program_files {
         ProgramFiles::Source => SandboxFile {

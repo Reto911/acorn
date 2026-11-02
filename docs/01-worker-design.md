@@ -4,7 +4,7 @@
 
 基础判题的实际过程与检查见[Worker 与后端实施记录](d02-execution/04-development-execution.md#7-实施记录)，状态 RPC 和健康页面的交付见[前端与健康观测实施记录](d02-execution/06-frontend-development-execution.md#58-f08h01worker-状态-rpc)。
 
-本篇描述 Worker 的任务接纳与现行执行合同。统一 Python 校验的文件对接、同提交沙箱复用及 checker 执行遵守[判题脚本设计](13-checker-scripts-design.md)；实施时同步替换下述固定比较和每阶段初始化合同，当前实现状态见[脚本实施记录](d02-execution/13-checker-scripts-execution.md)。
+本篇描述 Worker 的任务接纳与现行执行合同。统一 Python 校验的文件对接、同提交沙箱复用及 checker 执行遵守[判题脚本设计](13-checker-scripts-design.md)；固定比较的后续替换及当前实现状态见[脚本实施记录](d02-execution/13-checker-scripts-execution.md)。
 
 ## 1. 目标与范围
 
@@ -17,8 +17,8 @@ Worker 是独立运行的判题进程，从 Kafka 消费任务并发布运行快
 | 语言     | C 与 Python 3，所有 Worker 使用相同的语言约定                                       |
 | 去重     | 只以 Job ID 为依据，已有记录直接返回，不比较任务内容                                |
 | 执行     | C 编译一次，Python 直接解释执行；用例串行，首个失败用例立即短路                     |
-| 沙箱     | 编译和每个用例分别使用新沙箱；前一个阶段进程树停止并完成收尾调用后才创建下一个      |
-| 程序文件 | C 产物或 Python 源码保存在 Job 私有上下文，每个运行沙箱获得独立副本                 |
+| 沙箱     | 编译环境独立清理；用户与 checker 环境分别在 Job 内串行复用，Job 收尾统一清理        |
+| 程序文件 | C 产物或 Python 源码保存在 Job 私有上下文，每例运行前恢复独立副本                   |
 | 清理     | 文件或已停止环境的清理失败只记日志，不改变判题结果，继续接纳任务                    |
 | 结果     | AC 不返回用例，CE 只返回编译诊断，用例失败只返回首个失败用例                        |
 | 保留     | 执行前预留结果容量；有界终态按 FIFO 完成 Kafka 交接后释放                           |
@@ -240,13 +240,15 @@ Python 计划没有编译阶段，跳过步骤 2～5，以原始源码作为待�
 
 程序准备完成后，对请求数组中的每个用例依次执行以下操作：
 
-1. 初始化新的运行沙箱，放入 C 编译产物或 Python 源码的独立副本及当前输入。
+1. 首例初始化用户环境；每例恢复 C 编译产物或 Python 源码的独立副本，接入当前 stdin。
 2. 按运行计划启动程序或解释器，实时收集有界 stdout/stderr，执行本用例时间、内存及配置中的其他限制。
-3. 程序结束或超限后，保存必要输出、退出原因和可用资源统计，停止剩余派生进程并调用沙箱清理。
-4. 完成收尾调用后判定运行结果；正常退出时，在 Worker 中比较保存的 stdout 和期望输出。清理警告不改变运行结论。
+3. 程序结束或超限后，保存必要输出、退出原因和可用资源统计，确认进程树停止并完成输出收集；正常执行的有界 stdout 保存为 Worker 私有文件。
+4. 判定运行结果；正常退出时，在 Worker 中比较保存的 stdout 和期望输出。
 5. 当前用例 AC 才开始下一个用例；WA、RE、TLE、MLE、OLE 立即结束 Job，返回这个用例。
 
-每个用例只获得当前输入、独立程序文件副本和必要运行时。答案、其他用例数据及 Worker 私有文件不进入沙箱。运行副本的任何修改都不会改变 Worker 保存的文件或后续用例获得的副本。Python 解释器的启动、源码解析和执行时间及内存均计入本用例限额。
+每个用例只获得当前输入、独立程序文件副本和必要运行时。参考数据、checker 源码、私有参数及 Worker 私有目录不进入用户环境。运行副本的任何修改都不会改变 Worker 保存的文件或后续用例获得的副本；其他程序文件在同 Job 内保留，受磁盘和 inode 配额约束。Python 每例启动新解释器，其启动、解析和执行计入本次运行限额。
+
+CPU 与墙钟直接采用 Isolate 本次运行元数据，不再次扣除累计 CPU；内存采用用户环境的 `cg-mem` 历史峰值，可能包含此前用例，不求和，也不合并 checker 计量。Job 结束统一清理环境，下一 Job 重新初始化。
 
 运行时持续读取输出是避免阻塞、及时执行输出上限的必要 I/O，不产生多个并行运行的用例。超出 stdout 或 stderr 上限时立即停止，不能只截断后继续判定 AC。
 
@@ -276,9 +278,9 @@ P04 的 [`Executor`](../crates/worker/src/executor.rs) 接收已接纳请求、�
 
 ## 6. 统一沙箱接口
 
-以下接口对应现行每阶段初始化与清理。脚本版本将环境生命周期提升到同一 Job 内复用，并分离用户与 checker 环境，资源统计与释放按[第 13 篇第 5 节](13-checker-scripts-design.md#5-沙箱与资源)实施。
+环境生命周期及资源统计遵守[第 13 篇第 5 节](13-checker-scripts-design.md#5-沙箱与资源)。用户与 checker 分别使用独立 Isolate box；同一 Job 内各自串行复用，checker 在首次需要时初始化。
 
-Worker 调用一次完整的阶段执行操作，输入为 `SandboxRunSpec`，输出为 `SandboxRunOutcome`。编译阶段与运行阶段共用同一接口，不向业务层暴露一套独立清理状态机。
+Worker 以 `SandboxRunSpec` 启动一个阶段，取得 `SandboxRunOutcome`。编译和运行共用执行、收集与停止逻辑；编译使用独立初始化、产物导出及清理，完成后才初始化用户环境。
 
 | 输入           | 内容                                                                                                                      |
 | -------------- | ------------------------------------------------------------------------------------------------------------------------- |
@@ -295,13 +297,17 @@ Worker 调用一次完整的阶段执行操作，输入为 `SandboxRunSpec`，�
 | 收集内容 | 有界 stdout/stderr、截断标记、可用资源统计、成功编译的产物                                                               |
 | 阶段错误 | 初始化、启动、停止、收集或产物导出失败的错误信息；明确区分已停止或尚未启动的执行错误与停止未确认；清理失败由封装记录日志 |
 
-封装内部按“初始化 → 放入文件 → 执行与收集 → 停止进程树 → 导出允许内容 → 尝试清理”完成阶段。正常返回意味着进程树已经结束，输出和产物已保存，清理已经调用；不要求文件删除成功。
+封装按“首次初始化 → 恢复固定文件 → 执行与收集 → 确认进程树停止 → 导出允许内容”完成一次运行。正常返回意味着进程树已结束、输出和允许的产物已保存。Job 公共收尾依次清理两个已初始化环境与私有文件；不要求文件删除成功。
 
-P03 的实现位于 [`sandbox` 模块](../crates/worker/src/sandbox/mod.rs)。`IsolateSandbox::run` 串行执行一个 `SandboxRunSpec`，`StageControl` 携带接纳时确定的绝对期限和内部 watch 停止通道。调用方必须等待阶段调用结束，通过通道请求停止，不中止执行 future。`SandboxRunOutcome` 保留独立的 OOM、输出超限和超时事实及原始停止原因，由 P04 选择判题结论；统计仅来自实际元数据，进程树内存使用 `cg-mem`，不以单进程 RSS 代替。`SandboxErrorKind::Execution` 表示尚未启动或已确认停止的基础设施错误；`StopUnconfirmed` 保留元数据工作目录、管理器句柄和执行占用，同一个后端实例拒绝再次执行。
+实现位于 [`sandbox` 模块](../crates/worker/src/sandbox/mod.rs)。`IsolateSandbox::run_in_environment` 复用环境，`cleanup` 显式收尾；`run` 为编译等独立阶段组合两者。`StageControl` 携带接纳时确定的同一绝对期限和内部 watch 停止通道，涵盖准备、执行及清理，不随用例或环境刷新。调用方必须等待阶段调用结束，通过通道请求停止，不中止执行 future。`SandboxRunOutcome` 保留独立的 OOM、输出超限和超时事实及原始停止原因，由 P04 选择判题结论；统计仅来自实际元数据，进程树内存使用 `cg-mem`，不以单进程 RSS 代替。`SandboxErrorKind::Execution` 表示尚未启动或已确认停止的基础设施错误；`StopUnconfirmed` 保留元数据工作目录、管理器句柄和执行占用，同一个后端实例拒绝再次执行。
 
-阶段文件名和产物名均为语言计划提供的单个相对文件名。导出时拒绝符号链接、硬链接及非常规文件，并按产物上限独立复制字节。Isolate 的 `--cg-mem`、`--fsize` 和磁盘空间配额均直接使用 KiB，不再由字节除以 1024 换算；1 KiB 是有效的非零限额，0 或超出后端有符号整数范围的值在初始化前明确报错。配置使用 `execution.max_run_memory_kib`、`compile.memory_kib`、`sandbox.file_size_max_kib` 和已有的 `sandbox.disk_quota_kib`。产物导出与输出保留仍按实际字节数计量，比较产物与文件／磁盘限额时将已校验的 KiB 预算乘以 1024。CPU 和墙钟以毫秒转换成小数秒。
+固定条目重放先移除旧目录项，再以新常规文件独立复制，不跟随残留符号链接或复用硬链接；准备失败明确报告执行错误。每次运行清空旧元数据并新建输出收集状态，其他文件在同 Job 内保留。`executor::checker_files` 从任务和 Worker 私有 stdout 文件准备 checker.py、input.bin、answer.bin、output.bin、config.json；实际 checker 命令与裁决按脚本设计接入。
 
-Isolate 的 `--run` 不包含 `--cleanup`。封装在执行进程尚未启动或进程树已确认停止后调用 `--cleanup`，覆盖成功、CE、超限和内部错误；初始化成功但后续准备失败时也进入清理路径。停止未确认时跳过产物导出、沙箱清理和依赖停止的私有文件清理，保留可能仍在使用的资源，由部署端处置。这是调用已有清理操作，不追加资源扫描、清理报告核验或其他证明步骤，见[Isolate 官方手册](https://www.ucw.cz/isolate/isolate.1.html)。
+阶段 CPU、墙钟和内存限额逐项可选，缺失项不添加对应 Isolate 参数；编译与用户运行继续明确提供正限额。checker 缺失项不套用用户 `max_run` 或 Job 剩余额度；Job 总期限仍独立约束整个执行。
+
+阶段文件名和产物名均为执行计划提供的单个相对文件名。导出时拒绝符号链接、硬链接及非常规文件，并按产物上限独立复制字节。Isolate 的 `--cg-mem`、`--fsize` 和磁盘空间配额均直接使用 KiB，不再由字节除以 1024 换算；1 KiB 是有效的非零限额，0 或超出后端有符号整数范围的值在初始化前明确报错。配置使用 `execution.max_run_memory_kib`、`compile.memory_kib`、`sandbox.file_size_max_kib` 和已有的 `sandbox.disk_quota_kib`。产物导出与输出保留仍按实际字节数计量，比较产物与文件／磁盘限额时将已校验的 KiB 预算乘以 1024。CPU 和墙钟以毫秒转换成小数秒。
+
+Isolate 的 `--run` 不包含 `--cleanup`。编译结束或 Job 公共收尾时，在执行进程尚未启动或进程树已确认停止后调用 `--cleanup`，覆盖成功、CE、超限和内部错误；初始化成功但后续准备失败时也进入清理路径。任一环境停止未确认时跳过该环境的产物导出、沙箱清理和依赖停止的私有文件清理，保留可能仍在使用的资源，由部署端处置。这是调用已有清理操作，不追加资源扫描、清理报告核验或其他证明步骤，见[Isolate 官方手册](https://www.ucw.cz/isolate/isolate.1.html)。
 
 CPU、内存及停止操作覆盖本阶段的进程树。Isolate 后端使用控制组模式，编译阶段允许编译器启动必要的子进程；运行阶段按配置限制进程数。
 
@@ -311,7 +317,7 @@ Worker 通过 `Child::wait().await` 等待 `isolate --run` 管理器退出，同
 
 进程树停止后，后端清理或工作文件删除失败只输出 warn 日志，不改变 Job 结论，不退出 Worker，不暂停接纳。残留工作文件不交给后续任务，部署端负责处理；Worker 不扫描残留资源、不重试清理、不建设通用文件 GC。
 
-下一阶段或下一 Job 仍调用正常初始化路径；初始化成功必须提供独立工作目录和本次资源计量，不能只换目录而沿用旧执行的计量状态。初始化失败则报告该次执行的基础设施错误，不能降级为使用旧环境。Isolate 的固定 box ID 可串行复用，但 `--init` 失败时不得执行程序。以上依赖初始化接口的契约，不追加清理审计或资源扫描。
+同 Job 的后续用户或 checker 运行使用各自已初始化环境；下一 Job 仍调用正常初始化路径，初始化成功必须提供新的工作目录与环境计量。初始化失败则报告该次执行的基础设施错误，不能降级为使用旧环境。Isolate 的固定 box ID 可串行复用，但 `--init` 失败时不得执行程序。以上依赖初始化接口的契约，不追加清理审计或资源扫描。
 
 进程树停止失败或停止未确认属于执行故障，不能按文件清理警告处理。此时发布有界 Job 失败终态并保留占用的执行位置；结果交接和记录释放均不解除该位置。Worker 继续提供状态 RPC 和结果生产，停止新接纳，由部署端处置，避免在旧程序仍运行时启动下一 Job。这依赖后端执行/停止接口的完成契约，不增加独立的 PID 或 cgroup 扫描。
 
@@ -336,10 +342,10 @@ Worker 入口接收 Ctrl-C 和 SIGTERM，通过服务的内部停机方法等待
 
 `program_files` 是文件准备规则：有编译阶段时指向成功导出的产物，没有编译阶段时指向源码。执行器统一处理可选编译、沙箱生命周期、限额、输出比较、短路和结果保存，不在这些环节按语言复制流程。
 
-| 语言     | 源码      | 编译计划                                              | 用例运行计划                                    |
-| -------- | --------- | ----------------------------------------------------- | ----------------------------------------------- |
-| `c`      | `main.c`  | 配置的 GCC，示例参数 `main.c -std=c17 -O2 -o program` | 在新沙箱中运行 `./program`                      |
-| `python` | `main.py` | 无                                                    | 在新沙箱中运行配置的 `python3 -I -B -S main.py` |
+| 语言     | 源码      | 编译计划                                              | 用例运行计划                                            |
+| -------- | --------- | ----------------------------------------------------- | ------------------------------------------------------- |
+| `c`      | `main.c`  | 配置的 GCC，示例参数 `main.c -std=c17 -O2 -o program` | 在复用的用户环境中运行 `./program`                      |
+| `python` | `main.py` | 无                                                    | 在复用的用户环境中运行配置的 `python3 -I -B -S main.py` |
 
 Python 首版支持单文件 Python 3 和部署提供的标准库，不提供依赖安装、第三方包选择或多文件项目上传。标准库调用同样受沙箱限制。每个用例重新启动解释器并获得源码副本，不共享解释器状态或字节码缓存。
 
@@ -362,7 +368,7 @@ Python 不单独预编译，语法错误在首个用例执行中形成 RE，stde
 
 不使用 `--no-default-dirs`，不替换默认 `/dev` 映射。只有实际工具链运行缺少依赖时才补充具体路径，不提前逐项重建系统目录。默认系统目录的只读映射不限制部署端在宿主上更新工具链，也不要求制作版本快照。
 
-`--cg` 在初始化、运行和清理时一致使用，内存限额使用 `--cg-mem` 约束整个进程树。CPU、墙钟和输出等任务预算由 Worker 显式配置，不依赖默认值。安装所需的沙箱目录、UID/GID 范围和控制组路径以官方安装配置为基线，由部署端按主机安排，见[官方默认配置模板](https://raw.githubusercontent.com/ioi/isolate/master/default.cf.in)。
+`--cg` 在初始化、运行和清理时一致使用，有内存限额时使用 `--cg-mem` 约束整个进程树。编译与用户 CPU、墙钟和输出预算由 Worker 显式配置；checker 的可选限额按任务传入。安装所需的沙箱目录、UID/GID 范围和控制组路径以官方安装配置为基线，由部署端按主机安排，见[官方默认配置模板](https://raw.githubusercontent.com/ioi/isolate/master/default.cf.in)。
 
 编译与运行阶段均在 `--init` 时传入 `--quota=<disk_quota_kib>,<disk_quota_inodes>`，为本 box UID 设置空间和 inode 硬配额；两个配置值均为正数，空间单位为 KiB，inode 配额覆盖文件及目录等对象。部署端必须在 Isolate 沙箱根目录所在文件系统启用用户配额，保留 box UID 专用于该沙箱，并按同机 Worker 数量预留配额容量。配额设置失败属于初始化失败，本阶段不运行，见[Isolate 配额说明](https://www.ucw.cz/isolate/isolate.1.html)和 [Linux 配额单位定义](https://github.com/torvalds/linux/blob/master/include/uapi/linux/quota.h)。
 
@@ -421,6 +427,7 @@ artifact_max_bytes = 16_777_216
 backend = "isolate"
 executable = "/usr/bin/isolate"
 box_id = 0
+checker_box_id = 1
 fd_max_count = 64
 file_size_max_kib = 16_384
 disk_quota_kib = 65_536
@@ -448,9 +455,9 @@ max_task_record_bytes = 16_777_216
 max_event_record_bytes = 1_048_576
 ```
 
-Isolate box ID 由部署配置；同一宿主上不同 Worker 使用不同 ID。一个 Worker 内串行沿用这个数字，但每个阶段都重新初始化和清理沙箱，不沿用任何已执行环境。文件系统映射和权限由沙箱部署配置提供，不来自任务请求。
+`sandbox.box_id` 用于编译和用户环境，`sandbox.checker_box_id` 用于独立 checker 环境，两者必须不同；同一宿主上所有 Worker 的全部 ID 互不冲突。编译清理后用户环境重新初始化，用户与 checker 环境分别复用至 Job 结束；下一 Job 均重新初始化。文件系统映射和权限由沙箱部署配置提供，不来自任务请求。
 
-`sandbox.executable`、C 编译器和 Python 解释器使用绝对路径，启动时以当前用户执行各工具的 `--version` 检查可调用性；这不等同于真实沙箱权限、控制组或配额验收。配置示例见 [worker.example.toml](../config/worker.example.toml)。启动检查正值预算、CPU 不超过墙钟、运行单进程、产物大小不超过单文件和磁盘配额，以及停机预算覆盖停止与清理。传输预算为原始载荷另留协议空间：请求按用例各预留 32 字节，并加 Job ID 上限与 1 KiB；响应按编译诊断或失败 stdout/stderr 的较大载荷，加 Job ID 上限与 1 KiB。
+`sandbox.executable`、C 编译器和 Python 解释器使用绝对路径，启动时以当前用户执行各工具的 `--version` 检查可调用性；这不等同于真实沙箱权限、控制组或配额验收。配置示例见 [worker.example.toml](../config/worker.example.toml)。启动检查正值预算、CPU 不超过墙钟、运行单进程、产物大小不超过单文件和磁盘配额，以及 `shutdown_timeout_ms >= stop_timeout_ms + 2 * cleanup_timeout_ms`，覆盖活动阶段停止及两个环境的串行清理，计算须无溢出。传输预算为原始载荷另留协议空间：请求按用例各预留 32 字节，并加 Job ID 上限与 1 KiB；响应按编译诊断或失败 stdout/stderr 的较大载荷，加 Job ID 上限与 1 KiB。
 
 `request.checker_source_max_bytes` 和 `request.checker_config_max_bytes` 缺省分别为 65,536 和 16,384。请求合计大小按用户源码、checker 源码、checker 参数与全部输入、答案的字节数计算，使用 checked_add 拒绝溢出；Kafka 编码记录另有上限，启动时须能容纳任务和有界结果。上述 checker 数据已计入合计载荷，协议空间不重复累加其单项预算。server 的消息上限仅用于状态 RPC。结果交接数量有上限，队列满时停止新接纳。
 

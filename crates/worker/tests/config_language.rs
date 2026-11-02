@@ -36,7 +36,7 @@ fn example_builds_both_language_plans() {
         ["main.c", "-std=c17", "-O2", "-o", "program"]
     );
     assert_eq!(compile.limits.process_max_count, 32);
-    assert_eq!(compile.limits.memory_kib, 512 * 1024);
+    assert_eq!(compile.limits.memory_kib, Some(512 * 1024));
     assert_eq!(c.run.executable.to_str(), Some("./program"));
     let python = language::plan("python", &config).unwrap();
     assert!(python.compile.is_none());
@@ -50,6 +50,25 @@ fn example_builds_both_language_plans() {
 /// An insufficient result envelope and a nonpositive execution budget block startup.
 #[test]
 fn invalid_resource_settings_are_explicit_errors() {
+    assert!(Config::parse(&EXAMPLE.replace("checker_box_id = 1", "checker_box_id = 0")).is_err());
+    let mut lifecycle = Config::parse(EXAMPLE).unwrap();
+    lifecycle.sandbox.shutdown_timeout_ms =
+        lifecycle.sandbox.stop_timeout_ms + 2 * lifecycle.sandbox.cleanup_timeout_ms - 1;
+    assert!(
+        lifecycle
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("both environments")
+    );
+    lifecycle.sandbox.cleanup_timeout_ms = u64::MAX;
+    assert!(
+        lifecycle
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("overflow")
+    );
     let too_small = EXAMPLE.replace(
         "max_event_record_bytes = 1_048_576",
         "max_event_record_bytes = 100",

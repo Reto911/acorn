@@ -168,8 +168,10 @@ pub struct SandboxConfig {
     pub backend: String,
     /// Absolute path to the Isolate executable.
     pub executable: PathBuf,
-    /// Dedicated Isolate box ID for this Worker.
+    /// Dedicated Isolate box ID for compilation and user execution.
     pub box_id: u32,
+    /// Distinct Isolate box ID for this Worker's checker environment.
+    pub checker_box_id: u32,
     /// Maximum open file descriptors inside a stage.
     pub fd_max_count: u32,
     /// Maximum size of a single file, in KiB.
@@ -367,14 +369,19 @@ impl Config {
             self.compile.artifact_max_bytes as u64 <= u64::from(self.sandbox.disk_quota_kib) * 1024,
             "Artifact limit exceeds the disk quota"
         );
+        ensure!(
+            self.sandbox.box_id != self.sandbox.checker_box_id,
+            "sandbox.box_id and sandbox.checker_box_id must differ"
+        );
         let shutdown_required = self
             .sandbox
-            .stop_timeout_ms
-            .checked_add(self.sandbox.cleanup_timeout_ms)
+            .cleanup_timeout_ms
+            .checked_mul(2)
+            .and_then(|cleanup| cleanup.checked_add(self.sandbox.stop_timeout_ms))
             .context("Sandbox lifecycle timeout overflow")?;
         ensure!(
             self.sandbox.shutdown_timeout_ms >= shutdown_required,
-            "Shutdown budget must cover stopping and cleanup"
+            "Shutdown budget must cover stopping and cleanup of both environments"
         );
         // Allow for the Job ID, Proto tags, lengths, progress, limits and exit metadata.
         let request_envelope = self

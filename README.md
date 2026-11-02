@@ -107,7 +107,7 @@ cp config/worker.example.toml "$HOME/.config/acorn/worker.toml"
 cp config/backend.example.toml "$HOME/.config/acorn/backend.toml"
 ```
 
-Edit `worker.toml` to check `sandbox.executable`, `languages.c.compiler`, and `languages.python.interpreter`. Choose an available `sandbox.box_id` dedicated to this Worker on the host. The example backend configuration connects to `http://127.0.0.1:50051` and selects the MySQL database configured by `database.endpoint`, `name`, and `username`. For this browser workflow, set `http.public_origin="http://localhost:5173"` in the backend configuration. The HTTP examples below send that same Origin while connecting directly to the backend. If you choose another external Origin, change both the configuration and each write request; host names and ports must match exactly.
+Edit `worker.toml` to check `sandbox.executable`, `languages.c.compiler`, and `languages.python.interpreter`. Choose two available IDs dedicated to this Worker on the host: `sandbox.box_id` for compilation/user execution and `sandbox.checker_box_id` for the checker. The example backend configuration connects to `http://127.0.0.1:50051` and selects the MySQL database configured by `database.endpoint`, `name`, and `username`. For this browser workflow, set `http.public_origin="http://localhost:5173"` in the backend configuration. The HTTP examples below send that same Origin while connecting directly to the backend. If you choose another external Origin, change both the configuration and each write request; host names and ports must match exactly.
 
 ### Initialize the Database
 
@@ -202,7 +202,8 @@ Both the backend and Worker read TOML through `--config <PATH>`; restart the ser
 | Setting                                   | Example value                | Purpose                                            |
 | ----------------------------------------- | ---------------------------- | -------------------------------------------------- |
 | Worker `server.listen`                    | `127.0.0.1:50051`            | gRPC listening address                             |
-| Worker `sandbox.box_id`                   | `0`                          | Isolate box ID reserved on this host               |
+| Worker `sandbox.box_id`                   | `0`                          | Isolate box ID for compilation/user execution      |
+| Worker `sandbox.checker_box_id`           | `1`                          | Separate Isolate box ID for the checker            |
 | Backend `http.listen`                     | `127.0.0.1:8080`             | HTTP API listening address                         |
 | Backend `http.public_origin`              | `http://127.0.0.1:8080`      | Required browser-facing Origin for JSON writes     |
 | Backend `http.cookie_secure`              | `false`                      | Secure Cookie setting for the external protocol    |
@@ -235,7 +236,7 @@ Existing deployment files must remove `scheduler.poll_interval_ms`, `grpc.submit
 
 ### Multiple Workers
 
-Give each Worker its own listening address and a `sandbox.box_id` reserved on its host, share the Kafka task group across Workers, then add their status endpoints to the backend configuration:
+Give each Worker its own listening address and two reserved IDs, `sandbox.box_id` and `sandbox.checker_box_id`. All IDs on the same host must differ; for example, use 0/1 for the first Worker and 2/3 for the second. Share the Kafka task group across Workers, then add their status endpoints to the backend configuration:
 
 ```toml
 [scheduler]

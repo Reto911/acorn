@@ -5,8 +5,8 @@ acorn-worker 是独立的 C/Python 判题进程，从 Kafka 消费任务并发�
 ## 执行方式
 
 - 每个 Worker 同时执行一个 Job；用例按输入顺序串行运行，首个失败用例结束本次判题。
-- C 源码以 `main.c` 编译一次，成功后将产物复制到各运行沙箱；Python 以 `main.py` 逐例启动解释器。
-- 编译和每个用例分别使用新沙箱，应用 CPU、墙钟、进程树内存、进程数、FD、文件和磁盘配额。
+- C 源码以 `main.c` 编译一次，成功后每例恢复原始产物副本；Python 以 `main.py` 逐例启动解释器。
+- 编译环境独立初始化和清理；用户环境在同 Job 内复用，每例重新启动进程并恢复原始程序，其他文件保留至 Job 收尾。应用 CPU、墙钟、进程树内存、进程数、FD、文件和磁盘配额。
 - 输出比较先删除整个输出末尾的 ASCII 空白，再逐字节比较。
 - 执行前预留结果名额，终态按 FIFO 发布；发布确认并成功入队原任务位点请求后释放名额。
 
@@ -20,7 +20,7 @@ acorn-worker 是独立的 C/Python 判题进程，从 Kafka 消费任务并发�
 
 1. 以 root 所有且启用 setuid 的方式安装 Isolate，配置其 UID/GID 范围、沙箱根目录和控制组路径。
 2. 为沙箱根目录所在文件系统启用用户空间及 inode 配额，并为各 box UID 保留相应容量。
-3. 为每个运行中的 Worker 分配本机独占的 box ID。
+3. 为每个运行中的 Worker 分配两个本机独占的 box ID，分别设置 `sandbox.box_id`（编译／用户）与 `sandbox.checker_box_id`（checker）；同机全部 Worker 的 ID 互不冲突。
 4. 使用普通用户初始化时，在 `/etc/isolate` 设置 `restricted_init = 0`，并以运行 Worker 的用户检查配置：
 
    ```sh
@@ -67,7 +67,7 @@ mkdir -p "$HOME/.config/acorn"
 cp config/worker.example.toml "$HOME/.config/acorn/worker.toml"
 ```
 
-编辑配置中的工具路径、监听地址和 `sandbox.box_id` 后启动：
+编辑配置中的工具路径、监听地址、`sandbox.box_id` 和 `sandbox.checker_box_id` 后启动：
 
 ```sh
 target/debug/acorn-worker --config "$HOME/.config/acorn/worker.toml"
@@ -81,23 +81,27 @@ target/debug/acorn-worker --config "$HOME/.config/acorn/worker.toml"
 
 完整字段见 [worker.example.toml](../../config/worker.example.toml)。配置在启动时读取，修改后重启生效。
 
-| 配置节             | 主要设置                                                   | 示例值                                               |
-| ------------------ | ---------------------------------------------------------- | ---------------------------------------------------- |
-| `server`           | gRPC 监听及消息上限                                        | `127.0.0.1:50051`，请求 16 MiB、响应 1 MiB           |
-| `request`          | ID、用户与 checker 源码、checker 参数、用例和总载荷上限    | 两种源码各 64 KiB、参数 16 KiB、128 例、总载荷 8 MiB |
-| `execution`        | Job 总期限、单用例资源上限、进程数及输出保留               | Job 120 秒，运行进程数 1                             |
-| `languages.c`      | GCC 路径和编译参数                                         | `/usr/bin/gcc`，C17、`-O2`                           |
-| `languages.python` | Python 路径和运行参数                                      | `/usr/bin/python3`，`-I -B -S main.py`               |
-| `compile`          | 编译资源、诊断和导出产物预算                               | CPU 10 秒、墙钟 20 秒、内存 512 MiB                  |
-| `sandbox`          | Isolate 路径、box ID、FD、文件／磁盘／inode 配额和收尾超时 | 文件 16 MiB，磁盘 64 MiB，4096 inode                 |
-| `results`          | 待交接结果容量                                             | 128 条                                               |
-| `logging`          | stderr 日志级别                                            | `info`                                               |
+| 配置节             | 主要设置                                                        | 示例值                                               |
+| ------------------ | --------------------------------------------------------------- | ---------------------------------------------------- |
+| `server`           | gRPC 监听及消息上限                                             | `127.0.0.1:50051`，请求 16 MiB、响应 1 MiB           |
+| `request`          | ID、用户与 checker 源码、checker 参数、用例和总载荷上限         | 两种源码各 64 KiB、参数 16 KiB、128 例、总载荷 8 MiB |
+| `execution`        | Job 总期限、单用例资源上限、进程数及输出保留                    | Job 120 秒，运行进程数 1                             |
+| `languages.c`      | GCC 路径和编译参数                                              | `/usr/bin/gcc`，C17、`-O2`                           |
+| `languages.python` | Python 路径和运行参数                                           | `/usr/bin/python3`，`-I -B -S main.py`               |
+| `compile`          | 编译资源、诊断和导出产物预算                                    | CPU 10 秒、墙钟 20 秒、内存 512 MiB                  |
+| `sandbox`          | Isolate 路径、两个 box ID、FD、文件／磁盘／inode 配额和收尾超时 | 文件 16 MiB，磁盘 64 MiB，4096 inode                 |
+| `results`          | 待交接结果容量                                                  | 128 条                                               |
+| `logging`          | stderr 日志级别                                                 | `info`                                               |
 
 请求中的单用例限额受 Worker 配置上限约束。内存、单文件和磁盘空间配置使用 KiB；源码、输出、消息和编译产物预算使用字节；时间使用毫秒。部署多个节点时，将各 Worker 预算与[后端配置](../backend/README.md#配置)对齐。
 
 任务接纳要求 checker 源码非空且为 UTF-8，`checker_config_json` 为 JSON 对象。`request.checker_source_max_bytes` 和 `request.checker_config_max_bytes` 缺省分别为 65,536 和 16,384 字节；两者连同用户源码、全部输入和参考数据计入 `payload_max_bytes`。完整 Protobuf 仍受 Kafka 记录上限约束。
 
 `checker_limits` 消息必须存在，内部缺失项表示不设限，空消息表示三项全部不设限；有限 CPU、墙钟毫秒和内存 KiB 均须为 `1..=2147483647`，独立于用户 `max_run` 上限。非法脚本数据或限额在接纳时形成 `InvalidJob`，接纳不检查 Python 语法。
+
+用户和 checker 使用独立环境；checker 环境在首次需要时初始化。底层文件接口从 Worker 私有 stdout 文件与任务副本准备 `checker.py`、`input.bin`、`answer.bin`、`output.bin`、`config.json`，参考数据和私有参数不进入用户环境。
+
+CPU 与墙钟取本次用户运行元数据；内存取用户环境 `cg-mem` 历史峰值，可能包含此前用例。可选限额缺失时不传对应 Isolate 参数；用户与编译仍提供正限额。Job 接纳时确定的绝对期限覆盖准备、全部运行及清理。
 
 ### Kafka 客户端配置
 
@@ -137,7 +141,7 @@ Kafka 服务保持本机单槽，执行期间持续驱动消费组，忙或结�
 
 英文日志输出到 stderr，`logging.level = "debug"` 可查看状态观测和重复任务。Job ID 可用于与后端日志关联。
 
-Ctrl-C 或 SIGTERM 先停止接纳，再停止当前执行并完成共同清理流程。`sandbox.shutdown_timeout_ms` 控制执行停止预算，随后 `kafka.shutdown_timeout_ms` 控制共同消息收尾及消费者释放等待。正常退出码为 0，启动、监听或停机错误为 1。
+Ctrl-C 或 SIGTERM 先停止接纳，再停止当前执行并完成共同清理流程。`sandbox.shutdown_timeout_ms` 至少为 `stop_timeout_ms + 2 * cleanup_timeout_ms`，覆盖一次活动阶段停止及两个环境的串行清理。`sandbox.shutdown_timeout_ms` 控制执行停止预算，随后 `kafka.shutdown_timeout_ms` 控制共同消息收尾及消费者释放等待。正常退出码为 0，启动、监听或停机错误为 1。
 
 停止无法确认时，Worker 保留执行占用并拒绝新任务，继续提供状态 RPC 和结果生产；部署端根据错误日志处置。结果保存在本进程内存中，重启后由后端保留已落库的业务结果。
 
@@ -162,26 +166,26 @@ ACORN_TEST_KAFKA_SERVERS=localhost:9092 \
 
 正式入口的 Kafka 接纳、状态 RPC 和 SIGTERM 收尾可用 `cargo test -p acorn-worker --locked --test kafka real_kafka_executable_handles_sigterm -- --ignored` 检查，同样需要上述 Kafka 环境变量。
 
-这些用例复用受控 Isolate 管理器，检查消费、分区撤销、结果交接和停机，不作为隔离证据。一条真实 Isolate 判题另需空闲的专用 box ID：
+这些用例复用受控 Isolate 管理器，检查消费、分区撤销、结果交接和停机，不作为隔离证据。一条真实 Isolate 判题另需两个空闲的专用 box ID：
 
 ```sh
-ACORN_TEST_KAFKA_SERVERS=localhost:9092 ACORN_ISOLATE_BOX_ID=210 \
+ACORN_TEST_KAFKA_SERVERS=localhost:9092 ACORN_ISOLATE_BOX_ID=210 ACORN_CHECKER_BOX_ID=211 \
   cargo test -p acorn-worker --locked --test kafka real_kafka_isolate_execution -- --ignored
 ```
 
 ### Isolate 阶段检查
 
-在已配置沙箱的主机上，使用空闲的专用 box ID 检查编译、运行、隔离和配额：
+在已配置沙箱的主机上，使用两个空闲的专用 box ID 检查编译、运行、隔离和配额：
 
 ```sh
-ACORN_ISOLATE_BOX_ID=200 ACORN_ISOLATION_SENTINEL=host-only-value \
-  cargo test -p acorn-worker --locked --test isolate_real -- --ignored --nocapture
+ACORN_ISOLATE_BOX_ID=200 ACORN_CHECKER_BOX_ID=201 ACORN_ISOLATION_SENTINEL=host-only-value \
+  cargo test -p acorn-worker --locked --test isolate_real -- --ignored --nocapture --test-threads=1
 ```
 
-阶段测试按默认 `/var/lib/isolate` 根目录检查清理。执行器的真实测试使用：
+两项阶段测试共享专用 ID，须串行运行；覆盖双环境复用、固定文件恢复及私有数据边界，按默认 `/var/lib/isolate` 根目录检查清理。执行器的真实测试使用：
 
 ```sh
-ACORN_ISOLATE_BOX_ID=201 \
+ACORN_ISOLATE_BOX_ID=202 ACORN_CHECKER_BOX_ID=203 \
   cargo test -p acorn-worker --locked --test executor -- --ignored --nocapture
 ```
 

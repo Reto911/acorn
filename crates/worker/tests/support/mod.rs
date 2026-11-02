@@ -7,7 +7,7 @@ use acorn_worker::config::Config;
 
 /// Test-owned manager and files; only trusted test programs run on the host.
 pub struct Fixture {
-    /// Temporary operation log and freshly initialized box directory.
+    /// Temporary operation log and independent directories for each box ID.
     pub directory: tempfile::TempDir,
     /// Deployment configuration selecting the controlled manager.
     pub config: Config,
@@ -28,13 +28,15 @@ mode = {mode:?}
 if (root / 'mode').exists():
     mode = (root / 'mode').read_text()
 args = sys.argv[1:]
+box_id = next(a[9:] for a in args if a.startswith('--box-id=')) if '--version' not in args else 'version'
+box_root = root / ('isolate-' + box_id)
 with (root / 'operations').open('a') as log:
     log.write(' '.join(args) + '\n')
 if '--version' in args:
     print('controlled manager')
 elif '--init' in args:
-    (root / 'box').mkdir()
-    print(root)
+    (box_root / 'box').mkdir(parents=True)
+    print(box_root)
 elif '--run' in args:
     meta = pathlib.Path(next(a[7:] for a in args if a.startswith('--meta=')))
     if mode == 'manager_failure':
@@ -48,7 +50,7 @@ elif '--run' in args:
         if child is not None:
             child.terminate()
     signal.signal(signal.SIGTERM, stop)
-    child = subprocess.Popen(command, cwd=root / 'box')
+    child = subprocess.Popen(command, cwd=box_root / 'box')
     if stopped:
         child.terminate()
     code = child.wait()
@@ -60,7 +62,9 @@ elif '--run' in args:
         meta.write_text('exitcode:' + str(code) + '\n')
     sys.exit(1 if code else 0)
 elif '--cleanup' in args:
-    shutil.rmtree(root / 'box')
+    if mode == 'slow_cleanup':
+        time.sleep(1.2)
+    shutil.rmtree(box_root)
     if mode == 'cleanup_failure':
         sys.exit(2)
 "#,
