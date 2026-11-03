@@ -1350,6 +1350,8 @@ async fn real_submission_reads(
     body: &Value,
     source: &str,
 ) {
+    assert_eq!(body["review_status"], "DISABLED");
+    assert!(body["review"].is_null());
     let (status, history) = network_call(
         harness.address,
         "GET",
@@ -1429,7 +1431,7 @@ async fn real_submission_reads(
     }
 }
 
-/// A + B and quotient samples pass through real HTTP, Kafka and Isolate with terminal counts.
+/// Six seeded problems accept their samples and reject representative errors through real services.
 #[tokio::test]
 #[ignore = "Requires host Isolate privileges, cgroups, quotas and dedicated user/checker box IDs"]
 async fn real_http_worker_acceptance() {
@@ -1473,6 +1475,70 @@ async fn real_http_worker_acceptance() {
             "AC",
             8,
             8,
+        ),
+        (
+            3,
+            "c",
+            include_str!("../../../examples/submissions/reverse-words.c"),
+            "AC",
+            4,
+            4,
+        ),
+        (
+            3,
+            "python",
+            include_str!("../../../examples/submissions/reverse-words.py"),
+            "AC",
+            4,
+            4,
+        ),
+        (
+            4,
+            "c",
+            include_str!("../../../examples/submissions/prefix-sums.c"),
+            "AC",
+            4,
+            4,
+        ),
+        (
+            4,
+            "python",
+            include_str!("../../../examples/submissions/prefix-sums.py"),
+            "AC",
+            4,
+            4,
+        ),
+        (
+            5,
+            "c",
+            include_str!("../../../examples/submissions/filter-words.c"),
+            "AC",
+            4,
+            4,
+        ),
+        (
+            5,
+            "python",
+            include_str!("../../../examples/submissions/filter-words.py"),
+            "AC",
+            4,
+            4,
+        ),
+        (
+            6,
+            "c",
+            include_str!("../../../examples/submissions/adjacent-word-pairs.c"),
+            "AC",
+            4,
+            4,
+        ),
+        (
+            6,
+            "python",
+            include_str!("../../../examples/submissions/adjacent-word-pairs.py"),
+            "AC",
+            4,
+            4,
         ),
         (
             1,
@@ -1534,6 +1600,57 @@ async fn real_http_worker_acceptance() {
         }
         eprintln!(
             "Real sample: submission={id} problem={problem_id} language={language} verdict={verdict} completed={completed}/{total}"
+        );
+    }
+    for (problem_id, source, failed_index, expected_stdout) in [
+        (
+            3,
+            "import sys\nwords = sys.stdin.read().split()[1:]\nprint(' '.join(words))\n",
+            2,
+            "red blue green\n",
+        ),
+        (
+            4,
+            "import sys\nvalues = list(map(int, sys.stdin.read().split()))[1:]\ntotal = 0\nfor value in values:\n    total += value\n    print(int(float(total)))\n",
+            4,
+            concat!(
+                "1000000000000000\n2000000000000000\n3000000000000000\n",
+                "4000000000000000\n5000000000000000\n6000000000000000\n",
+                "7000000000000000\n8000000000000000\n9000000000000000\n",
+                "9007199254740992\n",
+            ),
+        ),
+        (
+            5,
+            "import sys\nitems = sys.stdin.read().split()\nk = int(items[1])\nprint(' '.join(sorted({word for word in items[2:] if len(word) >= k})))\n",
+            2,
+            "cat dog\n",
+        ),
+        (
+            6,
+            "import sys\nwords = sys.stdin.read().split()[1:]\nfor pair in zip(words, words[1:]):\n    print(' '.join(sorted(pair)))\n",
+            2,
+            "a b\na b\na b\n",
+        ),
+    ] {
+        let id = harness.submit(problem_id, "python", source).await;
+        let body = harness.terminal(&id, Some("WA"), 4, failed_index).await;
+        assert_eq!(body["problem_id"], problem_id);
+        assert_eq!(body["version_no"], 1);
+        let case = &body["terminal_details"]["failed_case"];
+        assert_eq!(case["case_index"], failed_index);
+        assert_eq!(case["exit_code"], 0);
+        assert!(case["signal"].is_null());
+        assert_eq!(case["stdout_truncated"], false);
+        assert_eq!(case["stderr_truncated"], false);
+        assert_eq!(case["stderr_base64"], "");
+        let stdout = base64::engine::general_purpose::STANDARD
+            .decode(case["stdout_base64"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(stdout, expected_stdout.as_bytes());
+        real_submission_reads(&harness, &id, &body, source).await;
+        eprintln!(
+            "Real checker rule: submission={id} problem={problem_id} verdict=WA completed={failed_index}/4"
         );
     }
     harness.close().await;

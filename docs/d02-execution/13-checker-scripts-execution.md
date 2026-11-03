@@ -8,9 +8,9 @@ PS01–PS06 已依次完成，交付结构版本 5、完整 checker 装配与接
 
 PS01–PS05 分别提交为 f0f3bb7、e095f96、fbce955、d582852 和 cb67620。PS06 的规划、真实验收与检查说明作为同一组改动交付；任务分解见第 2.6 节，验收安排及实际结果见第 14、16 节。
 
-PS06、PS07 分别提交为 50058d2、f8de89a。PS07 的四种通用预设材料和执行器定向检查见第 19 节；PS08 已完成正式例题、提交样例、夹具适配及使用说明，保留为未提交修改，实际结果见第 20 节。PS09 的完整真实链路仍待实施。追加任务定义见[设计第 9 节](../13-checker-scripts-design.md#9-通用预设与例题扩展任务)。
+PS06、PS07、PS08 分别提交为 50058d2、f8de89a、0a4fa60。PS07 的四种通用预设材料和执行器定向检查见第 19 节；PS08 的正式例题、提交样例、夹具适配及使用说明见第 20 节。PS09 及其 5 项分解已完成，八份新样例、四种错误答案与 ID 7 专用场景通过完整真实链路验收，结果见第 22 节，规划记录见第 21 节。追加任务定义见[设计第 9 节](../13-checker-scripts-design.md#9-通用预设与例题扩展任务)。
 
-PS07、PS08 各 5 项分解均已完成；脚本和种子定义见设计第 9.3、9.4 节，PS09 保留完整真实链路验收与交付收口范围。
+PS01–PS09 及 57 项分解均已完成；通用预设、正式种子和真实验收定义见设计第 9.3–9.5 节。原 CV01–CV08 的历史结论保持，本轮新增覆盖见第 22 节。
 
 ## 2. 任务状态
 
@@ -24,7 +24,7 @@ PS07、PS08 各 5 项分解均已完成；脚本和种子定义见设计第 9.3�
 - [x] PS06 定向验收与交付。
 - [x] PS07 四种通用预设脚本与定向逻辑检查。
 - [x] PS08 四道正式例题、提交样例与初始化夹具适配。
-- [ ] PS09 真实链路验收与使用说明同步。
+- [x] PS09 真实链路验收与使用说明同步。
 
 ### 2.1 PS01 数据结构与存储
 
@@ -133,6 +133,16 @@ PS04.1、PS04.2 可分别推进，PS03 文件与环境接口就绪后接通 PS04
 - [x] **PS08.3 适配现有夹具与列表。**
 - [x] **PS08.4 验证初始化、装配和样例。**
 - [x] **PS08.5 同步说明并收口阶段。**
+
+### 2.9 PS09 真实链路验收与交付
+
+依赖 PS07、PS08；定义、四份错误提交及完成条件见[设计第 9.5 节](../13-checker-scripts-design.md#95-ps09-真实链路验收与交付)。五项分解均已完成，实际结果见第 22 节。
+
+- [x] **PS09.1 扩展正式题真实链路。**
+- [x] **PS09.2 补四种代表性错误答案。**
+- [x] **PS09.3 核对读取与专用场景。**
+- [x] **PS09.4 执行串行真实验收。**
+- [x] **PS09.5 同步说明并登记交付。**
 
 ## 3. 设计定稿记录
 
@@ -686,6 +696,67 @@ PS07 及其 5 项分解完成。四份材料使用现有命令与执行器，无
 
 ### 20.4 阶段边界
 
-PS08 及其 5 项分解完成，本阶段修改尚未提交。全新初始化包含六份正式预设及六道题，四题 16 例和八份提交可装配并通过受控执行器检查。PS09 继续验收新四题的完整 HTTP → Kafka → Worker／Isolate → MySQL、调整后的专用真实场景及联调产生的剩余说明。
+PS08 及其 5 项分解完成。全新初始化包含六份正式预设及六道题，四题 16 例和八份提交可装配并通过受控执行器检查。PS09 继续验收新四题的完整 HTTP → Kafka → Worker／Isolate → MySQL、调整后的专用真实场景及联调产生的剩余说明。
 
 本阶段未运行真实 Isolate、ignored 真实业务场景、浏览器、外部模型或完整部署；未重跑未受影响的完整测试集，既有真实链路结论不扩展到新四题。
+
+## 21. PS09 任务规划记录
+
+### 21.1 规划范围
+
+PS08 已提交为 0a4fa60。本轮在设计第 9.5 节追加 PS09 的五项分解，并在第 2.9 节保持待办：扩展八份正式样例的真实业务链路，追加四种代表性错误提交，复用读取合同和 ID 7 专用场景，串行运行三个既有真实入口，最后同步检查说明与验收记录。
+
+四份新错误提交分别覆盖顺序、2^53 以上的整数精度、重复计数和行内配对。固定正式数据及预期首败／完成数见设计中的表格，均为后续执行的断言目标。本轮未改测试、程序、SQL 或提交样例，未运行功能和外部服务检查，PS09 及其五项分解均未完成。
+
+### 21.2 后续执行入口
+
+实施时先准备 MYSQL_PASSWORD、ACORN_TEST_DATABASE_CONFIG、ACORN_TEST_KAFKA_SERVERS，以及明确预留且不同的 ACORN_ISOLATE_BOX_ID／ACORN_CHECKER_BOX_ID，再在仓库根目录依次执行以下既有入口。三个命令共享同一对 box ID，不能同时运行；独立库、topic／group 与正常清理沿用现有夹具。
+
+```sh
+cargo test -p acorn-worker --locked --test executor real_preset_acceptance -- --ignored --nocapture --test-threads=1
+cargo test -p acorn-backend --locked --test workflow real_http_worker_acceptance -- --ignored --nocapture --test-threads=1
+cargo test -p acorn-backend --locked --test workflow real_checker_workflow_acceptance -- --ignored --nocapture --test-threads=1
+```
+
+实施前按仓库要求说明每项新增检查的覆盖及必要性。Rust 改动完成后执行既有格式、编译、Clippy 与相关测试；真实入口发生失败时登记原因与修正，仅重跑受影响检查。八份新样例 AC、四种错误提交 WA、ID 7 多解／CheckerFailed 和读取合同实际通过后，才登记 PS09 完成。
+
+### 21.3 本轮文档检查
+
+两份变更 Markdown 通过 Prettier，本地链接／锚点、原有标题顺序、章节编号和代码围栏有效；设计与实施清单中的五项任务名称一致，原 CV01–CV08 保持。PS01–PS08 及原 52 项分解维持完成，PS09 与新增五项分解保持待办，git diff --check 通过。本轮规划未提交 Git。
+
+## 22. PS09 实施记录
+
+### 22.1 实际改动
+
+扩展 [real_http_worker_acceptance](../../crates/backend/tests/workflow.rs)，通过正式 SQL 初始化独立库，再经 HTTP 提交题号 3–6 的八份实际 C／Python 样例。每份核对版本 1、AC 及真实 Kafka 的 total_cases=completed_cases=4；保留原两数求和、商题及 CE／WA／TLE。新增四份 Python 错误提交，使用正式数据验证设计第 9.5 节的顺序、整数精度、重复计数与行内配对，逐项核对首败序号、退出码 0、无截断、空 stderr 及用户 stdout。
+
+复用 real_submission_reads 核对每份新增提交的本人历史、固定题目版本、原始源码与公开响应的私有字段边界，并增加 DISABLED／无审查结果断言。在 [RealHarness](../../crates/backend/tests/support/real.rs)补充真实 Kafka 终态与 MySQL／HTTP 详情的对应检查：首败的输出、截断标记、资源及退出状态一致，CE 编译诊断与截断标记一致，AC 无失败详情；checker 故障沿用已有诊断一致性断言。字段核对使用公开的 CaseDetails，不改生产接口。
+
+更新 Worker／后端的真实检查说明，补充定向预设命令、六题样例、四种 WA、ID 7 专用场景及串行约束。生产程序、协议、数据库结构、脚本、正式种子、提交样例及页面保持原实现。
+
+### 22.2 实际检查
+
+三个真实入口按设计顺序使用同一对预留空闲 box ID 串行执行。后端检查从正式三条 SQL 创建独立 MySQL 库，使用专属 Kafka topic／group，经过实际 HTTP、Scheduler、Kafka、Worker／Isolate 与 MySQL 保存路径；事件观察器不加入业务消费组或提交位点。所有通过入口正常执行既有收尾，删除本次库、topic／group，两个任务专用 box 均为空。
+
+| 命令                                                                                                                            | 实际结果                                                                                   |
+| ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| cargo fmt --all -- --check                                                                                                      | 通过                                                                                       |
+| cargo check --workspace --all-targets --locked                                                                                  | 修正测试字段访问后通过，包含受影响的 ignored 目标                                          |
+| cargo clippy --workspace --all-targets --locked -- -D warnings                                                                  | 通过                                                                                       |
+| cargo test -p acorn-worker --locked --test executor real_preset_acceptance -- --ignored --nocapture --test-threads=1            | 1 项通过，22 项未被筛选；商题及新四题共十份 C／Python 样例完成 48 例，多解五次判断继续通过 |
+| cargo test -p acorn-backend --locked --test workflow real_http_worker_acceptance -- --ignored --nocapture --test-threads=1      | 修正编译后 1 项通过，44 项未被筛选；共 19 次真实提交                                       |
+| cargo test -p acorn-backend --locked --test workflow real_checker_workflow_acceptance -- --ignored --nocapture --test-threads=1 | 1 项通过，44 项未被筛选；ID 7 的多解与 checker 故障共四次真实提交                          |
+
+正式业务入口中，八份新样例均完成四例 AC，共 32 例；合法换行、符号／前导零、无序记录与重复项均由数据库装配的对应脚本接受。两数求和 C／Python 各 104 例、商题各 8 例通过，原 CE、首例 WA／TLE 继续通过。四份新错误提交均为 WA，题号 3–6 的首败序号与完成数依次为 2、4、2、2，总数均为 4；整数首败 stdout 的末项实际为 9007199254740992，未被接受为参考中的 9007199254740993。词项顺序、重复 cat 缺失和数对 b a 改为 a b 分别按合同被拒绝。
+
+ID 7／版本 1 的两份合法多解为 AC，错误输出为 WA，三次均完成 1／1。版本 2 第一例通过，第二例参考非法形成 CheckerFailed，真实终态 total_cases=3、completed_cases=1；HTTP／MySQL 为 failed、无 verdict，诊断有界且不包含私有参考、Traceback 或原始异常内容。本人历史、源码、固定版本及 DISABLED 审查断言全部通过。
+
+### 22.3 检查修正
+
+首次所有目标编译和首次 real_http_worker_acceptance 启动均因新增测试读取 TerminalOutcome.details 私有字段而在编译阶段失败；该次真实入口未进入运行，未创建测试服务或业务资源。改为反序列化公开 CaseDetails 并逐项比较 Kafka 首败数据，随后所有目标编译及真实入口通过。未放宽生产字段可见性或改变判题行为；本阶段无运行期失败与未解决检查。
+
+### 22.4 阶段交付与范围
+
+PS09 及其 5 项分解完成，PS01–PS09 和 57 项分解全部完成。原 CV01–CV08 表与历史结论保留；本轮为新四题补齐真实执行、完整业务链路、错误答案、持久化及读取合同，PS07／PS08 的受控检查仍按原范围记录。
+
+四份变更 Markdown 通过 Prettier，本地链接／锚点、既有标题顺序、章节编号、任务定义与清单、代码围栏有效，git diff --check 通过。仅运行本轮变更需要的格式、编译、Clippy 和三个真实入口；未重跑完整常规测试集、独立协议／资源故障矩阵、双 Worker 并发、外部模型或完整部署。没有前端改动，未新增浏览器验收，页面文案按用户确认保持。

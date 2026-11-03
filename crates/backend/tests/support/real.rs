@@ -11,6 +11,7 @@ use acorn_protocol::{
     worker::v1::{JobState, Verdict, get_job_reply::Terminal},
 };
 use acorn_worker::{config::Config as WorkerConfig, rpc::WorkerService};
+use base64::{Engine, prelude::BASE64_STANDARD};
 use rdkafka::{
     Message, Offset, TopicPartitionList,
     consumer::{Consumer, StreamConsumer},
@@ -226,7 +227,7 @@ impl RealHarness {
         body["submission_id"].as_str().unwrap().to_owned()
     }
 
-    /// Match actual Kafka terminal counts against the persisted HTTP result or execution failure.
+    /// Match actual Kafka terminal counts and details against MySQL and the HTTP result.
     pub async fn terminal(
         &self,
         id: &str,
@@ -316,6 +317,48 @@ impl RealHarness {
                     Verdict::Unspecified => panic!("Missing actual verdict"),
                 };
                 assert_eq!(Some(actual), verdict);
+                if let Some(case) = result.failed_case {
+                    let details: acorn_backend::submissions::CaseDetails =
+                        serde_json::from_value(body["terminal_details"].clone()).unwrap();
+                    let saved = details.failed_case;
+                    assert_eq!(saved.case_index, case.case_index);
+                    assert_eq!(saved.stdout_base64, BASE64_STANDARD.encode(case.stdout));
+                    assert_eq!(saved.stderr_base64, BASE64_STANDARD.encode(case.stderr));
+                    assert_eq!(saved.stdout_truncated, case.stdout_truncated);
+                    assert_eq!(saved.stderr_truncated, case.stderr_truncated);
+                    assert_eq!(
+                        saved.resources.map(|usage| (
+                            usage.cpu_time_us,
+                            usage.wall_time_us,
+                            usage.peak_memory_bytes
+                        )),
+                        case.resources.map(|usage| (
+                            usage.cpu_time_us,
+                            usage.wall_time_us,
+                            usage.peak_memory_bytes
+                        )),
+                    );
+                    let exit = saved
+                        .exit_code
+                        .map(acorn_protocol::worker::v1::failed_case::Exit::ExitCode)
+                        .or_else(|| {
+                            saved
+                                .signal
+                                .map(acorn_protocol::worker::v1::failed_case::Exit::Signal)
+                        });
+                    assert_eq!(exit, case.exit);
+                } else if result.verdict == Verdict::CompileError as i32 {
+                    assert_eq!(
+                        body["terminal_details"]["compile_diagnostic_base64"],
+                        BASE64_STANDARD.encode(result.compile_diagnostic)
+                    );
+                    assert_eq!(
+                        body["terminal_details"]["compile_diagnostic_truncated"],
+                        result.compile_diagnostic_truncated
+                    );
+                } else {
+                    assert!(body["terminal_details"].is_null());
+                }
             }
             Terminal::Failure(failure) => {
                 assert_eq!(event.state, JobState::Failed as i32);

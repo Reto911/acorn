@@ -295,17 +295,17 @@ ACORN_TEST_DATABASE_CONFIG=/path/to/mysql-test.toml \
 
 ```sh
 ACORN_TEST_KAFKA_SERVERS=localhost:9092 ACORN_TEST_DATABASE_CONFIG=/path/to/mysql-test.toml ACORN_ISOLATE_BOX_ID=204 ACORN_CHECKER_BOX_ID=205 \
-  cargo test -p acorn-backend --locked --test workflow real_http_worker_acceptance -- --ignored --nocapture
+  cargo test -p acorn-backend --locked --test workflow real_http_worker_acceptance -- --ignored --nocapture --test-threads=1
 ```
 
-该检查通过 HTTP 提交两数求和与商题的 C／Python 样例，核对真实 Kafka 终态中的 104／8 例完成数量、MySQL 保存结果及本人历史／源码，并保留 CE／WA／TLE 样例。专用多解与“先 AC、后 CheckerFailed”使用独立测试版本，复用同一组环境设置串行执行：
+该检查通过 HTTP 提交六道正式题的 C／Python 样例：两数求和、整数商，以及单词逆序、整数前缀和、筛选单词、相邻单词对。核对真实 Kafka 终态中的 104／8／4 例完成数量、MySQL 保存结果及本人历史／源码；另用四份错误提交检查顺序、整数精度、重复计数与行内配对，首败／完成数分别为 2、4、2、2，并保留原 CE／WA／TLE 样例。专用多解与“先 AC、后 CheckerFailed”使用临时题号／脚本 ID 7 及独立测试版本，复用同一组环境设置串行执行：
 
 ```sh
 ACORN_TEST_KAFKA_SERVERS=localhost:9092 ACORN_TEST_DATABASE_CONFIG=/path/to/mysql-test.toml ACORN_ISOLATE_BOX_ID=204 ACORN_CHECKER_BOX_ID=205 \
   cargo test -p acorn-backend --locked --test workflow real_checker_workflow_acceptance -- --ignored --nocapture --test-threads=1
 ```
 
-两项检查的事件观察器显式分配测试 topic，不加入消费组或提交位点；测试终态由真实 Worker 生成并经 Scheduler 保存。私有参考及 checker 诊断只在测试断言和内部故障路径中使用。
+两项检查的事件观察器显式分配测试 topic，不加入消费组或提交位点；测试终态由真实 Worker 生成并经 Scheduler 保存，Kafka 终态详情与 MySQL／HTTP 结果核对。私有参考及 checker 诊断只在测试断言和内部故障路径中使用。
 
 双 Worker 并行检查需分配四个互不冲突的专用 box ID：
 

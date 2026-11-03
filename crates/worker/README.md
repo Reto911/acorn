@@ -196,4 +196,13 @@ ACORN_ISOLATE_BOX_ID=202 ACORN_CHECKER_BOX_ID=203 \
   cargo test -p acorn-worker --locked --test executor -- --ignored --nocapture --test-threads=1
 ```
 
+只运行预设样例时，可选择同一入口中的定向检查：
+
+```sh
+ACORN_ISOLATE_BOX_ID=202 ACORN_CHECKER_BOX_ID=203 \
+  cargo test -p acorn-worker --locked --test executor real_preset_acceptance -- --ignored --nocapture --test-threads=1
+```
+
+该入口直接使用仓库中的 checker 和提交源码，验证商题及四道通用比较题的 C／Python 样例，以及 sum-pair 的不同合法输出和错误输出。完整数据库装配、HTTP、Kafka 与持久化路径见[后端真实链路检查](../backend/README.md#检查命令)。共享同一对 box ID 的真实入口须串行执行。
+
 完整协议、资源规则和失败处理见 [Worker 设计](../../docs/01-worker-design.md)。
