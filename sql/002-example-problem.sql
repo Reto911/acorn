@@ -1,5 +1,5 @@
--- Built-in A + B and quotient examples retained in release distributions.
--- A + B keeps its 104 original cases; quotient has eight fixed cases.
+-- Six built-in examples retained in release distributions.
+-- A + B keeps 104 original cases; quotient has eight; problems 3-6 have four each.
 -- Run once after 001-initial-schema.sql against a newly initialized database.
 -- This is initial data, not a schema migration. It does not create a user.
 
@@ -291,6 +291,330 @@ VALUES
     (2, 1, 7, X'2D3130303030303020310A', X'2D313030303030300A'),
     (2, 1, 8, X'3130303030303020330A', X'3333333333332E333333333333333333330A');
 
-UPDATE problems SET current_version_no = 1 WHERE id IN (1, 2);
+INSERT INTO checker_scripts (id, name, source)
+VALUES
+    (3, 'tokens', '"""Compare ordered raw-byte tokens, ignoring ASCII whitespace differences."""
+
+import json
+import sys
+from pathlib import Path
+
+
+def main():
+    """Require empty configuration before comparing the two token sequences."""
+    config = json.loads(Path(sys.argv[4]).read_text(encoding="utf-8"))
+    if config != {}:
+        raise ValueError("This checker requires an empty configuration object")
+
+    expected = Path(sys.argv[2]).read_bytes().split()
+    actual = Path(sys.argv[3]).read_bytes().split()
+    verdict = "AC" if actual == expected else "WA"
+    print(json.dumps({"verdict": verdict}))
+
+
+if __name__ == "__main__":
+    main()
+'),
+    (4, 'integers', '"""Compare ordered decimal integers exactly without converting them to numbers."""
+
+import json
+import re
+import sys
+from pathlib import Path
+
+
+def integers(path):
+    """Validate ASCII decimal tokens and normalize their signs and leading zeros."""
+    values = []
+    for token in path.read_bytes().split():
+        if re.fullmatch(rb"[+-]?[0-9]+", token) is None:
+            raise ValueError("Invalid decimal integer token")
+        digits = token.lstrip(b"+-").lstrip(b"0") or b"0"
+        negative = token.startswith(b"-") and digits != b"0"
+        values.append((negative, digits))
+    return values
+
+
+def main():
+    """Validate configuration and the complete reference before parsing user output."""
+    config = json.loads(Path(sys.argv[4]).read_text(encoding="utf-8"))
+    if config != {}:
+        raise ValueError("This checker requires an empty configuration object")
+
+    expected = integers(Path(sys.argv[2]))
+    try:
+        actual = integers(Path(sys.argv[3]))
+    except ValueError:
+        accepted = False
+    else:
+        accepted = actual == expected
+    print(json.dumps({"verdict": "AC" if accepted else "WA"}))
+
+
+if __name__ == "__main__":
+    main()
+'),
+    (5, 'unordered-tokens', '"""Compare raw-byte token multisets, preserving the count of every token."""
+
+import json
+import sys
+from collections import Counter
+from pathlib import Path
+
+
+def main():
+    """Require empty configuration before comparing unordered token counts."""
+    config = json.loads(Path(sys.argv[4]).read_text(encoding="utf-8"))
+    if config != {}:
+        raise ValueError("This checker requires an empty configuration object")
+
+    expected = Counter(Path(sys.argv[2]).read_bytes().split())
+    actual = Counter(Path(sys.argv[3]).read_bytes().split())
+    verdict = "AC" if actual == expected else "WA"
+    print(json.dumps({"verdict": verdict}))
+
+
+if __name__ == "__main__":
+    main()
+'),
+    (6, 'unordered-lines', '"""Compare multisets of LF-separated records while retaining field order."""
+
+import json
+import sys
+from collections import Counter
+from pathlib import Path
+
+
+def records(path):
+    """Count nonempty raw-byte field tuples, accepting CRLF and ASCII whitespace."""
+    counts = Counter()
+    for line in path.read_bytes().split(b"\\n"):
+        fields = tuple(line.split())
+        if fields:
+            counts[fields] += 1
+    return counts
+
+
+def main():
+    """Require empty configuration before comparing unordered record counts."""
+    config = json.loads(Path(sys.argv[4]).read_text(encoding="utf-8"))
+    if config != {}:
+        raise ValueError("This checker requires an empty configuration object")
+
+    expected = records(Path(sys.argv[2]))
+    actual = records(Path(sys.argv[3]))
+    verdict = "AC" if actual == expected else "WA"
+    print(json.dumps({"verdict": verdict}))
+
+
+if __name__ == "__main__":
+    main()
+');
+
+INSERT INTO problems (id, current_version_no, created_at_ms)
+VALUES (3, NULL, CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000 AS SIGNED));
+
+INSERT INTO problem_versions (
+    problem_id, version_no, title, statement, checker_script_id, checker_config_json,
+    published_at_ms
+)
+VALUES (
+    3, 1, '单词逆序',
+    '给定 n 个单词，按输入顺序的逆序输出所有单词。
+
+## 输入格式
+
+第一行是整数 n，1 <= n <= 100。随后是 n 个以 ASCII 空白分隔的单词，每个单词仅含小写 ASCII 字母 a-z，长度为 1 至 16。
+
+## 输出格式
+
+输出逆序后的 n 个单词。词项数量、顺序及字母必须一致，词项之间的 ASCII 空白数量和换行位置不限。
+
+## 样例输入
+
+```text
+3
+red blue green
+```
+
+## 样例输出
+
+```text
+green
+blue
+red
+```',
+    3, '{}', CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000 AS SIGNED)
+);
+
+INSERT INTO problem_version_languages (
+    problem_id, version_no, language_id, cpu_time_ms, wall_time_ms, memory_kib
+)
+VALUES
+    (3, 1, 'c', 1000, 3000, 262144),
+    (3, 1, 'python', 2000, 5000, 262144);
+
+INSERT INTO test_cases (
+    problem_id, version_no, case_index, input, expected_output
+)
+VALUES
+    (3, 1, 1, X'310A6F616B0A', X'6F616B0A'),
+    (3, 1, 2, X'330A72656420626C756520677265656E0A', X'677265656E20626C7565207265640A'),
+    (3, 1, 3, X'340A612062206120630A', X'632061206220610A'),
+    (3, 1, 4, X'330A61206162636465666768696A6B6C6D6E6F70207A0A', X'7A206162636465666768696A6B6C6D6E6F7020610A');
+
+INSERT INTO problems (id, current_version_no, created_at_ms)
+VALUES (4, NULL, CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000 AS SIGNED));
+
+INSERT INTO problem_versions (
+    problem_id, version_no, title, statement, checker_script_id, checker_config_json,
+    published_at_ms
+)
+VALUES (
+    4, 1, '整数前缀和',
+    '给定 n 个整数，输出每个位置的前缀和。第 i 个结果为前 i 个输入整数之和。
+
+## 输入格式
+
+第一行是整数 n，1 <= n <= 100。随后是 n 个整数 ai，-1000000000000000 <= ai <= 1000000000000000。所有前缀和均在有符号 64 位整数范围内。
+
+## 输出格式
+
+按顺序输出 n 个十进制整数，以 ASCII 空白分隔。允许显式正号、前导零和负零，按整数值精确比较。小数、科学记数法和下划线不合法。结果可能超过 2^53，请使用精确整数运算。
+
+## 样例输入
+
+```text
+4
+3 -5 0 4
+```
+
+## 样例输出
+
+```text
++0003 -0002 -0002 +0002
+```',
+    4, '{}', CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000 AS SIGNED)
+);
+
+INSERT INTO problem_version_languages (
+    problem_id, version_no, language_id, cpu_time_ms, wall_time_ms, memory_kib
+)
+VALUES
+    (4, 1, 'c', 1000, 3000, 262144),
+    (4, 1, 'python', 2000, 5000, 262144);
+
+INSERT INTO test_cases (
+    problem_id, version_no, case_index, input, expected_output
+)
+VALUES
+    (4, 1, 1, X'310A300A', X'300A'),
+    (4, 1, 2, X'340A33202D35203020340A', X'33202D32202D3220320A'),
+    (4, 1, 3, X'310A2D313030303030303030303030303030300A', X'2D313030303030303030303030303030300A'),
+    (4, 1, 4, X'31300A313030303030303030303030303030302031303030303030303030303030303030203130303030303030303030303030303020313030303030303030303030303030302031303030303030303030303030303030203130303030303030303030303030303020313030303030303030303030303030302031303030303030303030303030303030203130303030303030303030303030303020373139393235343734303939330A', X'313030303030303030303030303030302032303030303030303030303030303030203330303030303030303030303030303020343030303030303030303030303030302035303030303030303030303030303030203630303030303030303030303030303020373030303030303030303030303030302038303030303030303030303030303030203930303030303030303030303030303020393030373139393235343734303939330A');
+
+INSERT INTO problems (id, current_version_no, created_at_ms)
+VALUES (5, NULL, CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000 AS SIGNED));
+
+INSERT INTO problem_versions (
+    problem_id, version_no, title, statement, checker_script_id, checker_config_json,
+    published_at_ms
+)
+VALUES (
+    5, 1, '筛选单词',
+    '给定 n 个单词与长度下界 k，输出所有长度至少为 k 的单词，保留每次出现。
+
+## 输入格式
+
+第一行是整数 n 和 k，1 <= n <= 100，1 <= k <= 16。随后是 n 个单词，每个单词仅含小写 ASCII 字母 a-z，长度为 1 至 16。
+
+## 输出格式
+
+以 ASCII 空白分隔输出所有符合要求的单词，顺序任意。相同单词的出现次数必须与输入中符合要求的次数一致；没有符合要求的单词时，输出为空或仅含 ASCII 空白。
+
+## 样例输入
+
+```text
+4 3
+a bear cat to
+```
+
+## 样例输出
+
+```text
+cat bear
+```',
+    5, '{}', CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000 AS SIGNED)
+);
+
+INSERT INTO problem_version_languages (
+    problem_id, version_no, language_id, cpu_time_ms, wall_time_ms, memory_kib
+)
+VALUES
+    (5, 1, 'c', 1000, 3000, 262144),
+    (5, 1, 'python', 2000, 5000, 262144);
+
+INSERT INTO test_cases (
+    problem_id, version_no, case_index, input, expected_output
+)
+VALUES
+    (5, 1, 1, X'3220350A612062620A', X''),
+    (5, 1, 2, X'3320310A63617420646F67206361740A', X'63617420646F67206361740A'),
+    (5, 1, 3, X'3420330A6120626561722063617420746F0A', X'62656172206361740A'),
+    (5, 1, 4, X'332031360A6162636465666768696A6B6C6D6E6F702073686F7274206162636465666768696A6B6C6D6E6F700A', X'6162636465666768696A6B6C6D6E6F70206162636465666768696A6B6C6D6E6F700A');
+
+INSERT INTO problems (id, current_version_no, created_at_ms)
+VALUES (6, NULL, CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000 AS SIGNED));
+
+INSERT INTO problem_versions (
+    problem_id, version_no, title, statement, checker_script_id, checker_config_json,
+    published_at_ms
+)
+VALUES (
+    6, 1, '相邻单词对',
+    '给定 n 个单词，对每两个相邻单词生成一条记录，输出全部 n-1 条记录。
+
+## 输入格式
+
+第一行是整数 n，2 <= n <= 100。随后是 n 个单词，每个单词仅含小写 ASCII 字母 a-z，长度为 1 至 16。
+
+## 输出格式
+
+每条记录占一行，包含前一个单词和后一个单词，以 ASCII 空白分隔，行内字段顺序必须保持。记录的行序任意，重复记录必须保留。以 LF 分行，兼容 CRLF，忽略空白行。
+
+## 样例输入
+
+```text
+4
+a b a b
+```
+
+## 样例输出
+
+```text
+b a
+a b
+a b
+```',
+    6, '{}', CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000 AS SIGNED)
+);
+
+INSERT INTO problem_version_languages (
+    problem_id, version_no, language_id, cpu_time_ms, wall_time_ms, memory_kib
+)
+VALUES
+    (6, 1, 'c', 1000, 3000, 262144),
+    (6, 1, 'python', 2000, 5000, 262144);
+
+INSERT INTO test_cases (
+    problem_id, version_no, case_index, input, expected_output
+)
+VALUES
+    (6, 1, 1, X'320A6120620A', X'6120620A'),
+    (6, 1, 2, X'340A612062206120620A', X'6120620A6220610A6120620A'),
+    (6, 1, 3, X'330A78207820780A', X'7820780A7820780A'),
+    (6, 1, 4, X'340A612062206320640A', X'6120620A6220630A6320640A');
+
+UPDATE problems SET current_version_no = 1 WHERE id IN (1, 2, 3, 4, 5, 6);
 
 COMMIT;

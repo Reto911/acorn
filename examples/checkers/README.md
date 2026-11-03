@@ -24,18 +24,20 @@ sum-pair 对 n = 5 接受 `1 4` 和 `2 3`，拒绝 `1 3`、非正数、格式错
 
 ### 通用比较材料
 
-下面四种材料可按文末方法写入 checker_scripts 后供题目版本引用；当前正式初始化包含上表的 trim／float。四种材料均要求参数为 `{}`，非空配置对象形成 CheckerFailed。它们只比较参考和用户输出，不读取 input.bin。
+下面四种材料与 trim／float 一同写入正式初始化，分别使用脚本 ID／题号 3–6，各有四个固定用例。四种材料均要求参数为 `{}`，非空配置对象形成 CheckerFailed。它们只比较参考和用户输出，不读取 input.bin。
 
-| 材料                                       | 比较规则                                     | 参考与合法输出示例                             |
-| ------------------------------------------ | -------------------------------------------- | ---------------------------------------------- |
-| [tokens.py](tokens.py)                     | 按 ASCII 空白分词，词项顺序、数量和字节一致  | 参考 `green blue red`，输出 `green\nblue\tred` |
-| [integers.py](integers.py)                 | 按十进制整数值有序精确比较，数量相同         | 参考 `1 0 -2`，输出 `+0001 -0 -0002`           |
-| [unordered-tokens.py](unordered-tokens.py) | 词项顺序不限，每项出现次数一致               | 参考 `cat dog cat`，输出 `dog cat cat`         |
-| [unordered-lines.py](unordered-lines.py)   | 行序不限，每行字段顺序及每条记录出现次数一致 | 参考 `a b\nc d`，输出 `c d\r\na\tb`            |
+| 材料                                       | 比较规则                                     | 参考与合法输出示例                             | 正式例题与提交样例                                                                                                                 |
+| ------------------------------------------ | -------------------------------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| [tokens.py](tokens.py)                     | 按 ASCII 空白分词，词项顺序、数量和字节一致  | 参考 `green blue red`，输出 `green\nblue\tred` | 3 单词逆序：[C](../submissions/reverse-words.c) 一行输出；[Python](../submissions/reverse-words.py) 每词一行                       |
+| [integers.py](integers.py)                 | 按十进制整数值有序精确比较，数量相同         | 参考 `1 0 -2`，输出 `+0001 -0 -0002`           | 4 整数前缀和：[C](../submissions/prefix-sums.c) 使用 long long；[Python](../submissions/prefix-sums.py) 展示符号与前导零           |
+| [unordered-tokens.py](unordered-tokens.py) | 词项顺序不限，每项出现次数一致               | 参考 `cat dog cat`，输出 `dog cat cat`         | 5 筛选单词：[C](../submissions/filter-words.c) 按输入顺序；[Python](../submissions/filter-words.py) 按逆序输出匹配词               |
+| [unordered-lines.py](unordered-lines.py)   | 行序不限，每行字段顺序及每条记录出现次数一致 | 参考 `a b\nc d`，输出 `c d\r\na\tb`            | 6 相邻单词对：[C](../submissions/adjacent-word-pairs.c) 按输入顺序；[Python](../submissions/adjacent-word-pairs.py) 按逆序输出记录 |
 
 表中的 `\n`、`\r` 和 `\t` 表示实际 LF、CR 和 HT 字节。词项按 bytes.split() 的六种 ASCII 空白分隔，区分大小写，其他字节不作解码或规范化。unordered-lines 只以 LF 分行，兼容 CRLF，忽略空白行；行内仍按 ASCII 空白分词。重复词项与重复行都保留，不能遗漏；`a b\nc d` 与 `a c\nb d` 的字段组合不同，应为 WA。空白输出和空参考可作为相同的空序列。
 
 integers 只接受 `[+-]?[0-9]+`，拒绝小数、指数、下划线及非 ASCII 数字。通过规范化符号和前导零保留任意精度，`-0` 与 `0` 等价，不依赖浮点或十进制转整数的位数限制。脚本先验证完整参考数据，再判断用户输出；非法参考为 CheckerFailed，非法用户词项为 WA。
+
+四题的 n 为 1–100，相邻单词对要求 n >= 2；单词仅含小写 ASCII 字母，长度 1–16，筛选下界 k 为 1–16。前缀和输入为 -10^15 至 10^15 的整数，结果使用有符号 64 位整数即可保存；用例包含 2^53 + 1，通用整数脚本仍支持任意精度。六题均允许 C／Python，相同语言预算一致，checker 覆盖值为空，默认采用同版本 Python 限额，自动审查关闭。
 
 ## 文件协议与本地运行
 

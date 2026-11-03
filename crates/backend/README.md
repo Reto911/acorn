@@ -17,7 +17,7 @@ acorn-backend 是 Acorn 的 HTTP 后端，使用 Axum、Tokio 和 SQLx。它管�
 
 一个后端进程运行一个 Scheduler，可连接多个 Worker。每个提交固定创建时的题目版本，源码、测试数据、checker 源码副本、版本参数和有效 checker 限额随任务交给 Worker；提交 ID 同时作为 Worker Job ID。Worker 对每次正常用户运行执行统一 Python checker；脚本以实际退出码 0 和严格 JSON 返回 AC／WA。
 
-正式初始化包含题号 1 两数求和（104 例、trim）和题号 2 整数商（8 例、绝对／相对容差均为 1e-6）。两题允许 C／Python，脚本源码与参数由题库装配。示例提交及维护方法见[判题脚本说明](../../examples/checkers/README.md)。
+正式初始化包含六题：题号 1 两数求和（104 例、trim），题号 2 整数商（8 例、绝对／相对容差均为 1e-6），题号 3–6 单词逆序、整数前缀和、筛选单词和相邻单词对（各 4 例）。六题分别使用 trim、float、tokens、integers、unordered-tokens、unordered-lines，均允许 C／Python，脚本源码与参数由题库装配。示例提交及维护方法见[判题脚本说明](../../examples/checkers/README.md)。
 
 库接口 `scheduler::kafka::Publisher` 和 `EventConsumer` 分别提供任务发布与事件消费，`EventProcessor` 共用状态持久化和审查交接。调用方先用 `Database::judging_recovery`／`Scheduler::restore` 恢复本地所有权，再运行两项服务，提供停止信号并监督错误。Kafka 组位点需由部署初始化，运行规则见 [Kafka 设计](../../docs/10-kafka-judging-design.md)。正式入口通过 Scheduler::start 恢复并监督两项 Kafka 服务。
 

@@ -182,7 +182,7 @@ async fn published_queries_and_history_shapes() {
             .iter()
             .map(|item| item["problem_id"].as_i64().unwrap())
             .collect::<Vec<_>>(),
-        [1, 2]
+        [1, 2, 3, 4, 5, 6]
     );
     assert!(items.iter().all(|item| item.get("statement").is_none()));
     let (_, _, detail) = call(&harness.app, "GET", "/api/v1/problems/1", None, None).await;
@@ -204,6 +204,38 @@ async fn published_queries_and_history_shapes() {
     ] {
         assert!(detail.get(field).is_none());
         assert!(quotient.get(field).is_none());
+    }
+    for (id, title) in [
+        (3, "单词逆序"),
+        (4, "整数前缀和"),
+        (5, "筛选单词"),
+        (6, "相邻单词对"),
+    ] {
+        let (status, _, problem) = call(
+            &harness.app,
+            "GET",
+            &format!("/api/v1/problems/{id}"),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(problem["title"], title);
+        assert_eq!(problem["version_no"], 1);
+        assert_eq!(problem["review_mode"], "DISABLED");
+        assert_eq!(problem["languages"], detail["languages"]);
+        for field in [
+            "cases",
+            "checker_source",
+            "checker_script_id",
+            "checker_config_json",
+            "checker_limits",
+            "checker_cpu_time_ms",
+            "checker_wall_time_ms",
+            "checker_memory_kib",
+        ] {
+            assert!(problem.get(field).is_none());
+        }
     }
     harness.fixture.publish_next().await;
     let (_, _, latest) = call(&harness.app, "GET", "/api/v1/problems/1", None, None).await;
@@ -1397,7 +1429,7 @@ async fn real_submission_reads(
     }
 }
 
-/// Both official problems pass through real HTTP, Kafka and Isolate with observed terminal counts.
+/// A + B and quotient samples pass through real HTTP, Kafka and Isolate with terminal counts.
 #[tokio::test]
 #[ignore = "Requires host Isolate privileges, cgroups, quotas and dedicated user/checker box IDs"]
 async fn real_http_worker_acceptance() {
@@ -1520,39 +1552,39 @@ async fn real_checker_workflow_acceptance() {
     .await;
     let mut connection = harness.fixture.connection().await;
     let mut transaction = connection.begin().await.unwrap();
-    sqlx::query("INSERT INTO checker_scripts (id, name, source) VALUES (3, 'Sum pair', ?)")
+    sqlx::query("INSERT INTO checker_scripts (id, name, source) VALUES (7, 'Sum pair', ?)")
         .bind(include_bytes!("../../../examples/checkers/sum-pair.py").as_slice())
         .execute(&mut *transaction)
         .await
         .unwrap();
-    sqlx::raw_sql("INSERT INTO problems (id, current_version_no, created_at_ms) VALUES (3, NULL, 0);
+    sqlx::raw_sql("INSERT INTO problems (id, current_version_no, created_at_ms) VALUES (7, NULL, 0);
         INSERT INTO problem_versions (problem_id, version_no, title, statement, checker_script_id, published_at_ms) VALUES
-            (3, 1, 'Two positive summands', 'Output two positive integers with sum n.', 3, 0),
-            (3, 2, 'Numeric echo', 'Output the input number.', 2, 0);
+            (7, 1, 'Two positive summands', 'Output two positive integers with sum n.', 7, 0),
+            (7, 2, 'Numeric echo', 'Output the input number.', 2, 0);
         INSERT INTO problem_version_languages (problem_id, version_no, language_id, cpu_time_ms, wall_time_ms, memory_kib) VALUES
-            (3, 1, 'python', 2000, 5000, 262144), (3, 2, 'python', 2000, 5000, 262144);
+            (7, 1, 'python', 2000, 5000, 262144), (7, 2, 'python', 2000, 5000, 262144);
         INSERT INTO test_cases (problem_id, version_no, case_index, input, expected_output) VALUES
-            (3, 1, 1, X'350A', X''),
-            (3, 2, 1, X'310A', X'310A'),
-            (3, 2, 2, X'320A', X'707330362D707269766174652D7265666572656E6365'),
-            (3, 2, 3, X'330A', X'330A');
-        UPDATE problems SET current_version_no = 1 WHERE id = 3;")
+            (7, 1, 1, X'350A', X''),
+            (7, 2, 1, X'310A', X'310A'),
+            (7, 2, 2, X'320A', X'707330362D707269766174652D7265666572656E6365'),
+            (7, 2, 3, X'330A', X'330A');
+        UPDATE problems SET current_version_no = 1 WHERE id = 7;")
         .execute(&mut *transaction).await.unwrap();
     transaction.commit().await.unwrap();
     for (output, verdict) in [("1 4", "AC"), ("2 3", "AC"), ("1 3", "WA")] {
         let source = format!("print({output:?})\n");
-        let id = harness.submit(3, "python", &source).await;
+        let id = harness.submit(7, "python", &source).await;
         let body = harness.terminal(&id, Some(verdict), 1, 1).await;
         assert_eq!(body["version_no"], 1);
         real_submission_reads(&harness, &id, &body, &source).await;
     }
-    sqlx::query("UPDATE problems SET current_version_no = 2 WHERE id = 3")
+    sqlx::query("UPDATE problems SET current_version_no = 2 WHERE id = 7")
         .execute(&mut connection)
         .await
         .unwrap();
     connection.close().await.unwrap();
     let source = "import sys\nsys.stdout.buffer.write(sys.stdin.buffer.read())\n";
-    let id = harness.submit(3, "python", source).await;
+    let id = harness.submit(7, "python", source).await;
     let body = harness.terminal(&id, None, 3, 1).await;
     assert_eq!(body["version_no"], 2);
     assert_eq!(

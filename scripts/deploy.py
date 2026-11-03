@@ -173,7 +173,9 @@ def initialize_database():
                 subprocess.run(command, stdin=source, check=True)
     print(
         f"Initialized {database!r}: schema version 5, user 1, "
-        "A + B problem 1 (104 cases) and quotient problem 2 (8 cases)."
+        "six problems: A + B 1 (104 cases), quotient 2 (8 cases), "
+        "reverse words 3, prefix sums 4, filter words 5 and adjacent word pairs 6 "
+        "(4 cases each)."
     )
     print("Configure the backend with this database and its separate runtime account.")
 

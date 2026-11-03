@@ -6,7 +6,7 @@
 
 - [Worker 设计](01-worker-design.md)：Kafka 接纳与状态 RPC、串行判题、C/Python 语言适配器、沙箱隔离、结果保留与英文日志。
 - [数据库设计](02-database-design.md)：持久化数据模型、题目版本与外键、提交历史和判题结论、幂等事务、审查存储及结果确认。
-- [数据库 SQL](../sql/README.md)：初始建表脚本、正式保留的两数求和／浮点商示例题、脚本编写材料与执行说明。
+- [数据库 SQL](../sql/README.md)：初始建表脚本、六道正式示例题与六种判题预设、脚本编写材料与执行说明。
 - [后端与 Scheduler 设计](03-backend-design.md)：后端组件职责、进程内任务队列、Kafka 交接与 Worker 状态客户端、HTTP 契约、数据库访问与启动停机流程。
 - [Worker 与后端开发计划](04-development-plan.md)：十个开发步骤、工程产物、前置依赖、完成条件与首版交付检查。
 - [前端 GUI 设计](05-frontend-design.md)：前端技术选型、题目与答题页面、判题及审查结果、提交历史、本地草稿、HTTP 接入和健康观测边界。

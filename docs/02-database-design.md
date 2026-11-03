@@ -10,7 +10,7 @@
 
 初始建表语句见 [001-initial-schema.sql](../sql/001-initial-schema.sql)，账户准备和执行顺序见[SQL 初始化说明](../sql/README.md#初始化)，初始化职责见[迁移设计第 7 节](09-mysql-migration-design.md#7-sql-改写与全新初始化)。
 
-[002-example-problem.sql](../sql/002-example-problem.sql) 提供随正式发布保留的两数求和题（trim、104 例）和整数商题（浮点容差、8 例）、两份 checker 源码及 C/Python 限额、参数和用例，在新库建表后装入；它不改变结构版本或创建用户。
+[002-example-problem.sql](../sql/002-example-problem.sql) 提供随正式发布保留的六道题：两数求和（trim、104 例）、整数商（浮点容差、8 例），以及题号 3–6 的单词逆序、整数前缀和、筛选单词、相邻单词对（各 4 例），包含六份 checker 源码及 C/Python 限额、参数和用例，在新库建表后装入；它不改变结构版本或创建用户。
 
 ## 1. 范围与职责
 

@@ -147,7 +147,7 @@ async fn published_queries_and_fixed_version_creation() {
         list.iter()
             .map(|problem| problem.problem_id)
             .collect::<Vec<_>>(),
-        [1, 2]
+        [1, 2, 3, 4, 5, 6]
     );
     let original = database.problem(1).await.unwrap().unwrap();
     assert_eq!(original.summary.version_no, 1);
@@ -161,7 +161,7 @@ async fn published_queries_and_fixed_version_creation() {
     );
     assert_eq!(original.languages[0].limits.cpu_time_ms, 1000);
     assert_eq!(original.languages[0].limits.memory_kib, 256 * 1024);
-    assert!(database.problem_version(3, 1).await.unwrap().is_none());
+    assert!(database.problem_version(7, 1).await.unwrap().is_none());
     let submission_request = request("c");
     let created = database
         .create_submission(submission_request.clone())
@@ -210,7 +210,7 @@ async fn published_queries_and_fixed_version_creation() {
         INSERT INTO problem_version_languages SELECT problem_id, 2, language_id, cpu_time_ms, wall_time_ms, 1 FROM problem_version_languages WHERE problem_id = 1 AND version_no = 1 AND language_id = 'c';
         INSERT INTO test_cases VALUES (1, 2, 1, X'00FF010A', X'FF000A');
         UPDATE problems SET current_version_no = 2 WHERE id = 1;
-        INSERT INTO problems VALUES (3, NULL, 0);
+        INSERT INTO problems VALUES (7, NULL, 0);
         COMMIT;").execute(&mut connection).await.unwrap();
     let updated_source = b"print('{\"verdict\": \"WA\"}')\n";
     sqlx::query("UPDATE checker_scripts SET source = ? WHERE id = 1")
@@ -242,8 +242,8 @@ async fn published_queries_and_fixed_version_creation() {
         database.problem_version(1, 1).await.unwrap().unwrap(),
         original
     );
-    assert_eq!(database.list_problems(20, 0).await.unwrap().len(), 2);
-    assert!(database.problem(3).await.unwrap().is_none());
+    assert_eq!(database.list_problems(20, 0).await.unwrap().len(), 6);
+    assert!(database.problem(7).await.unwrap().is_none());
     let repeated = database
         .create_submission(submission_request)
         .await
@@ -298,7 +298,7 @@ async fn published_queries_and_fixed_version_creation() {
         Err(Error::LanguageNotAllowed)
     ));
     let mut unpublished = request("c");
-    unpublished.problem_id = 3;
+    unpublished.problem_id = 7;
     assert!(matches!(
         database.create_submission(unpublished).await,
         Err(Error::ProblemNotFound)
@@ -306,7 +306,7 @@ async fn published_queries_and_fixed_version_creation() {
     fixture.close().await;
 }
 
-/// Shipped scripts survive SQL escaping exactly and the quotient task uses its fixed seed data.
+/// All six shipped scripts survive SQL escaping and seeded tasks retain their fixed data.
 #[tokio::test]
 async fn checker_presets_and_quotient_seed() {
     let fixture = Fixture::new().await;
@@ -319,6 +319,22 @@ async fn checker_presets_and_quotient_seed() {
         (
             2,
             include_bytes!("../../../examples/checkers/float.py").as_slice(),
+        ),
+        (
+            3,
+            include_bytes!("../../../examples/checkers/tokens.py").as_slice(),
+        ),
+        (
+            4,
+            include_bytes!("../../../examples/checkers/integers.py").as_slice(),
+        ),
+        (
+            5,
+            include_bytes!("../../../examples/checkers/unordered-tokens.py").as_slice(),
+        ),
+        (
+            6,
+            include_bytes!("../../../examples/checkers/unordered-lines.py").as_slice(),
         ),
     ] {
         let stored: Vec<u8> = sqlx::query_scalar("SELECT source FROM checker_scripts WHERE id = ?")
@@ -398,6 +414,85 @@ async fn checker_presets_and_quotient_seed() {
     let indices: Vec<i64> = sqlx::query_scalar("SELECT case_index FROM test_cases WHERE problem_id = 2 AND version_no = 1 ORDER BY case_index")
         .fetch_all(&mut connection).await.unwrap();
     assert_eq!(indices, (1..=8).collect::<Vec<_>>());
+    for (id, title, checker, cases) in [
+        (
+            3_i64,
+            "单词逆序",
+            include_bytes!("../../../examples/checkers/tokens.py").as_slice(),
+            [
+                (b"1\noak\n".as_slice(), b"oak\n".as_slice()),
+                (b"3\nred blue green\n".as_slice(), b"green blue red\n".as_slice()),
+                (b"4\na b a c\n".as_slice(), b"c a b a\n".as_slice()),
+                (b"3\na abcdefghijklmnop z\n".as_slice(), b"z abcdefghijklmnop a\n".as_slice()),
+            ],
+        ),
+        (
+            4_i64,
+            "整数前缀和",
+            include_bytes!("../../../examples/checkers/integers.py").as_slice(),
+            [
+                (b"1\n0\n".as_slice(), b"0\n".as_slice()),
+                (b"4\n3 -5 0 4\n".as_slice(), b"3 -2 -2 2\n".as_slice()),
+                (b"1\n-1000000000000000\n".as_slice(), b"-1000000000000000\n".as_slice()),
+                (b"10\n1000000000000000 1000000000000000 1000000000000000 1000000000000000 1000000000000000 1000000000000000 1000000000000000 1000000000000000 1000000000000000 7199254740993\n".as_slice(), b"1000000000000000 2000000000000000 3000000000000000 4000000000000000 5000000000000000 6000000000000000 7000000000000000 8000000000000000 9000000000000000 9007199254740993\n".as_slice()),
+            ],
+        ),
+        (
+            5_i64,
+            "筛选单词",
+            include_bytes!("../../../examples/checkers/unordered-tokens.py").as_slice(),
+            [
+                (b"2 5\na bb\n".as_slice(), b"".as_slice()),
+                (b"3 1\ncat dog cat\n".as_slice(), b"cat dog cat\n".as_slice()),
+                (b"4 3\na bear cat to\n".as_slice(), b"bear cat\n".as_slice()),
+                (b"3 16\nabcdefghijklmnop short abcdefghijklmnop\n".as_slice(), b"abcdefghijklmnop abcdefghijklmnop\n".as_slice()),
+            ],
+        ),
+        (
+            6_i64,
+            "相邻单词对",
+            include_bytes!("../../../examples/checkers/unordered-lines.py").as_slice(),
+            [
+                (b"2\na b\n".as_slice(), b"a b\n".as_slice()),
+                (b"4\na b a b\n".as_slice(), b"a b\nb a\na b\n".as_slice()),
+                (b"3\nx x x\n".as_slice(), b"x x\nx x\n".as_slice()),
+                (b"4\na b c d\n".as_slice(), b"a b\nb c\nc d\n".as_slice()),
+            ],
+        )
+    ] {
+        let problem = fixture.database.problem(id).await.unwrap().unwrap();
+        assert_eq!(problem.summary.version_no, 1);
+        assert_eq!(problem.summary.title, title);
+        assert_eq!(problem.review_mode, ReviewMode::Disabled);
+        assert_eq!(problem.languages, original.languages);
+        let row = sqlx::query("SELECT checker_script_id, checker_config_json, checker_cpu_time_ms, checker_wall_time_ms, checker_memory_kib FROM problem_versions WHERE problem_id = ? AND version_no = 1")
+            .bind(id).fetch_one(&mut connection).await.unwrap();
+        assert_eq!(row.try_get::<i64, _>("checker_script_id").unwrap(), id);
+        assert_eq!(row.try_get::<String, _>("checker_config_json").unwrap(), "{}");
+        for column in ["checker_cpu_time_ms", "checker_wall_time_ms", "checker_memory_kib"] {
+            assert!(row.try_get::<Option<i64>, _>(column).unwrap().is_none());
+        }
+        let indices: Vec<i64> = sqlx::query_scalar("SELECT case_index FROM test_cases WHERE problem_id = ? AND version_no = 1 ORDER BY case_index")
+            .bind(id).fetch_all(&mut connection).await.unwrap();
+        assert_eq!(indices, [1, 2, 3, 4]);
+        for language in ["c", "python"] {
+            let mut submitted = request(language);
+            submitted.problem_id = id;
+            let task = fixture.database.create_submission(submitted).await.unwrap().task.unwrap();
+            assert_eq!(task.request.checker_source, checker);
+            assert_eq!(task.request.checker_config_json, "{}");
+            assert_eq!(task.request.checker_limits, Some(proto::CheckerLimits {
+                cpu_time_ms: Some(2000), wall_time_ms: Some(5000), memory_kib: Some(262144),
+            }));
+            assert_eq!(task.request.run_limits.as_ref().unwrap(), &original.languages.iter()
+                .find(|item| item.language_id == language).unwrap().limits);
+            assert_eq!(task.request.cases.len(), 4);
+            for (case, (input, answer)) in task.request.cases.iter().zip(cases) {
+                assert_eq!(case.input, input);
+                assert_eq!(case.expected_output, answer);
+            }
+        }
+    }
     connection.close().await.unwrap();
     fixture.close().await;
 }
@@ -1191,8 +1286,8 @@ async fn invalid_task_data_and_foreign_keys() {
             .contains(r#"trailing = b"\t\n\v\f\r ""#)
     );
     sqlx::raw_sql("START TRANSACTION;
-        INSERT INTO problems (id, current_version_no, created_at_ms) VALUES (3, NULL, 0);
-        INSERT INTO problem_versions (problem_id, version_no, title, statement, checker_script_id, published_at_ms) VALUES (3, 1, 'Shared checker', 'Shared checker', 1, 0);
+        INSERT INTO problems (id, current_version_no, created_at_ms) VALUES (7, NULL, 0);
+        INSERT INTO problem_versions (problem_id, version_no, title, statement, checker_script_id, published_at_ms) VALUES (7, 1, 'Shared checker', 'Shared checker', 1, 0);
         COMMIT;")
         .execute(&mut connection).await.unwrap();
     assert_eq!(
@@ -1205,14 +1300,14 @@ async fn invalid_task_data_and_foreign_keys() {
         2
     );
     let config: String = sqlx::query_scalar(
-        "SELECT checker_config_json FROM problem_versions WHERE problem_id = 3 AND version_no = 1",
+        "SELECT checker_config_json FROM problem_versions WHERE problem_id = 7 AND version_no = 1",
     )
     .fetch_one(&mut connection)
     .await
     .unwrap();
     assert_eq!(config, "{}");
     for statement in [
-        "UPDATE problem_versions SET checker_script_id = 999 WHERE problem_id = 3",
+        "UPDATE problem_versions SET checker_script_id = 999 WHERE problem_id = 7",
         "DELETE FROM checker_scripts WHERE id = 1",
         "UPDATE checker_scripts SET id = 999 WHERE id = 1",
     ] {
@@ -1242,22 +1337,22 @@ async fn invalid_task_data_and_foreign_keys() {
     );
     for config in ["[]", "null", "1", "\"text\"", "", "{invalid}"] {
         assert!(
-            sqlx::query("UPDATE problem_versions SET checker_config_json = ? WHERE problem_id = 3")
+            sqlx::query("UPDATE problem_versions SET checker_config_json = ? WHERE problem_id = 7")
                 .bind(config)
                 .execute(&mut connection)
                 .await
                 .is_err()
         );
     }
-    sqlx::query("UPDATE problem_versions SET checker_config_json = ? WHERE problem_id = 3")
+    sqlx::query("UPDATE problem_versions SET checker_config_json = ? WHERE problem_id = 7")
         .bind(r#"{"parameter": {"enabled": true}}"#)
         .execute(&mut connection)
         .await
         .unwrap();
     for statement in [
-        "UPDATE problem_versions SET checker_cpu_time_ms = ? WHERE problem_id = 3",
-        "UPDATE problem_versions SET checker_wall_time_ms = ? WHERE problem_id = 3",
-        "UPDATE problem_versions SET checker_memory_kib = ? WHERE problem_id = 3",
+        "UPDATE problem_versions SET checker_cpu_time_ms = ? WHERE problem_id = 7",
+        "UPDATE problem_versions SET checker_wall_time_ms = ? WHERE problem_id = 7",
+        "UPDATE problem_versions SET checker_memory_kib = ? WHERE problem_id = 7",
     ] {
         for value in [Some(1_i64), None] {
             sqlx::query(statement)

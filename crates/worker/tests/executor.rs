@@ -546,6 +546,72 @@ async fn preset_examples(config: &acorn_worker::config::Config) {
         assert_eq!(outcome.completed_cases, 8);
         assert_eq!(result(outcome).verdict, Verdict::Accepted as i32);
     }
+    for (name, checker, samples, cases) in [
+        (
+            "reverse-words",
+            include_bytes!("../../../examples/checkers/tokens.py").as_slice(),
+            [
+                ("c", include_str!("../../../examples/submissions/reverse-words.c")),
+                ("python", include_str!("../../../examples/submissions/reverse-words.py")),
+            ],
+            [
+                (b"1\noak\n".as_slice(), b"oak\n".as_slice()),
+                (b"3\nred blue green\n".as_slice(), b"green blue red\n".as_slice()),
+                (b"4\na b a c\n".as_slice(), b"c a b a\n".as_slice()),
+                (b"3\na abcdefghijklmnop z\n".as_slice(), b"z abcdefghijklmnop a\n".as_slice()),
+            ],
+        ),
+        (
+            "prefix-sums",
+            include_bytes!("../../../examples/checkers/integers.py").as_slice(),
+            [
+                ("c", include_str!("../../../examples/submissions/prefix-sums.c")),
+                ("python", include_str!("../../../examples/submissions/prefix-sums.py")),
+            ],
+            [
+                (b"1\n0\n".as_slice(), b"0\n".as_slice()),
+                (b"4\n3 -5 0 4\n".as_slice(), b"3 -2 -2 2\n".as_slice()),
+                (b"1\n-1000000000000000\n".as_slice(), b"-1000000000000000\n".as_slice()),
+                (b"10\n1000000000000000 1000000000000000 1000000000000000 1000000000000000 1000000000000000 1000000000000000 1000000000000000 1000000000000000 1000000000000000 7199254740993\n".as_slice(), b"1000000000000000 2000000000000000 3000000000000000 4000000000000000 5000000000000000 6000000000000000 7000000000000000 8000000000000000 9000000000000000 9007199254740993\n".as_slice()),
+            ],
+        ),
+        (
+            "filter-words",
+            include_bytes!("../../../examples/checkers/unordered-tokens.py").as_slice(),
+            [
+                ("c", include_str!("../../../examples/submissions/filter-words.c")),
+                ("python", include_str!("../../../examples/submissions/filter-words.py")),
+            ],
+            [
+                (b"2 5\na bb\n".as_slice(), b"".as_slice()),
+                (b"3 1\ncat dog cat\n".as_slice(), b"cat dog cat\n".as_slice()),
+                (b"4 3\na bear cat to\n".as_slice(), b"bear cat\n".as_slice()),
+                (b"3 16\nabcdefghijklmnop short abcdefghijklmnop\n".as_slice(), b"abcdefghijklmnop abcdefghijklmnop\n".as_slice()),
+            ],
+        ),
+        (
+            "adjacent-word-pairs",
+            include_bytes!("../../../examples/checkers/unordered-lines.py").as_slice(),
+            [
+                ("c", include_str!("../../../examples/submissions/adjacent-word-pairs.c")),
+                ("python", include_str!("../../../examples/submissions/adjacent-word-pairs.py")),
+            ],
+            [
+                (b"2\na b\n".as_slice(), b"a b\n".as_slice()),
+                (b"4\na b a b\n".as_slice(), b"a b\nb a\na b\n".as_slice()),
+                (b"3\nx x x\n".as_slice(), b"x x\nx x\n".as_slice()),
+                (b"4\na b c d\n".as_slice(), b"a b\nb c\nc d\n".as_slice()),
+            ],
+        )
+    ] {
+        for (language, source) in samples {
+            let mut request = job(name, language, source, &cases);
+            request.checker_source = checker.to_vec();
+            let outcome = execute(config, request).await;
+            assert_eq!(outcome.completed_cases, 4, "{name} {language}");
+            assert_eq!(result(outcome).verdict, Verdict::Accepted as i32, "{name} {language}");
+        }
+    }
     for (output, expected) in [
         ("1 4", Verdict::Accepted),
         ("2 3", Verdict::Accepted),
@@ -573,7 +639,7 @@ async fn preset_samples_and_multiple_answers() {
     preset_examples(&fixture.config).await;
 }
 
-/// Real Isolate executes C/Python quotient samples and independent valid sum-pair outputs.
+/// Real Isolate executes C/Python preset samples and independent valid sum-pair outputs.
 #[tokio::test]
 #[ignore = "requires prepared Linux/Isolate and dedicated ACORN_ISOLATE_BOX_ID/ACORN_CHECKER_BOX_ID"]
 async fn real_preset_acceptance() {
