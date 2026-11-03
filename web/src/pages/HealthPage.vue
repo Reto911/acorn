@@ -54,9 +54,6 @@ const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone
   <section aria-labelledby="page-title">
     <div class="page-heading">
       <h1 id="page-title">系统状态</h1>
-      <p>
-        查看获取时快照。各项指标仅反映对应观测，不保证下一次提交或判题成功。
-      </p>
     </div>
     <div class="surface health-toolbar">
       <div class="panel-heading">
