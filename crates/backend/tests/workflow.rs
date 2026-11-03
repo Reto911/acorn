@@ -1311,7 +1311,93 @@ async fn stopping_preserves_creation_started_before_preflight() {
     harness.close().await;
 }
 
-/// Source samples through real HTTP, Kafka and Isolate, observed through persisted results.
+/// Real persisted results keep owner history, original source and public problem projections usable.
+async fn real_submission_reads(
+    harness: &support::real::RealHarness,
+    id: &str,
+    body: &Value,
+    source: &str,
+) {
+    let (status, history) = network_call(
+        harness.address,
+        "GET",
+        "/api/v1/submissions?limit=20",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    let summary = history["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["submission_id"] == id)
+        .unwrap();
+    for field in [
+        "problem_id",
+        "version_no",
+        "language_id",
+        "state",
+        "verdict",
+        "review_status",
+    ] {
+        assert_eq!(summary[field], body[field]);
+    }
+    assert!(summary.get("source").is_none());
+    assert!(summary.get("terminal_details").is_none());
+    let (status, original) = network_call(
+        harness.address,
+        "GET",
+        &format!("/api/v1/submissions/{id}/source"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        original,
+        json!({"submission_id":id,"language_id":body["language_id"],"source":source})
+    );
+    let stored = harness
+        .fixture
+        .database
+        .submission(id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.source, source.as_bytes());
+    assert_eq!(body["problem_id"], stored.info.problem_id);
+    assert_eq!(body["version_no"], stored.info.version_no);
+    let (status, problem) = network_call(
+        harness.address,
+        "GET",
+        &format!(
+            "/api/v1/problems/{}/versions/{}",
+            stored.info.problem_id, stored.info.version_no
+        ),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    for value in [&problem, body, summary, &original] {
+        for field in [
+            "checker_source",
+            "checker_script_id",
+            "checker_config_json",
+            "checker_limits",
+            "checker_cpu_time_ms",
+            "checker_wall_time_ms",
+            "checker_memory_kib",
+            "cases",
+            "expected_output",
+        ] {
+            assert!(value.get(field).is_none(), "Private field {field}");
+        }
+    }
+}
+
+/// Both official problems pass through real HTTP, Kafka and Isolate with observed terminal counts.
 #[tokio::test]
 #[ignore = "Requires host Isolate privileges, cgroups, quotas and dedicated user/checker box IDs"]
 async fn real_http_worker_acceptance() {
@@ -1323,40 +1409,69 @@ async fn real_http_worker_acceptance() {
         box_id("ACORN_CHECKER_BOX_ID"),
     )])
     .await;
-    for (language, source, verdict, completed) in [
+    for (problem_id, language, source, verdict, total, completed) in [
         (
+            1,
             "c",
             include_str!("../../../examples/submissions/a-plus-b.c"),
             "AC",
             104,
+            104,
         ),
         (
+            1,
             "python",
             include_str!("../../../examples/submissions/a-plus-b.py"),
             "AC",
             104,
+            104,
         ),
         (
+            2,
+            "c",
+            include_str!("../../../examples/submissions/quotient.c"),
+            "AC",
+            8,
+            8,
+        ),
+        (
+            2,
+            "python",
+            include_str!("../../../examples/submissions/quotient.py"),
+            "AC",
+            8,
+            8,
+        ),
+        (
+            1,
             "c",
             include_str!("../../../examples/submissions/compile-error.c"),
             "CE",
+            104,
             0,
         ),
         (
+            1,
             "python",
             include_str!("../../../examples/submissions/wrong-answer.py"),
             "WA",
+            104,
             1,
         ),
         (
+            1,
             "c",
             include_str!("../../../examples/submissions/time-limit.c"),
             "TLE",
+            104,
             1,
         ),
     ] {
-        let id = harness.submit(language, source).await;
-        let body = harness.terminal(&id, verdict).await;
+        let id = harness.submit(problem_id, language, source).await;
+        let body = harness.terminal(&id, Some(verdict), total, completed).await;
+        assert_eq!(body["problem_id"], problem_id);
+        assert_eq!(body["version_no"], 1);
+        real_submission_reads(&harness, &id, &body, source).await;
         match verdict {
             "CE" => {
                 let diagnostic = body["terminal_details"]["compile_diagnostic_base64"]
@@ -1386,9 +1501,82 @@ async fn real_http_worker_acceptance() {
             _ => assert!(body["terminal_details"].is_null()),
         }
         eprintln!(
-            "Real sample: submission={id} language={language} verdict={verdict} completed={completed}"
+            "Real sample: submission={id} problem={problem_id} language={language} verdict={verdict} completed={completed}/{total}"
         );
     }
+    harness.close().await;
+}
+
+/// Database-selected custom answers and invalid references traverse the real terminal-save path.
+#[tokio::test]
+#[ignore = "requires Kafka/MySQL, prepared Isolate and dedicated user/checker box IDs"]
+async fn real_checker_workflow_acceptance() {
+    use support::real::{RealHarness, box_id};
+
+    let harness = RealHarness::start(&[(
+        box_id("ACORN_ISOLATE_BOX_ID"),
+        box_id("ACORN_CHECKER_BOX_ID"),
+    )])
+    .await;
+    let mut connection = harness.fixture.connection().await;
+    let mut transaction = connection.begin().await.unwrap();
+    sqlx::query("INSERT INTO checker_scripts (id, name, source) VALUES (3, 'Sum pair', ?)")
+        .bind(include_bytes!("../../../examples/checkers/sum-pair.py").as_slice())
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    sqlx::raw_sql("INSERT INTO problems (id, current_version_no, created_at_ms) VALUES (3, NULL, 0);
+        INSERT INTO problem_versions (problem_id, version_no, title, statement, checker_script_id, published_at_ms) VALUES
+            (3, 1, 'Two positive summands', 'Output two positive integers with sum n.', 3, 0),
+            (3, 2, 'Numeric echo', 'Output the input number.', 2, 0);
+        INSERT INTO problem_version_languages (problem_id, version_no, language_id, cpu_time_ms, wall_time_ms, memory_kib) VALUES
+            (3, 1, 'python', 2000, 5000, 262144), (3, 2, 'python', 2000, 5000, 262144);
+        INSERT INTO test_cases (problem_id, version_no, case_index, input, expected_output) VALUES
+            (3, 1, 1, X'350A', X''),
+            (3, 2, 1, X'310A', X'310A'),
+            (3, 2, 2, X'320A', X'707330362D707269766174652D7265666572656E6365'),
+            (3, 2, 3, X'330A', X'330A');
+        UPDATE problems SET current_version_no = 1 WHERE id = 3;")
+        .execute(&mut *transaction).await.unwrap();
+    transaction.commit().await.unwrap();
+    for (output, verdict) in [("1 4", "AC"), ("2 3", "AC"), ("1 3", "WA")] {
+        let source = format!("print({output:?})\n");
+        let id = harness.submit(3, "python", &source).await;
+        let body = harness.terminal(&id, Some(verdict), 1, 1).await;
+        assert_eq!(body["version_no"], 1);
+        real_submission_reads(&harness, &id, &body, &source).await;
+    }
+    sqlx::query("UPDATE problems SET current_version_no = 2 WHERE id = 3")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    connection.close().await.unwrap();
+    let source = "import sys\nsys.stdout.buffer.write(sys.stdin.buffer.read())\n";
+    let id = harness.submit(3, "python", source).await;
+    let body = harness.terminal(&id, None, 3, 1).await;
+    assert_eq!(body["version_no"], 2);
+    assert_eq!(
+        body["terminal_details"],
+        json!({"code":"CheckerFailed","diagnostic":"Checker failed for case 2: exit code 1."})
+    );
+    assert!(
+        body["terminal_details"]["diagnostic"]
+            .as_str()
+            .unwrap()
+            .len()
+            <= harness.fixture.config.results.failure_diagnostic_max_bytes
+    );
+    assert_eq!(body["review_status"], "DISABLED");
+    assert!(body["review"].is_null());
+    for private in [
+        "ps06-private-reference",
+        "Traceback",
+        "ValueError",
+        "read_bytes",
+    ] {
+        assert!(!body.to_string().contains(private));
+    }
+    real_submission_reads(&harness, &id, &body, source).await;
     harness.close().await;
 }
 
@@ -1465,7 +1653,7 @@ async fn real_two_workers_overlap() {
     .expect("Both Workers must report live running occupancy in the same observation round");
     assert_ne!(ids[0], ids[1]);
     for id in ids {
-        harness.terminal(&id, "AC").await;
+        harness.terminal(&id, Some("AC"), 104, 104).await;
     }
     harness.close().await;
 }

@@ -6,7 +6,15 @@ use acorn_backend::{
     health::Health, http, llm_review::ReviewService, membership::Membership, scheduler::Scheduler,
     submissions::CreationService,
 };
+use acorn_protocol::{
+    records,
+    worker::v1::{JobState, Verdict, get_job_reply::Terminal},
+};
 use acorn_worker::{config::Config as WorkerConfig, rpc::WorkerService};
+use rdkafka::{
+    Message, Offset, TopicPartitionList,
+    consumer::{Consumer, StreamConsumer},
+};
 use serde_json::{Value, json};
 use tokio::{
     net::TcpListener,
@@ -97,7 +105,7 @@ pub struct RealHarness {
     /// Owned topic pair and initial offsets for both services.
     pub broker: super::broker::Broker,
     /// Actual HTTP listener address.
-    address: SocketAddr,
+    pub address: SocketAddr,
     /// Creation operations owned independently of HTTP connections.
     creation: CreationService,
     /// Real independent group observation and its bounded lifecycle.
@@ -134,6 +142,10 @@ impl RealHarness {
         );
         let mut fixture = Fixture::new().await;
         let broker = super::broker::Broker::start(&mut fixture).await;
+        eprintln!(
+            "Real acceptance resources: database={} tasks={} events={}",
+            fixture.config.database.name, broker.config.tasks_topic, broker.config.events_topic
+        );
         let mut workers = Vec::new();
         for &(box_id, checker_box_id) in box_ids {
             workers.push(RealWorker::start(box_id, checker_box_id, &broker).await);
@@ -201,12 +213,12 @@ impl RealHarness {
     }
 
     /// Submit a source sample through the actual HTTP listener with a fresh idempotency key.
-    pub async fn submit(&self, language: &str, source: &str) -> String {
+    pub async fn submit(&self, problem_id: i64, language: &str, source: &str) -> String {
         let (status, body) = network_call(
             self.address,
             "POST",
             "/api/v1/submissions",
-            Some(json!({"problem_id":1,"language_id":language,"source":source})),
+            Some(json!({"problem_id":problem_id,"language_id":language,"source":source})),
             Some(Uuid::new_v4()),
         )
         .await;
@@ -214,8 +226,14 @@ impl RealHarness {
         body["submission_id"].as_str().unwrap().to_owned()
     }
 
-    /// Check the HTTP-persisted verdict after the Scheduler finishes its single event handoff attempt.
-    pub async fn terminal(&self, id: &str, verdict: &str) -> Value {
+    /// Match actual Kafka terminal counts against the persisted HTTP result or execution failure.
+    pub async fn terminal(
+        &self,
+        id: &str,
+        verdict: Option<&str>,
+        total: u32,
+        completed: u32,
+    ) -> Value {
         let body = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 let (status, body) = network_call(
@@ -237,13 +255,80 @@ impl RealHarness {
         })
         .await
         .unwrap();
-        assert_eq!(body["state"], "finished", "{body}");
-        assert_eq!(body["verdict"], verdict, "{body}");
+        assert_eq!(
+            body["state"],
+            if verdict.is_some() {
+                "finished"
+            } else {
+                "failed"
+            },
+            "{body}"
+        );
+        assert_eq!(body["verdict"], json!(verdict), "{body}");
         let stored = self.fixture.database.submission(id).await.unwrap().unwrap();
+        assert_eq!(body["state"], stored.info.state.as_str());
+        assert_eq!(
+            body["verdict"],
+            serde_json::to_value(stored.info.verdict).unwrap()
+        );
         assert_eq!(
             serde_json::to_value(stored.terminal_details).unwrap(),
             body["terminal_details"]
         );
+        let consumer: StreamConsumer =
+            acorn_backend::scheduler::kafka::consumer_config(&self.broker.config)
+                .create()
+                .unwrap();
+        let mut assignment = TopicPartitionList::new();
+        assignment
+            .add_partition_offset(&self.broker.config.events_topic, 0, Offset::Beginning)
+            .unwrap();
+        consumer.assign(&assignment).unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let message = consumer.recv().await.unwrap();
+                let event = records::decode_event(
+                    message.payload().unwrap(),
+                    self.broker.config.max_event_record_bytes,
+                )
+                .unwrap();
+                assert_eq!(message.key(), Some(event.job_id.as_bytes()));
+                if event.job_id == id && event.terminal.is_some() {
+                    break event;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(event.total_cases, total);
+        assert_eq!(event.completed_cases, completed);
+        match event.terminal.unwrap() {
+            Terminal::Result(result) => {
+                assert_eq!(event.state, JobState::Finished as i32);
+                let actual = match Verdict::try_from(result.verdict).unwrap() {
+                    Verdict::Accepted => "AC",
+                    Verdict::WrongAnswer => "WA",
+                    Verdict::CompileError => "CE",
+                    Verdict::RuntimeError => "RE",
+                    Verdict::TimeLimitExceeded => "TLE",
+                    Verdict::MemoryLimitExceeded => "MLE",
+                    Verdict::OutputLimitExceeded => "OLE",
+                    Verdict::Unspecified => panic!("Missing actual verdict"),
+                };
+                assert_eq!(Some(actual), verdict);
+            }
+            Terminal::Failure(failure) => {
+                assert_eq!(event.state, JobState::Failed as i32);
+                assert!(verdict.is_none());
+                assert_eq!(
+                    body["terminal_details"],
+                    json!({"code":failure.code,"diagnostic":failure.diagnostic})
+                );
+            }
+        }
+        tokio::task::spawn_blocking(move || drop(consumer))
+            .await
+            .unwrap();
         body
     }
 

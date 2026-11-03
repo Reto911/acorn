@@ -4,9 +4,9 @@
 
 ## 1. 当前状态
 
-PS01–PS05 已依次完成，交付结构版本 5、完整 checker 装配与接纳预算、双环境与文件接口、统一 Python checker，以及预设材料、浮点商题和多解夹具。实际检查见第 5、6、9、10、13 节；整体联调仍待 PS06。
+PS01–PS06 已依次完成，交付结构版本 5、完整 checker 装配与接纳预算、双环境与文件接口、统一 Python checker、预设材料、浮点商题及多解夹具。真实 HTTP → Kafka → Worker／Isolate → MySQL 已完成正式题、多解与 checker 故障验收；历史／源码、LLM 输入及必要页面检查通过。实际检查见第 5、6、9、10、13、16 节，CV01–CV08 汇总见第 16.3 节。
 
-PS01–PS04 分别提交为 f0f3bb7、e095f96、fbce955 和 d582852。PS05 已完成，保留为未提交修改；任务分解见第 2.5 节，验证安排及实际结果见第 11、13 节。
+PS01–PS05 分别提交为 f0f3bb7、e095f96、fbce955、d582852 和 cb67620。PS06 的规划、真实验收与检查说明作为同一组改动交付；任务分解见第 2.6 节，验收安排及实际结果见第 14、16 节。
 
 ## 2. 任务状态
 
@@ -17,7 +17,7 @@ PS01–PS04 分别提交为 f0f3bb7、e095f96、fbce955 和 d582852。PS05 已�
 - [x] PS03 沙箱生命周期与文件对接。
 - [x] PS04 checker 执行与结果说明。
 - [x] PS05 预设、示例题与初始化说明。
-- [ ] PS06 定向验收与交付。
+- [x] PS06 定向验收与交付。
 
 ### 2.1 PS01 数据结构与存储
 
@@ -92,6 +92,20 @@ PS04.1、PS04.2 可分别推进，PS03 文件与环境接口就绪后接通 PS04
 - [x] **PS05.7 验证并收口阶段交付。** 依赖 PS05.5–PS05.6；按第 11.3 节完成实际改动所需检查，记录通过、失败、受控／真实范围与剩余工作，再勾选任务。交付两种预设、两道正式种子题和专用开发夹具，保持数据库作为运行时脚本来源；为 PS06 留下可直接使用的样例及现有联调入口。
 
 执行顺序为 PS05.1 → PS05.2／PS05.3 → PS05.4 → PS05.5／PS05.6 → PS05.7。完成条件为正式空库初始化包含两题且原两数求和不退化，数据库脚本和编写材料一致，浮点与多解通过统一 checker，用户 WA 与数据／配置故障归因明确。PS05 不以 Worker 或受控终态检查替代 PS06 的完整 Kafka → Worker／真实 checker → MySQL 闭环。
+
+### 2.6 PS06 定向验收与交付
+
+依赖已完成并分别提交的 PS01–PS05，按[设计第 8 节](../13-checker-scripts-design.md#8-验收要求)收口 CV01–CV08。复用已有数据库、协议、Worker、真实 workflow 和前端入口；只补充完整链路中缺少的覆盖，实际结果继续区分受控检查、真实 Isolate 和跨服务业务链路。
+
+- [x] **PS06.1 核对验收覆盖与联调资源。** 按第 14.1 节汇总第 5、6、9、10、13 节的实际结果，确认已有覆盖与剩余缺口。沿用[独立 MySQL 库](../../crates/backend/tests/support/database.rs)及[专属 Kafka topic／group](../../crates/backend/tests/support/broker.rs)，从现有环境供给测试配置、MYSQL_PASSWORD 和 Kafka 地址；分配两个空闲且专用的 Isolate ID，串行使用。保留正式 SQL 初始化和公共收尾，不操作部署库、业务 topic／位点或其他 Worker 的环境。
+- [x] **PS06.2 补齐真实 workflow 夹具的必要入口与断言。** 在[现有 RealHarness](../../crates/backend/tests/support/real.rs)中支持显式题号、finished／failed 两类终态和既有结果读取，保持登录、HTTP 创建、Scheduler、Kafka、真实 Worker／Isolate 与 MySQL 的实际路径。现有 real_http_worker_acceptance 的 completed 仅打印预期值；改为从测试专属 events topic 的真实终态消息核对 total_cases／completed_cases，并与持久化及 HTTP 结果对应。观察器不参与业务消费组或提交其位点；不为测试增加 HTTP 字段或新的生产抽象。
+- [x] **PS06.3 完成两道正式题的真实业务验收。** 依赖 PS06.2；扩展 [real_http_worker_acceptance](../../crates/backend/tests/workflow.rs)，从三个正式 SQL 初始化的数据通过 HTTP 提交两数求和与商题的 C／Python 样例，分别核对 AC、104／8 例完成、固定题目版本以及 MySQL／HTTP 结果一致。保留现有 CE、WA、TLE 的代表场景和首败详情断言，检查 WA 仍返回用户输出和资源；脚本直接来自数据库装配，链路不注入受控终态。
+- [x] **PS06.4 完成专用多解与 checker 故障的真实业务验收。** 依赖 PS06.2；仅在独立测试库增加题号 3 的专用多解夹具，使用 sum-pair.py、空参考和 {}，验证至少两份不同合法答案为 AC、非法用户输出为 WA。再以独立测试版本设置一个先 AC、后因非法参考形成 CheckerFailed 的代表场景，核对真实终态的先前完成数量、failed／无 verdict、稳定有界诊断及 MySQL 保存；私有参考或脚本诊断标记不进入 HTTP。复用正式装配、执行和保存入口，不增加第三道正式种子题。
+- [x] **PS06.5 核对历史、私有数据与审查合同。** 依赖 PS06.3–PS06.4；从真实提交读取本人历史、详情和原始源码，核对题号／版本、AC／WA／failed 状态及原用户源码，公开题目和结果不包含 checker 源码、参数或 checker 原始 stdout／stderr。复用[审查请求合同](../../crates/backend/tests/llm_review.rs)与[审查 workflow](../../crates/backend/tests/cases/review_workflow.rs)，确认 LLM 输入仍为既有五项公开数据，failed 提交按既有合同拒绝审查；只有实际接线缺口才补断言，不重复外部模型效果评估。
+- [x] **PS06.6 完成必要页面定向查看。** 依赖 PS06.3–PS06.5；复用现有前端和浏览器／桌面入口，查看两题题面、一次商题 AC、一次用户 WA、一次 CheckerFailed 及本人历史／源码。确认轮询进入终态、失败与 verdict 分开展示、用户输出正确转义、私有诊断不泄漏，保留用户已确认的“峰值内存”等当前页面文案及已有计量说明。复用结果组件和轮询检查，不新增页面、管理功能或浏览器测试框架；页面仅使用受控数据时如实注明，不能记作真实业务链路。
+- [x] **PS06.7 完成必要回归并登记交付。** 依赖 PS06.3–PS06.6；按第 14.3 节执行实际改动需要的格式、编译、Clippy 和相关测试，新增 Rust 项补齐 Rustdoc。更新本记录的 CV01–CV08 实际覆盖、通过／失败／未测范围及任务状态；使用说明仅在现行功能或命令改变时同步。必要验收确实通过后才勾选 PS06；环境缺失和失败保留为待办，不用受控结果替代真实验收。
+
+执行顺序为 PS06.1 → PS06.2 → PS06.3／PS06.4 → PS06.5／PS06.6 → PS06.7；共享同一对 box ID 的真实检查串行进行。完成条件是 CV01–CV08 均有对应的实际验证，正式预设、专用多解和 checker 故障完成真实跨服务路径，结果／历史及 LLM 输入合同保持，必要页面经过查看，失败和未测范围可明确判断。
 
 ## 3. 设计定稿记录
 
@@ -426,3 +440,139 @@ ACORN_ISOLATE_BOX_ID=220 ACORN_CHECKER_BOX_ID=221 \
 PS05 及 7 项分解完成，PS06 保持未完成。已交付两种预设、两道正式种子题、两份商题提交和专用多解材料。新增数据、脚本和既有调用方经过定向验证；完整真实 Kafka → Worker／checker → MySQL、必要页面及其余验收由 PS06 汇总，不把受控终态或单独 Worker 的结果记作完整业务闭环。
 
 本轮未运行全部后端测试、前端构建／浏览器、外部模型或完整部署验收，未执行 Git 提交。
+
+## 14. PS06 定向验收安排
+
+### 14.1 已有覆盖与待补范围
+
+下表保留 PS06 规划时的已有覆盖与缺口，实施结果见第 16 节。新增或扩展具体检查前，继续向用户说明覆盖内容及必要性。
+
+| 验收                          | 已有结果                                                                                                         | PS06 补齐或核对                                                                                                          |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| CV01 trim／两数求和           | 第 9、10、13 节已验证真实 C／Python trim 裁决及原始字节语义；原题 104 例顺序与字节保持                           | PS06.3 让正式两数求和 C／Python 各完成 104 例真实业务链路，核对实际完成数量                                              |
+| CV02 浮点                     | 第 13 节已验证容差内外、格式／项数、非有限数及参考／参数归因，真实商题 C／Python 各 8 例 AC                      | PS06.3 将正式商题的两种输出格式接入真实 HTTP → Kafka → Isolate → MySQL，不再重复整组非法参数矩阵                         |
+| CV03 专用脚本与错误归因       | 第 13 节已有 sum-pair 的真实多解／WA，第 10 节已有 CheckerFailed 与完成数量定向覆盖                              | PS06.4 通过数据库装配专用脚本，并验证多解、用户 WA 以及先 AC 后 checker 故障的持久化路径                                 |
+| CV04 退出、JSON 与诊断        | 第 10 节已有严格 JSON、结果超限、stderr 截断及真实“提前 AC 后非零退出”检查                                       | PS06.4–PS06.5 核对真实 checker 故障进入 failed／无 verdict，稳定诊断与私有原文边界；仅在受影响时复验原执行用例           |
+| CV05 共享源码与副本           | 第 6 节真实 MySQL 与消息编码检查已验证共享引用、版本参数、旧副本不变及重新装配读取当前源码                       | 汇总现有 published_queries_and_fixed_version_creation 结果；任务装配或编码发生修改时定向复验，不增加源码历史或版本锁     |
+| CV06 限额与总期限             | 第 6 节已验证覆盖优先级／缺失；第 10 节真实 Isolate 已验证 checker 独立 CPU／墙钟／内存及三项缺失时的 Job 总期限 | 核对 checker_limits_and_task_budgets 与 real_checker_acceptance 对应覆盖；仅在装配或执行限额受影响时复验，不扩展故障矩阵 |
+| CV07 复用、隔离与资源         | 第 9 节真实双环境文件／生命周期、第 10 节真实历史峰值已有结果；受控检查覆盖公共停止与收尾                        | PS06.3–PS06.4 的多例、连续提交验证真实整合路径，结束后核对测试拥有资源的公共收尾；保留受控与真实证据边界                 |
+| CV08 预算、完整链路与现有接口 | 第 6 节已有任务与编码预算；第 10、13 节的 HTTP／保存检查使用受控终态，尚未完成真实完整链路                       | PS06.3–PS06.6 补齐真实链路、历史／源码、LLM 投影与页面查看；真实 Kafka 编码往返复用现有测试入口                          |
+
+### 14.2 联调组织与观察点
+
+以 [real_http_worker_acceptance](../../crates/backend/tests/workflow.rs)及 [RealHarness](../../crates/backend/tests/support/real.rs)为主要入口，保留生产 HTTP、CreationService、Scheduler、KafkaWorker、真实 Isolate 和正式数据库装配。多解与非法参考只写入本例独立库；共享的正式种子不作运行中修改。新场景按实际规模放在现有测试目标中，不引入通用验收框架。
+
+真实终态观察使用测试专属 events topic 的独立只读消费者，按 job_id 对应提交，读取实际 total_cases／completed_cases 和结果分支，不向测试链路发布替代终态。持久化仍经 Scheduler 的首个有效终态路径完成。HTTP 没有用例完成数字段，不能把测试中的预期变量、日志打印或 HTTP 轮询次数当成实际完成数量，也不因此扩充公开 DTO。
+
+正式样例分别核对题号 1／2、版本 1 和对应 104／8 例；CE 为零例，首例用户 WA／TLE 为一例。故障夹具至少包含一例先前 AC，后例 checker 故障时 completed_cases 保留一例，state 为 failed、verdict 为空，failure code 为 CheckerFailed；故障稳定诊断继续受现有 512 UTF-8 字节上限约束。历史、详情和源码从同一真实提交读取，对比 MySQL 保存结果及原用户源码。
+
+LLM 客户端使用现有受控 Responses 端点检查请求五字段及私有数据边界；failed 的自动／手动审查行为复用既有拒绝及交接检查。该结果证明输入与流程合同，不代表外部模型效果。页面查看使用现有前端入口与测试拥有的数据；真实接口和受控页面数据分别记录。
+
+### 14.3 命令与收口边界
+
+实施 Rust 夹具或断言修改时执行既有命令：
+
+```sh
+cargo fmt --all -- --check
+cargo check --workspace --all-targets --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test -p acorn-worker --locked
+cargo test -p acorn-backend --locked --lib --test config_results
+```
+
+真实业务链路沿用[后端验收命令](../../crates/backend/README.md#检查命令)，执行前已提供 ACORN_TEST_DATABASE_CONFIG、MYSQL_PASSWORD 和 ACORN_TEST_KAFKA_SERVERS，并确认本例两个 box ID 空闲且专用：
+
+```sh
+ACORN_ISOLATE_BOX_ID=220 ACORN_CHECKER_BOX_ID=221 \
+  cargo test -p acorn-backend --locked --test workflow real_http_worker_acceptance -- --ignored --nocapture --test-threads=1
+```
+
+上述 ID 仅为示例，不能把先前空闲视为本轮已保留。若专用多解／故障形成新的测试函数，命令在实现后按实际名称登记，不预先声称已执行。真实 MySQL 和 Kafka 资源的创建、权限与清理沿用既有测试合同，不修改服务器全局配置。
+
+数据库、workflow 及 LLM 使用现有 cargo test -p acorn-backend --locked --test database／workflow／llm_review 入口按第 14.1 节选择相关场景；协议及真实 Kafka 预算检查复用[现有协议生成与检查](../../crates/protocol/README.md)和[后端 Kafka 检查](../../crates/backend/README.md#检查命令)。未改变的独立限额、隔离及错误矩阵使用已有结果；只有新修改、实际失败或未解决缺口才增加重跑。
+
+页面定向验收前复用现有结果、题面和轮询测试，按需执行 web 的 pnpm test；实际修改前端代码时再执行既有 pnpm format:check、lint、typecheck 和 build。浏览器查看不能由组件测试替代；外部模型效果、双 Worker 并发、二进制故障矩阵及完整部署不属于本次新增验收范围，除非具体修改影响这些合同。
+
+最后核对文档格式、稳定编号、本地链接与受影响的双语说明，使用实际命令和结果更新验收表。PS06 勾选须以必要验收通过为依据；缺少 MySQL、Kafka、Isolate 或页面入口时，记录对应待办，继续不依赖该环境的工作。
+
+## 15. PS06 规划记录
+
+PS05 按用户要求提交为 cb67620（feat: add checker presets and quotient examples），包含两份预设、多解材料、正式商题与样例、种子及调用方适配、实际检查记录和使用说明。
+
+本轮补充 PS06 的 7 项分解、依赖、CV01–CV08 已有覆盖及剩余验收。确认现有真实夹具固定题号 1、仅支持 finished，完成数量仅打印预期值；实施时只补齐显式题号、failed 终态和实际事件断言。两道正式题、多解与 checker 故障通过同一真实跨服务路径收口；历史／源码、私有数据、LLM 输入及必要页面分别登记。
+
+规划文档通过 Prettier、104 个本地链接（含 14 个锚点）和 git diff --check 检查；38 个原有标题按原顺序保留，主章节 1–15 连续，代码围栏闭合，CV01–CV08 与任务编号有效。主任务为 5 项完成／1 项待办；原 35 项分解保持完成，新增 PS06 的 7 项分解均为待办。
+
+本轮仅提交既有 PS05 改动并编写 PS06 规划，未修改或执行 PS06 程序、SQL、配置或功能测试。PS06 及 7 项分解保持未完成，规划修改尚未提交。
+
+## 16. PS06 实施记录
+
+### 16.1 真实夹具与业务验收
+
+扩展 [RealHarness](../../crates/backend/tests/support/real.rs)的显式题号和 finished／failed 终态检查。终态读取后，使用测试专属 events topic 的独立显式分区观察器按 job_id 取得真实消息，核对 Kafka key、状态、verdict／failure、total_cases 与 completed_cases，并与 MySQL 和 HTTP 结果对应。观察器不订阅消费组、不提交位点，释放后再完成既有公共收尾；夹具记录所拥有的库及 topic 身份以便失败后定位。
+
+[real_http_worker_acceptance](../../crates/backend/tests/workflow.rs)通过真实登录、HTTP 创建、正式数据库装配、Scheduler、KafkaWorker 与 Isolate 执行两道题的 C／Python 样例。两数求和分别 AC／104 例，商题分别 AC／8 例；原 CE、首例 WA 和首例 TLE 分别完成 0、1、1 例，保留诊断、用户输出、退出事实和资源断言。完成数量取自实际终态，原先仅打印预期值的覆盖已替换。
+
+新增同一 workflow 目标下的 real_checker_workflow_acceptance，仅在独立测试库增加题号 3 的开发夹具：版本 1 引用 sum-pair.py，同一 n = 5、空参考和 {} 对应输出 1 4、2 3、1 3，分别得到 AC、AC、WA。版本 2 引用正式浮点脚本，三例中的第二例保存非法参考；用户正常输出后，第一例 AC、第二例 CheckerFailed，实际完成数量为 1／3。HTTP 和 MySQL 保存 failed／无 verdict，诊断为“Checker failed for case 2: exit code 1.”，不包含私有参考标记、Python 异常原文或脚本内容。正式两题种子保持原样。
+
+两项真实验收均读取对应提交的本人历史、详情、固定版本题面与独立源码接口，核对题号／版本、语言、状态、verdict、审查状态及原始用户源码。公开对象不带 checker 源码、引用、参数、限额、隐藏用例或参考输出；列表继续省略源码和终态详情。更新[后端检查说明](../../crates/backend/README.md#检查命令)的覆盖及专用脚本命令。
+
+### 16.2 实际检查
+
+| 命令／入口                                                       | 实际结果                                                                                                              |
+| ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| cargo fmt --all -- --check                                       | 通过                                                                                                                  |
+| cargo check --workspace --all-targets --locked                   | 通过                                                                                                                  |
+| cargo clippy --workspace --all-targets --locked -- -D warnings   | 通过                                                                                                                  |
+| cargo test -p acorn-worker --locked                              | 36 项常规检查通过，10 项外部环境检查在该命令中 ignored；覆盖脚本协议、预设、预算、进度、资源、期限及停止合同          |
+| cargo test -p acorn-backend --locked --lib --test config_results | 22 项库测试及 10 项配置／结果测试通过                                                                                 |
+| workflow 的 real_http_worker_acceptance                          | 1 项通过，实际包含正式两题 C／Python AC 及 CE／WA／TLE，共 7 次真实提交                                               |
+| workflow 的 real_checker_workflow_acceptance                     | 修正第 16.4 节的夹具断言后 1 项通过，实际包含多解 AC／AC／WA 及先 AC 后 CheckerFailed，共 4 次真实提交                |
+| workflow 的 manual_http_rejections_preserve_records              | 1 项通过；使用启用受控审查端点的既有夹具，failed 提交返回 409／JudgingNotFinished，记录不变，未向模型发出请求         |
+| llm_review 的 request_contract_and_valid_opinions                | 1 项通过；受控 Responses 请求保持 source、language_id、title、statement、verdict 五字段，原源码字节和既有诊断边界保持 |
+| kafka 的 real_kafka_message_roundtrip                            | 1 项通过；真实 broker 往返包含 checker 字段的大任务及事件，原始字节、编码和接收预算按既有合同检查                     |
+| 前端现有 Vitest                                                  | 实际运行 17 个文件、108 项检查并通过，包含结果、题面、轮询、历史及源码相关检查                                        |
+| 本地 Chromium 页面查看                                           | 通过，详见第 16.4 节；使用受控 HTTP 数据，与上述真实后端链路分开登记                                                  |
+
+真实业务命令如下。MySQL、密码与 Kafka 地址通过既有测试环境传入；数据库采用独立前缀加 UUID，Kafka 使用本例专属 topic／group，两个预先确认空闲的 box ID 串行使用。
+
+```sh
+ACORN_ISOLATE_BOX_ID=220 ACORN_CHECKER_BOX_ID=221 \
+  cargo test -p acorn-backend --locked --test workflow real_http_worker_acceptance -- --ignored --nocapture --test-threads=1
+ACORN_ISOLATE_BOX_ID=220 ACORN_CHECKER_BOX_ID=221 \
+  cargo test -p acorn-backend --locked --test workflow real_checker_workflow_acceptance -- --ignored --nocapture --test-threads=1
+cargo test -p acorn-backend --locked --test workflow manual_http_rejections_preserve_records
+cargo test -p acorn-backend --locked --test llm_review request_contract_and_valid_opinions
+cargo test -p acorn-backend --locked --test kafka real_kafka_message_roundtrip -- --ignored --nocapture
+```
+
+前端实际调用 pnpm test -- src/components/SubmissionOutcome.test.ts src/components/ProblemStatement.test.ts src/composables/useSubmissionPolling.test.ts；该调用实际执行整组 17 个文件而非仅这三个文件，上表按实际结果登记。前端组件没有改动，本轮未新增前端测试。
+
+### 16.3 CV01–CV08 验收汇总
+
+| 验收 | 实际覆盖与结论                                                                                                                                                    |
+| ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| CV01 | 第 13 节的 trim 原始字节语义及本轮 Worker 回归保持；正式两数求和 C／Python 各 104 例真实完整链路 AC，通过                                                         |
+| CV02 | 第 13 节和本轮 float_preset_contract 覆盖容差、格式／项数、非法数及参考／配置归因；正式商题的固定小数／科学记数法各 8 例真实完整链路 AC，通过                     |
+| CV03 | 本轮真实数据库装配的专用多解为 AC／AC／WA；非法参考通过真实浮点 checker 形成 CheckerFailed，先前完成数量保持，通过                                                |
+| CV04 | 第 10 节与本轮 Worker 回归覆盖严格 JSON、成功退出、输出预算及提前 AC 后故障；本轮真实 CheckerFailed 保存及私有诊断断言通过                                        |
+| CV05 | 沿用第 6 节真实 MySQL 与消息副本检查：共享引用、版本独立参数、旧任务副本不变和重新装配取得当前源码；本轮未改装配／编码实现，已有覆盖保持                          |
+| CV06 | 沿用第 6 节的限额来源／缺失和第 10 节真实 checker 独立限额／Job 总期限结果；本轮 Worker、配置及结果回归通过，未改生产限额实现                                     |
+| CV07 | 第 9、10 节真实双环境、文件及历史峰值检查保持；本轮真实多例和连续 Job 执行通过，两个任务专用 box 均完成清理，停止及占用合同回归通过                               |
+| CV08 | 本轮真实 Kafka 编码往返及两项完整 HTTP → Kafka → Worker／Isolate → MySQL 验收通过；真实历史／源码、受控 LLM 输入合同和必要页面查看通过，覆盖边界见第 16.4–16.5 节 |
+
+### 16.4 检查修正与页面范围
+
+专用脚本验收最初在额外手动审查断言失败：请求遗漏必填 expected_review_id 时返回 400；补齐后，该真实 Isolate 夹具因审查服务禁用而按合同返回 503，无法使用启用审查夹具的 409 预期。删除该处重复且不适用的断言，保留真实故障链路、完成数量、持久化和私有诊断检查；使用既有 manual_http_rejections_preserve_records 单独验证启用审查时的 failed 拒绝与零请求。生产审查实现未调整，最终真实专用脚本场景通过。
+
+前两次断言失败留下的独立测试库及 Kafka topic／group，经本轮专有参考标记、脚本字节与实际事件 job_id 核对身份后清理。成功场景使用夹具公共收尾；任务所用两个 Isolate 目录已核对为空。没有增加自动扫描或恢复机制。
+
+浏览器使用已有本地 Chromium 156、1280 × 900 视口和现有 Vite 页面，HTTP 数据受控，包含两道题面、商题 AC、用户 WA、CheckerFailed、本人历史及只读源码。三种结果均从 running 轮询到终态并停止继续轮询；WA 中的脚本文本按字面展示且未执行；failed 与机器 verdict 分开展示，历史无 verdict 显示“未产生”，原始源码无法编辑。私有参考与异常原文未进入页面，“峰值内存”当前文案保持，页面无脚本错误。最初页面脚本遗漏标题的题号前缀导致定位超时，修正定位后通过；未因此修改产品页面。
+
+### 16.5 交付边界
+
+PS06 及 7 项分解完成，PS01–PS06 全部完成。实际改动集中在真实测试夹具、验收用例、检查说明与交付记录；CV01–CV08 由已有定向结果和本轮真实链路共同收口。历史、结果和源码由真实 HTTP／MySQL 验证，LLM 输入由受控 Responses 端点验证，页面由受控 HTTP 数据验证，各自不扩大为其他层面的结论。
+
+两份变更 Markdown 通过 Prettier，131 个本地链接（含 27 个锚点）有效，52 个原有标题按原顺序保留；主章节 1–16、代码围栏及两张 CV01–CV08 表有效，6 项主任务和 42 项分解均已完成，git diff --check 通过。前两次失败场景的独立库、topic／group 已核对不存在，两个任务专用 box 均为空。
+
+本轮未重跑未受影响的完整数据库、独立限额／隔离矩阵，未运行双 Worker 并发、完整部署或外部模型效果验收。当前页面文案按用户确认保留。
