@@ -17,4 +17,4 @@
 - [Kafka 判题通信设计与实施计划](10-kafka-judging-design.md)：Scheduler 与 Worker 的任务投递、状态回传、MySQL 交接及接纳容量、独立成员观测、Kafka 健康、消费生命周期、整体部署与任务验收。
 - [用户注册、登录与会话设计](11-user-authentication-design.md)：MySQL 账号、后端内存 Session、Cookie 与请求校验、个人提交隔离、前端账号切换、全新部署及实施验收方案。
 - [本人历史源码查看与审查行号定位设计](12-submission-source-design.md)：独立源码读取接口、本人归属、只读展示、LF 行号与审查疑点定位、身份清理及实施验收方案。
-- [Python 判题脚本设计](13-checker-scripts-design.md)：统一脚本存储与任务装配、文件输入和 JSON 结果协议、同提交沙箱复用、可选资源限额、trim／浮点预设、实施任务与验收要求。
+- [Python 判题脚本设计](13-checker-scripts-design.md)：统一脚本存储与任务装配、文件输入和 JSON 结果协议、同提交沙箱复用、可选资源限额、预设与例题、实施验收及四种通用预设扩展任务。

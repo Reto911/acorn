@@ -1,6 +1,6 @@
 # 判题脚本编写材料
 
-这里的单文件 Python 脚本使用标准库，可作为题库脚本的编写材料。运行时由后端从 MySQL 装配源码，Worker 执行任务中的副本；修改这里的文件不会自动更新数据库，也不会改变已经装配的任务。正式新库初始化使用 [002-example-problem.sql](../../sql/002-example-problem.sql) 中的源码。维护仓库预设时须同步该 SQL 中的对应源码，数据库读回检查会核对它们的字节一致性。
+这里的单文件 Python 脚本使用标准库，可作为题库脚本的编写材料。运行时由后端从 MySQL 装配源码，Worker 执行任务中的副本；修改这里的文件不会自动更新数据库，也不会改变已经装配的任务。正式新库初始化使用 [002-example-problem.sql](../../sql/002-example-problem.sql) 中的源码。维护已收录到正式 SQL 的预设时须同步对应源码，数据库读回检查会核对它们的字节一致性。
 
 ## 脚本与示例题
 
@@ -21,6 +21,21 @@ abs(actual - expected) <= max(abs_tol, rel_tol * max(abs(actual), abs(expected))
 参数必须是有限非负数值，布尔值不作为数值；rel_tol 须小于 1，未知参数报错。允许零容差。正式商题显式使用 `{"abs_tol":1e-6,"rel_tol":1e-6}`。参考数据和参数先校验，错误以非零退出报告；用户项数不符、无法解析、NaN 或无穷大形成正常 WA。
 
 sum-pair 对 n = 5 接受 `1 4` 和 `2 3`，拒绝 `1 3`、非正数、格式错误或多余数值；无需为不同合法输出保存唯一参考答案。
+
+### 通用比较材料
+
+下面四种材料可按文末方法写入 checker_scripts 后供题目版本引用；当前正式初始化包含上表的 trim／float。四种材料均要求参数为 `{}`，非空配置对象形成 CheckerFailed。它们只比较参考和用户输出，不读取 input.bin。
+
+| 材料                                       | 比较规则                                     | 参考与合法输出示例                             |
+| ------------------------------------------ | -------------------------------------------- | ---------------------------------------------- |
+| [tokens.py](tokens.py)                     | 按 ASCII 空白分词，词项顺序、数量和字节一致  | 参考 `green blue red`，输出 `green\nblue\tred` |
+| [integers.py](integers.py)                 | 按十进制整数值有序精确比较，数量相同         | 参考 `1 0 -2`，输出 `+0001 -0 -0002`           |
+| [unordered-tokens.py](unordered-tokens.py) | 词项顺序不限，每项出现次数一致               | 参考 `cat dog cat`，输出 `dog cat cat`         |
+| [unordered-lines.py](unordered-lines.py)   | 行序不限，每行字段顺序及每条记录出现次数一致 | 参考 `a b\nc d`，输出 `c d\r\na\tb`            |
+
+表中的 `\n`、`\r` 和 `\t` 表示实际 LF、CR 和 HT 字节。词项按 bytes.split() 的六种 ASCII 空白分隔，区分大小写，其他字节不作解码或规范化。unordered-lines 只以 LF 分行，兼容 CRLF，忽略空白行；行内仍按 ASCII 空白分词。重复词项与重复行都保留，不能遗漏；`a b\nc d` 与 `a c\nb d` 的字段组合不同，应为 WA。空白输出和空参考可作为相同的空序列。
+
+integers 只接受 `[+-]?[0-9]+`，拒绝小数、指数、下划线及非 ASCII 数字。通过规范化符号和前导零保留任意精度，`-0` 与 `0` 等价，不依赖浮点或十进制转整数的位数限制。脚本先验证完整参考数据，再判断用户输出；非法参考为 CheckerFailed，非法用户词项为 WA。
 
 ## 文件协议与本地运行
 
@@ -48,7 +63,7 @@ python3 -I -B -S examples/checkers/float.py \
 rm -r -- "$ACORN_CHECKER_EXAMPLE"
 ```
 
-这会输出 AC。该本地命令验证脚本逻辑；隔离和限额检查使用 [Worker 的真实 Isolate 入口](../../crates/worker/README.md#isolate-阶段检查)。
+这会输出 AC。其他材料使用相同四文件命令：将 float.py 替换为对应脚本路径，将 answer.bin 和 output.bin 改为上表数据，配置使用 `{}` 即可本地运行。该本地命令验证脚本逻辑；隔离和限额检查使用 [Worker 的真实 Isolate 入口](../../crates/worker/README.md#isolate-阶段检查)。
 
 ## 数据库维护
 

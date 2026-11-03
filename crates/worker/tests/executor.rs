@@ -329,6 +329,194 @@ async fn float_preset_contract() {
     }
 }
 
+/// Execute shipped material through the existing pipeline; no expected verdict means CheckerFailed.
+async fn assert_preset(
+    config: &acorn_worker::config::Config,
+    checker: &[u8],
+    actual: &[u8],
+    reference: &[u8],
+    parameters: &str,
+    expected: Option<Verdict>,
+) {
+    let mut request = job(
+        "generic-preset",
+        "python",
+        "import sys\nsys.stdout.buffer.write(sys.stdin.buffer.read())",
+        &[(actual, reference)],
+    );
+    request.checker_source = checker.to_vec();
+    request.checker_config_json = parameters.into();
+    let outcome = execute(config, request).await;
+    assert_eq!(outcome.completed_cases, u32::from(expected.is_some()));
+    if let Some(expected) = expected {
+        assert_eq!(result(outcome).verdict, expected as i32);
+    } else {
+        let Terminal::Failure(failure) = outcome.terminal else {
+            panic!("Expected CheckerFailed");
+        };
+        assert_eq!(failure.code, "CheckerFailed");
+        assert!(!failure.diagnostic.contains("private-reference"));
+    }
+}
+
+/// Ordered and unordered word materials preserve raw tokens, whitespace rules and multiplicities.
+#[tokio::test]
+async fn word_presets_contract() {
+    let fixture = Fixture::new("normal");
+    for (checker, unordered) in [
+        (
+            include_bytes!("../../../examples/checkers/tokens.py").as_slice(),
+            false,
+        ),
+        (
+            include_bytes!("../../../examples/checkers/unordered-tokens.py").as_slice(),
+            true,
+        ),
+    ] {
+        for (actual, reference, accepted) in [
+            (b"a\tb\nc\r\x0b\x0c ".as_slice(), b"a b c".as_slice(), true),
+            (b"c a b", b"a b c", unordered),
+            (b"A b", b"a b", false),
+            (b"a", b"a a", false),
+            (b"a b b", b"a a b", false),
+            (b"\x00\xff b", b"\x00\xff\tb", true),
+            (b"a\xc2\xa0b", b"a b", false),
+            (b" \t\r\n", b"", true),
+            (b"a b c", b"a b", false),
+        ] {
+            assert_preset(
+                &fixture.config,
+                checker,
+                actual,
+                reference,
+                "{}",
+                Some(if accepted {
+                    Verdict::Accepted
+                } else {
+                    Verdict::WrongAnswer
+                }),
+            )
+            .await;
+        }
+    }
+}
+
+/// Decimal integer material keeps exact unbounded values and validates reference data first.
+#[tokio::test]
+async fn integer_preset_contract() {
+    let fixture = Fixture::new("normal");
+    let checker = include_bytes!("../../../examples/checkers/integers.py");
+    for (actual, reference, expected) in [
+        (
+            b"+0001 -0002 -0 00 +0".as_slice(),
+            b"1 -2 0 -0 000".as_slice(),
+            Some(Verdict::Accepted),
+        ),
+        (
+            b"9007199254740993",
+            b"9007199254740992",
+            Some(Verdict::WrongAnswer),
+        ),
+        (b"2 1", b"1 2", Some(Verdict::WrongAnswer)),
+        (b"1", b"1 2", Some(Verdict::WrongAnswer)),
+        (b"1 2", b"1", Some(Verdict::WrongAnswer)),
+        (b" \t\r\n", b"", Some(Verdict::Accepted)),
+        (b"invalid-user", b"1 private-reference", None),
+    ] {
+        assert_preset(&fixture.config, checker, actual, reference, "{}", expected).await;
+    }
+    for invalid in [b"1_0".as_slice(), b"1.0", b"+", b"1e0", b"\xd9\xa1"] {
+        assert_preset(
+            &fixture.config,
+            checker,
+            invalid,
+            b"1",
+            "{}",
+            Some(Verdict::WrongAnswer),
+        )
+        .await;
+    }
+    // Exceed Python's usual decimal conversion limit without raising that limit in the script.
+    let reference = vec![b'9'; 5000];
+    let mut actual = b"+000".to_vec();
+    actual.extend_from_slice(&reference);
+    assert_preset(
+        &fixture.config,
+        checker,
+        &actual,
+        &reference,
+        "{}",
+        Some(Verdict::Accepted),
+    )
+    .await;
+    *actual.last_mut().unwrap() = b'8';
+    assert_preset(
+        &fixture.config,
+        checker,
+        &actual,
+        &reference,
+        "{}",
+        Some(Verdict::WrongAnswer),
+    )
+    .await;
+}
+
+/// Unordered record material normalizes only permitted whitespace while retaining field grouping.
+#[tokio::test]
+async fn line_preset_contract() {
+    let fixture = Fixture::new("normal");
+    for (actual, reference, accepted) in [
+        (
+            b"c d\r\n\r\n a\tb \r\n".as_slice(),
+            b"a b\nc d\n".as_slice(),
+            true,
+        ),
+        (b"a b\na b\nb a", b"a b\nb a\na b", true),
+        (b"a c\nb d", b"a b\nc d", false),
+        (b"b a", b"a b", false),
+        (b"a b\nc d\nc d", b"a b\na b\nc d", false),
+        (b"\r\n \t\n", b"", true),
+        (b"a b\nc d", b"a b", false),
+        (b"a b\rc d", b"a b\nc d", false),
+    ] {
+        assert_preset(
+            &fixture.config,
+            include_bytes!("../../../examples/checkers/unordered-lines.py"),
+            actual,
+            reference,
+            "{}",
+            Some(if accepted {
+                Verdict::Accepted
+            } else {
+                Verdict::WrongAnswer
+            }),
+        )
+        .await;
+    }
+}
+
+/// All parameter-free materials reject nonempty objects instead of judging with ignored options.
+#[tokio::test]
+async fn generic_preset_parameters() {
+    let fixture = Fixture::new("normal");
+    for checker in [
+        include_bytes!("../../../examples/checkers/tokens.py").as_slice(),
+        include_bytes!("../../../examples/checkers/integers.py").as_slice(),
+        include_bytes!("../../../examples/checkers/unordered-tokens.py").as_slice(),
+        include_bytes!("../../../examples/checkers/unordered-lines.py").as_slice(),
+    ] {
+        assert_preset(
+            &fixture.config,
+            checker,
+            b"0",
+            b"0",
+            r#"{"unexpected":false}"#,
+            None,
+        )
+        .await;
+    }
+}
+
 /// The same sample and multi-answer checks run with a controlled or real Isolate manager.
 async fn preset_examples(config: &acorn_worker::config::Config) {
     let cases: &[(&[u8], &[u8])] = &[
