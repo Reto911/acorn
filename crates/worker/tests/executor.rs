@@ -16,8 +16,11 @@ use support::{Fixture, job};
 use tokio::{sync::watch, time::Instant};
 
 /// Judge through the complete executor while retaining the internal stop sender.
-async fn execute(fixture: &Fixture, request: SubmitJobRequest) -> ExecutionOutcome {
-    let mut executor = Executor::new(fixture.config.clone());
+async fn execute(
+    config: &acorn_worker::config::Config,
+    request: SubmitJobRequest,
+) -> ExecutionOutcome {
+    let mut executor = Executor::new(config.clone());
     let (_sender, stop) = watch::channel(None);
     let outcome = executor
         .run(
@@ -48,7 +51,7 @@ async fn c_ac_ce_and_wa_short_circuit() {
     let source =
         "#include <stdio.h>\nint main(void) { int n; scanf(\"%d\", &n); printf(\"%d\\n\", n); }";
     let accepted = execute(
-        &fixture,
+        &fixture.config,
         job(
             "c-ac",
             "c",
@@ -70,7 +73,7 @@ async fn c_ac_ce_and_wa_short_circuit() {
     let before = fixture.operations().matches("--run").count();
     fixture.config.compile.diagnostic_max_bytes = 64;
     let ce = execute(
-        &fixture,
+        &fixture.config,
         job("c-ce", "c", "invalid C code", &[(b"", b""), (b"", b"")]),
     )
     .await;
@@ -85,7 +88,7 @@ async fn c_ac_ce_and_wa_short_circuit() {
 
     let before = fixture.operations().matches("--run").count();
     let wa = execute(
-        &fixture,
+        &fixture.config,
         job(
             "c-wa",
             "c",
@@ -115,7 +118,7 @@ async fn python_independent_copies_and_syntax_error() {
     let fixture = Fixture::new("cleanup_failure");
     let source = "import pathlib\np = pathlib.Path(__file__)\nassert p.read_text().startswith('import')\np.write_text('broken source')\nprint(input())\n";
     let accepted = execute(
-        &fixture,
+        &fixture.config,
         job(
             "python-ac",
             "python",
@@ -129,7 +132,7 @@ async fn python_independent_copies_and_syntax_error() {
     assert_eq!(fixture.operations().matches("--run").count(), 4);
     let before = fixture.operations().matches("--run").count();
     let re = execute(
-        &fixture,
+        &fixture.config,
         job(
             "python-re",
             "python",
@@ -230,13 +233,163 @@ async fn comparison_preserves_internal_and_non_ascii_whitespace() {
     for expected in [b"a b".as_slice(), b"a  b\xc2\xa0"] {
         let outcome = result(
             execute(
-                &fixture,
+                &fixture.config,
                 job("compare", "python", "print('a  b')", &[(b"", expected)]),
             )
             .await,
         );
         assert_eq!(outcome.verdict, Verdict::WrongAnswer as i32);
     }
+    let accepted = execute(
+        &fixture.config,
+        job(
+            "binary-trim",
+            "python",
+            "import sys\nsys.stdout.buffer.write(sys.stdin.buffer.read())",
+            &[(b"\x00\xffword\t\n\x0b\x0c\r ", b"\x00\xffword")],
+        ),
+    )
+    .await;
+    assert_eq!(result(accepted).verdict, Verdict::Accepted as i32);
+}
+
+/// Float material distinguishes user format errors from invalid private reference/configuration data.
+#[tokio::test]
+async fn float_preset_contract() {
+    let fixture = Fixture::new("normal");
+    for (actual, reference, config, expected) in [
+        (
+            b"1.000e0\t-2.500\r\n".as_slice(),
+            b"1 -2.5".as_slice(),
+            "{}",
+            "AC",
+        ),
+        (b"1e-6", b"0", "{}", "AC"),
+        (b"2e-6", b"0", "{}", "WA"),
+        (
+            b"1000000.5",
+            b"1000000",
+            r#"{"abs_tol":0,"rel_tol":1e-6}"#,
+            "AC",
+        ),
+        (
+            b"1000002",
+            b"1000000",
+            r#"{"abs_tol":0,"rel_tol":1e-6}"#,
+            "WA",
+        ),
+        (b"1.0000001", b"1", r#"{"abs_tol":0,"rel_tol":0}"#, "WA"),
+        (b"", b"1", "{}", "WA"),
+        (b"1 2", b"1", "{}", "WA"),
+        (b"bad", b"1", "{}", "WA"),
+        (b"NaN", b"1", "{}", "WA"),
+        (b"inf", b"1", "{}", "WA"),
+        (b"", b"bad-reference", "{}", "CheckerFailed"),
+        (b"0", b"NaN", "{}", "CheckerFailed"),
+        (b"0", b"inf", "{}", "CheckerFailed"),
+        (b"0", b"0", r#"{"abs_tol":true}"#, "CheckerFailed"),
+        (b"0", b"0", r#"{"rel_tol":-0.1}"#, "CheckerFailed"),
+        (b"0", b"0", r#"{"rel_tol":1}"#, "CheckerFailed"),
+        (b"0", b"0", r#"{"abs_tol":"0"}"#, "CheckerFailed"),
+        (b"0", b"0", r#"{"abs_tol":null}"#, "CheckerFailed"),
+        // Script-level validation; the public admission parser may reject this number earlier.
+        (b"0", b"0", r#"{"abs_tol":1e309}"#, "CheckerFailed"),
+        (b"0", b"0", r#"{"unexpected":0}"#, "CheckerFailed"),
+    ] {
+        let mut request = job(
+            "float-preset",
+            "python",
+            "import sys\nsys.stdout.buffer.write(sys.stdin.buffer.read())",
+            &[(actual, reference)],
+        );
+        request.checker_source = include_bytes!("../../../examples/checkers/float.py").to_vec();
+        request.checker_config_json = config.into();
+        let outcome = execute(&fixture.config, request).await;
+        match outcome.terminal {
+            Terminal::Result(judged) => {
+                assert_eq!(outcome.completed_cases, 1);
+                assert_eq!(
+                    judged.verdict,
+                    if expected == "AC" {
+                        Verdict::Accepted
+                    } else {
+                        Verdict::WrongAnswer
+                    } as i32,
+                    "{expected}: {actual:?}, {config}"
+                );
+                assert_ne!(expected, "CheckerFailed");
+            }
+            Terminal::Failure(failure) => {
+                assert_eq!(expected, "CheckerFailed", "{failure:?}");
+                assert_eq!(failure.code, expected);
+                assert_eq!(outcome.completed_cases, 0);
+                assert!(!failure.diagnostic.contains("bad-reference"));
+            }
+        }
+    }
+}
+
+/// The same sample and multi-answer checks run with a controlled or real Isolate manager.
+async fn preset_examples(config: &acorn_worker::config::Config) {
+    let cases: &[(&[u8], &[u8])] = &[
+        (b"0 1\n", b"0\n"),
+        (b"1 3\n", b"0.3333333333333333\n"),
+        (b"-1 3\n", b"-0.3333333333333333\n"),
+        (b"1 1000000\n", b"0.000001\n"),
+        (b"-1 1000000\n", b"-0.000001\n"),
+        (b"1000000 1\n", b"1000000\n"),
+        (b"-1000000 1\n", b"-1000000\n"),
+        (b"1000000 3\n", b"333333.3333333333\n"),
+    ];
+    for (language, source) in [
+        (
+            "c",
+            include_str!("../../../examples/submissions/quotient.c"),
+        ),
+        (
+            "python",
+            include_str!("../../../examples/submissions/quotient.py"),
+        ),
+    ] {
+        let mut request = job("quotient-preset", language, source, cases);
+        request.checker_source = include_bytes!("../../../examples/checkers/float.py").to_vec();
+        request.checker_config_json = r#"{"abs_tol":1e-6,"rel_tol":1e-6}"#.into();
+        let outcome = execute(config, request).await;
+        assert_eq!(outcome.completed_cases, 8);
+        assert_eq!(result(outcome).verdict, Verdict::Accepted as i32);
+    }
+    for (output, expected) in [
+        ("1 4", Verdict::Accepted),
+        ("2 3", Verdict::Accepted),
+        ("1 3", Verdict::WrongAnswer),
+        ("0 5", Verdict::WrongAnswer),
+        ("one four", Verdict::WrongAnswer),
+    ] {
+        let mut request = job(
+            "sum-pair",
+            "python",
+            &format!("print({output:?})"),
+            &[(b"5\n", b"")],
+        );
+        request.checker_source = include_bytes!("../../../examples/checkers/sum-pair.py").to_vec();
+        let outcome = execute(config, request).await;
+        assert_eq!(outcome.completed_cases, 1);
+        assert_eq!(result(outcome).verdict, expected as i32);
+    }
+}
+
+/// Sample submissions use the shipped checker bytes, rather than an embedded test comparator.
+#[tokio::test]
+async fn preset_samples_and_multiple_answers() {
+    let fixture = Fixture::new("normal");
+    preset_examples(&fixture.config).await;
+}
+
+/// Real Isolate executes C/Python quotient samples and independent valid sum-pair outputs.
+#[tokio::test]
+#[ignore = "requires prepared Linux/Isolate and dedicated ACORN_ISOLATE_BOX_ID/ACORN_CHECKER_BOX_ID"]
+async fn real_preset_acceptance() {
+    preset_examples(&real_config()).await;
 }
 
 /// Production checker execution restores its fixed files and returns only user measurements on WA.
@@ -358,7 +511,7 @@ async fn checker_failures_are_private_and_preserve_progress() {
             &[(b"", b"private-answer")],
         );
         request.checker_source = source.as_bytes().to_vec();
-        let outcome = execute(&fixture, request).await;
+        let outcome = execute(&fixture.config, request).await;
         assert_eq!(outcome.completed_cases, 0, "{mode}: {source}");
         let Terminal::Failure(error) = outcome.terminal else {
             panic!("Expected CheckerFailed")
@@ -376,7 +529,7 @@ async fn checker_failures_are_private_and_preserve_progress() {
         &[(b"first", b""), (b"second", b""), (b"third", b"")],
     );
     request.checker_source = b"from pathlib import Path\nif Path('input.bin').read_bytes() == b'first':\n    print('{\"verdict\":\"AC\"}')\nelse:\n    raise RuntimeError('private-error')".to_vec();
-    let outcome = execute(&fixture, request).await;
+    let outcome = execute(&fixture.config, request).await;
     assert_eq!(outcome.completed_cases, 1);
     let Terminal::Failure(error) = outcome.terminal else {
         panic!("Expected CheckerFailed")
@@ -397,12 +550,12 @@ async fn checker_output_limits_are_independent() {
     request.checker_source =
         b"import os\nos.write(2, b'\\xff' * 8192)\nprint('{\"verdict\":\"AC\"}')".to_vec();
     assert_eq!(
-        result(execute(&fixture, request.clone()).await).verdict,
+        result(execute(&fixture.config, request.clone()).await).verdict,
         Verdict::Accepted as i32
     );
     request.checker_source =
         b"import os\nprint('{\"verdict\":\"AC\"}', flush=True)\nos.write(1, b'x' * 8192)".to_vec();
-    let outcome = execute(&fixture, request).await;
+    let outcome = execute(&fixture.config, request).await;
     assert_eq!(outcome.completed_cases, 0);
     let Terminal::Failure(error) = outcome.terminal else {
         panic!("Expected result overflow failure")
@@ -523,7 +676,7 @@ async fn deadline_stops_execution_and_reports_failure() {
                 &[(b"", b""), (b"", b"")],
             ),
             StageControl {
-                deadline: Instant::now() + Duration::from_millis(300),
+                deadline: Instant::now() + Duration::from_secs(2),
                 stop,
             },
             |progress| phases.push(progress.phase),
@@ -571,7 +724,7 @@ async fn confirmed_limits_have_documented_priority() {
     let fixture = Fixture::new("limits");
     let outcome = result(
         execute(
-            &fixture,
+            &fixture.config,
             job("limits", "python", "print(42)", &[(b"", b"42")]),
         )
         .await,
@@ -585,7 +738,7 @@ async fn output_limit_is_a_bounded_case_result() {
     let mut fixture = Fixture::new("normal");
     fixture.config.execution.stdout_max_bytes = 1024;
     let outcome = execute(
-        &fixture,
+        &fixture.config,
         job(
             "ole",
             "python",

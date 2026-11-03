@@ -264,7 +264,7 @@ verdict = "AC" if actual.rstrip(trailing) == expected.rstrip(trailing) else "WA"
 print(json.dumps({"verdict": verdict}))
 ```
 
-脚本正常结束自然返回 0。初始两数求和题继续使用原 104 个用例，改为引用该脚本。
+脚本正常结束自然返回 0。初始两数求和题继续使用原 104 个用例，改为引用该脚本。编写材料见 [trim.py](../examples/checkers/trim.py)。
 
 ### 6.2 浮点比较
 
@@ -281,9 +281,13 @@ abs(actual - expected)
 
 新增“计算两个整数的商”示例题：每例输入整数 a、b，-1000000 <= a <= 1000000，1 <= b <= 1000000，输出 a / b。允许 C、Python，初始化时写入与两数求和示例题相同的语言预算，配置两项容差为 1e-6，参考文件保存一个数值。用例包含零、负值、循环小数、大小不同的数量级，展示不同合法数值格式均可通过。
 
+浮点编写材料见 [float.py](../examples/checkers/float.py)，提交样例见 [C](../examples/submissions/quotient.c) 和 [Python](../examples/submissions/quotient.py)。
+
 ### 6.3 题目专用脚本
 
 专用脚本使用相同数据表、文件参数、JSON 结果和沙箱，不增加 custom 模式枚举。最小开发夹具输入整数 n >= 3，要求输出两个正整数 x、y，满足 x + y = n；脚本读取 input.bin 与 output.bin 判断，answer.bin 为空。用两份不同合法输出和一份非法输出验收多解及 WA 分支。
+
+专用脚本材料见 [sum-pair.py](../examples/checkers/sum-pair.py)，参数、协议、本地运行及数据库维护示例见[编写材料说明](../examples/checkers/README.md)。
 
 题库数据和脚本通过直接数据库操作维护。仓库中的 .py 是编写材料，数据库中装配时取得的源码决定任务行为；Worker 不按 name 查找本机文件，也不回退到内置比较器。
 

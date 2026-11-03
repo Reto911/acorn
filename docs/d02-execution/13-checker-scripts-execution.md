@@ -4,9 +4,9 @@
 
 ## 1. 当前状态
 
-PS01–PS04 已依次完成，交付结构版本 5、存储与初始化适配、完整 checker 任务装配与接纳预算、双环境生命周期与文件交接，以及统一 Python checker 裁决和资源展示，实际检查见第 5、6、9、10 节。预设编写材料、新增示例题及整体联调仍待 PS05–PS06。
+PS01–PS05 已依次完成，交付结构版本 5、完整 checker 装配与接纳预算、双环境与文件接口、统一 Python checker，以及预设材料、浮点商题和多解夹具。实际检查见第 5、6、9、10、13 节；整体联调仍待 PS06。
 
-PS01、PS02、PS03 分别提交为 f0f3bb7、e095f96 和 fbce955。PS04 已完成并单独提交；实施分解见第 2.4 节，验证安排见第 7 节。
+PS01–PS04 分别提交为 f0f3bb7、e095f96、fbce955 和 d582852。PS05 已完成，保留为未提交修改；任务分解见第 2.5 节，验证安排及实际结果见第 11、13 节。
 
 ## 2. 任务状态
 
@@ -16,7 +16,7 @@ PS01、PS02、PS03 分别提交为 f0f3bb7、e095f96 和 fbce955。PS04 已完�
 - [x] PS02 协议、任务装配与预算。
 - [x] PS03 沙箱生命周期与文件对接。
 - [x] PS04 checker 执行与结果说明。
-- [ ] PS05 预设、示例题与初始化说明。
+- [x] PS05 预设、示例题与初始化说明。
 - [ ] PS06 定向验收与交付。
 
 ### 2.1 PS01 数据结构与存储
@@ -78,6 +78,20 @@ PS03.1 与 PS03.2 可分别推进，随后完成限额及文件接口，再衔�
 - [x] **PS04.8 完成定向裁决回归与阶段收口。** 依赖 PS04.1–PS04.7；按第 7.2 节验证严格 JSON、退出事实、两类输出预算、CheckerFailed、完成数量、WA 用户事实和已有 HTTP／LLM 投影。复用原用户错误、资源优先级、首败、期限、停机和停止未确认覆盖，以及现有前端结果检查。按第 7.3 节执行实际改动对应命令，记录真实／受控范围和失败；全部必要项完成后勾选任务。
 
 PS04.1、PS04.2 可分别推进，PS03 文件与环境接口就绪后接通 PS04.3，再依次完成故障、进度资源、保存和展示。完成条件为统一 checker 已参与用例裁决，成功退出与严格 JSON 共同成立才形成 AC／WA，故障和公开结果符合合同。PS05 接续预设编写材料、浮点题及多解夹具；PS06 汇总真实 Kafka → Worker／Isolate → MySQL 和必要页面验收。此处的受控检查不替代真实隔离或整体交付。
+
+### 2.5 PS05 预设、示例题与初始化说明
+
+依赖已完成的 PS01、PS04，按[设计第 6 节](../13-checker-scripts-design.md#6-预设脚本与示例题)交付编写材料、正式商题及专用多解夹具。复用已有脚本装配与执行路径，保持结构版本 5；完整跨服务验收仍由 PS06 汇总。
+
+- [x] **PS05.1 提供独立脚本编写材料。** 在 examples/checkers/ 新增 trim.py、float.py。两个脚本均可使用固定四文件参数及 -I -B -S 独立运行，仅使用标准库。trim 保留末尾六种 ASCII 空白语义。float 使用 bytes.split()、float 与 math.isclose，要求项数相同且值有限；先校验配置与参考数据，再判断用户输出。用户格式或非有限值形成正常 WA，参考数据和配置错误以非零退出形成 CheckerFailed。仅支持 abs_tol／rel_tol，缺省均为 1e-6，拒绝布尔值、非数值、非有限值、负值、rel_tol >= 1 及未知参数；遵守唯一 JSON 与成功退出码 0 合同。
+- [x] **PS05.2 扩充正式初始化种子。** 依赖 PS05.1；扩充现有 [002-example-problem.sql](../../sql/002-example-problem.sql)，保留 trim 脚本 ID 1、两数求和题号 1／版本 1 和原 104 例。新增浮点脚本 ID 2 及题号 2／版本 1“计算两个整数的商”，参数显式为 abs_tol = rel_tol = 1e-6。公开题面说明整数范围、单个商输出、有限值与容差公式。C／Python 限额分别沿用两数求和的 1000／3000 ms／262144 KiB 和 2000／5000 ms／262144 KiB，checker 覆盖值留空以采用既有 Python 默认来源。使用 8 个固定有序用例，覆盖零、正负循环小数、小量级、分子与分母边界及大量级；参考文件保存单个有限数值。SQL 中实际存储的两份脚本与编写材料一致，保留原 DML 事务和发布顺序。
+- [x] **PS05.3 提供示例提交与专用多解夹具。** 依赖 PS05.1；在 examples/submissions/ 新增 quotient.c、quotient.py，展示不同合法浮点格式；在 examples/checkers/ 新增 sum-pair.py，作为开发夹具而不写入正式种子。专用脚本从 input.bin 读取 n >= 3，从 output.bin 检查两个正整数及其和，answer.bin 为空，配置使用 {}。以同一输入的两份不同合法输出和一份非法输出覆盖 AC／AC／WA；沿用现有任务和文件接口。
+- [x] **PS05.4 同步初始化调用方与现有夹具。** 依赖 PS05.2；保持 [deploy.py](../../scripts/deploy.py) 及[数据库初始化夹具](../../crates/backend/tests/support/database.rs)使用原三条 SQL 执行顺序，更新初始化完成提示。核对 [database](../../crates/backend/tests/database.rs)、[workflow](../../crates/backend/tests/workflow.rs)及共享夹具中“只有一题”、题号 2 不存在或用作临时题的假设；临时题改用与正式种子不同的 ID，查询检查按题号定位，同时保留分页、固定版本和外键校验原意。[Worker 默认任务夹具](../../crates/worker/tests/support/mod.rs)直接嵌入 trim.py 编写材料，减少测试中的重复脚本副本。
+- [x] **PS05.5 完成脚本、种子与真实执行定向检查。** 依赖 PS05.1–PS05.4；按第 11 节扩展现有 executor、database 和必要 workflow 检查。验证从真实 MySQL 读回的脚本与 .py 字节一致、商题参数／语言预算／8 例完整且可装配；覆盖 trim、浮点容差与错误归因、多解及有界私有诊断。复用真实 Isolate 执行器入口，以专用双 ID 串行验证实际预设、C／Python 商题样例和多解脚本；受控管理器与真实结果分别登记。新增或扩展检查前先告知具体覆盖及必要性。
+- [x] **PS05.6 完成维护、初始化与使用说明。** 依赖 PS05.1–PS05.4；新增 examples/checkers/README.md，说明四文件协议、脚本返回、预设参数、私有数据及直接数据库维护方式，明确 .py 是编写材料，装配时读取数据库源码，修改本地文件不会自动改变已存脚本。同步 [SQL 说明](../../sql/README.md)、[数据库设计](../02-database-design.md)、[Worker 说明](../../crates/worker/README.md)、[后端说明](../../crates/backend/README.md)、根双语 Quick Start 与[文档索引](../README.md)的两个正式示例题、初始化结果和样例入口。说明同脚本可共享、参数属于版本、已装配副本不随脚本修改变化，完整任务重新装配时读取当前源码；结果页按用户确认保留现有文案。
+- [x] **PS05.7 验证并收口阶段交付。** 依赖 PS05.5–PS05.6；按第 11.3 节完成实际改动所需检查，记录通过、失败、受控／真实范围与剩余工作，再勾选任务。交付两种预设、两道正式种子题和专用开发夹具，保持数据库作为运行时脚本来源；为 PS06 留下可直接使用的样例及现有联调入口。
+
+执行顺序为 PS05.1 → PS05.2／PS05.3 → PS05.4 → PS05.5／PS05.6 → PS05.7。完成条件为正式空库初始化包含两题且原两数求和不退化，数据库脚本和编写材料一致，浮点与多解通过统一 checker，用户 WA 与数据／配置故障归因明确。PS05 不以 Worker 或受控终态检查替代 PS06 的完整 Kafka → Worker／真实 checker → MySQL 闭环。
 
 ## 3. 设计定稿记录
 
@@ -311,3 +325,104 @@ cargo test -p acorn-backend --locked --test workflow manual_http_rejections_pres
 存储测试首次直接访问 TerminalOutcome 私有字段导致编译失败，改为核对公开读取结果后通过。最初自选测试库前缀被 MySQL 1044 拒绝，数据库与 workflow 改用既有测试配置规定的 acorntest 前缀后通过，未扩大账户权限。LLM 输入检查首次因执行沙箱禁止本地监听失败，使用本地受控端点在获准环境重跑通过。Clippy 首次指出输出收集器测试模块后仍有实现项，调整模块顺序后通过，未添加 lint 豁免。
 
 PS04 及 8 项分解已完成，PS05–PS06 保持未完成。本阶段分别验证真实 checker／Isolate 与后端消息保存及 HTTP 合同；完整 Kafka → Worker／真实 checker → MySQL 链路仍由 PS06 验收，未将受控夹具记作该链路通过。浮点预设、新增商题、专用多解夹具与完整初始化使用材料由 PS05 接续。本轮未运行浏览器实际页面、外部模型或完整部署验收。PS04 按用户要求单独提交，结果组件保留用户确认的现有文案。
+
+## 11. PS05 定向验证安排
+
+以下为 PS05 的定向验证安排，实际结果见第 13 节。优先扩展现有检查；不为预设另建一套执行框架。
+
+### 11.1 脚本与文件协议
+
+| 复用入口                                                                                                           | 覆盖与必要性                                                                                                                                                                                                       |
+| ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| [Worker executor](../../crates/worker/tests/executor.rs)及[共享任务夹具](../../crates/worker/tests/support/mod.rs) | 直接使用编写材料中的脚本，核对 trim 的末尾 ASCII 空白、内部空白差异与原始非 UTF-8 字节，避免种子和测试各自维护不同规则。沿用 PS04 的退出、JSON、输出预算和完成数量检查。                                           |
+| 同一 executor 中的浮点分组检查                                                                                     | 接受小数／科学记数法及连续 ASCII 空白；验证绝对与相对容差的内／外值、默认和显式配置。用户项数不符、非法数及 NaN／无穷大为 WA；非法参考数、未知或非法容差为 CheckerFailed。只覆盖上述明确合同，不展开参数笛卡尔积。 |
+| 同一 executor 中的多解与故障检查                                                                                   | 相同 n 的两份不同合法答案均 AC，非法答案 WA；输入与空参考通过固定文件接口交接。浮点参考数据／参数错误经实际脚本执行形成 CheckerFailed，保持公开诊断和先前完成数量规则。                                            |
+| 现有真实 Isolate 执行器入口                                                                                        | 使用实际脚本、C／Python 商题提交样例和专用多解夹具运行；核对真实退出与判题结果，验证 .py 单文件可在固定命令下工作。使用部署分配的两个空闲 ID 串行执行，避免同 ID 并发检查互相干扰。                                |
+
+容差检查选用少量可明确判断的值。例如默认绝对容差下，参考 0、用户 1e-6 应通过，用户 2e-6 应 WA；仅启用相对容差 1e-6 时，参考 1000000、用户 1000000.5 通过，用户 1000002 为 WA。布尔值、负值、非有限值、rel_tol >= 1、错误类型和未知键按设计归为配置错误；无需重复 PS04 的完整 JSON 拒绝场景。
+
+### 11.2 正式种子与调用方
+
+| 复用入口                                                                                                                  | 覆盖与必要性                                                                                                                                                                                                                          |
+| ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [database](../../crates/backend/tests/database.rs)及[正式 SQL 初始化夹具](../../crates/backend/tests/support/database.rs) | 从空库执行原三条 SQL，接受结构版本 5；核对题号 1 的 104 例及题号 2 的 8 个连续用例、两种语言预算、两份脚本引用与容差参数。实际查询 MySQL 并与 .py 字节比较，检查 SQL 字符串转义没有改写源码；通过既有创建／装配入口取得完整商题任务。 |
+| published_queries_and_fixed_version_creation、invalid_task_data_and_foreign_keys 与受影响的 database 场景                 | 更新旧列表数量和临时 ID 假设，保留固定版本、共享脚本、字段／外键约束和装配副本的原测试含义，避免新正式题号与既有夹具冲突。                                                                                                            |
+| [workflow](../../crates/backend/tests/workflow.rs) 的 published_queries_and_history_shapes 及实际受影响场景               | 已发布列表与题面包含新商题，公开字段仍不返回 checker 私有数据，原题的版本及历史查询保持正常。受控终态只能证明 HTTP／保存合同，真实消息和沙箱联调在 PS06 汇总。                                                                        |
+| [部署初始化入口](../../scripts/deploy.py)和使用说明                                                                       | 核对 SQL 执行顺序及安装文件保持一致，初始化提示准确描述两道题；文档中的题号、输入范围、容差、语言预算、样例和部署内容一致。无需为提示文案增加镜像测试。                                                                               |
+
+8 个商题用例采用 (0,1)、(1,3)、(-1,3)、(1,1000000)、(-1,1000000)、(1000000,1)、(-1000000,1)、(1000000,3)，按上述顺序从 1 编号；参考值按题目定义保存为单个有限数值。两数求和原始用例顺序及字节保持不变。专用多解夹具使用 n = 5，以 1 4、2 3 和 1 3 区分两份合法输出与非法输出，不作为第三道正式预置题。
+
+### 11.3 命令、环境与完成边界
+
+Rust 实施包含测试夹具调整时，沿用现有检查：
+
+```sh
+cargo fmt --all -- --check
+cargo check --workspace --all-targets --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test -p acorn-worker --locked
+```
+
+数据库和 workflow 从既有 cargo test -p acorn-backend --locked --test database／--test workflow 入口选择实际受影响用例；新增检查在实施时确定名称并记录实际筛选命令。环境继续采用第 4.3 节的 ACORN_TEST_DATABASE_CONFIG、MYSQL_PASSWORD 和独立测试库合同，以及临时 Kafka topic／消费组。仅调整脚本、种子与示例的范围不重复外部模型、前端应用构建或完整部署验收。
+
+真实执行复用[现有 Worker 命令](../../crates/worker/README.md#isolate-阶段检查)，扩展相应测试后执行：
+
+```sh
+ACORN_ISOLATE_BOX_ID=220 ACORN_CHECKER_BOX_ID=221 \
+  cargo test -p acorn-worker --locked --test executor -- --ignored --nocapture --test-threads=1
+```
+
+这里的数字仅为示例，实施前必须由调用方分配两个空闲且专用的 ID。文档检查使用项目现有 Prettier，核对本地链接、稳定编号及根双语功能／命令一致性。预设通过受控和真实执行、SQL 通过真实初始化后，才能登记相应覆盖；CV01–CV03 的完整业务验收及 CV08 的真实链路仍按 PS06 实际结果收口。
+
+## 12. PS05 规划记录
+
+PS04 按用户要求单独提交为 d582852，提交前用户确认保留结果组件的原有“峰值内存”等文案，相关设计与实施描述已按该决定修正。
+
+本轮补充 PS05 的 7 项分解、依赖、完成条件及定向验证安排。确定沿用现有初始化 SQL，保留题号 1 与 104 例，增加题号 2 的浮点商题及 8 例，专用多解作为开发夹具；明确题号 2 与现有未发布／临时题夹具冲突的同步工作。预设编写材料与数据库源码一致性由真实 MySQL 查询核对，运行继续采用 PS04 的统一 checker。
+
+规划文档通过 Prettier，85 个本地链接有效，其中 11 个含锚点，27 个原有标题按顺序保留；主章节、任务编号、代码围栏及完成状态一致，PS05 的任务依赖无环，git diff --check 通过。
+
+本轮未修改或执行 PS05 程序、SQL、配置和功能测试；PS05 的 7 项分解及 PS06 均保持未完成，规划文档保留为未提交修改。
+
+## 13. PS05 实施记录
+
+### 13.1 预设、正式种子与夹具
+
+新增独立的 [trim.py](../../examples/checkers/trim.py)、[float.py](../../examples/checkers/float.py) 与 [sum-pair.py](../../examples/checkers/sum-pair.py) 编写材料，均使用标准库和固定四文件协议。trim 保留末尾六种 ASCII 空白语义及内部原始字节。float 先验证容差和参考数据，随后按项数、有限值及 math.isclose 判断用户输出；非法参考／配置形成 CheckerFailed，非法用户输出为 WA。sum-pair 使用原始输入和用户输出判断两正整数之和，参考为空。
+
+现有 [002-example-problem.sql](../../sql/002-example-problem.sql) 在同一 DML 事务中写入两份预设及两道正式题，结构版本仍为 5。原题号 1／版本 1、脚本 ID 1 和 104 例的字节与顺序保持；新增脚本 ID 2、题号 2／版本 1 商题及 8 个固定用例，题面公开数值格式和两项 1e-6 容差。两题各语言预算一致，checker 覆盖值为空，沿用 Python 默认来源。正式 SQL 的脚本与 .py 保持字节一致；不将专用多解材料作为第三道正式题。
+
+新增 [C 商题样例](../../examples/submissions/quotient.c)与 [Python 商题样例](../../examples/submissions/quotient.py)，分别输出固定小数和科学记数法。Worker 默认任务直接嵌入 trim.py，定向预设检查共享同一执行入口，避免再维护测试专用比较器。数据库旧临时题改用题号 3，列表、固定版本、外键及公开题面夹具同步保留原意，测试对原题数据的修改限定到对应题号。
+
+部署脚本保持原三条 SQL 的执行与安装顺序，更新两题初始化提示。新增[编写材料说明](../../examples/checkers/README.md)，提供本地四文件运行和十六进制源码 SQL 更新示例；同步 SQL、数据库设计、脚本设计、Worker／后端说明、文档索引和根双语 Quick Start。文档明确数据库为运行时源码来源、共享引用与已装配副本语义。结果组件保持用户已确认的现有文案。
+
+### 13.2 实际检查
+
+- cargo fmt --all -- --check、cargo check --workspace --all-targets --locked 和 cargo clippy --workspace --all-targets --locked -- -D warnings 通过。
+- cargo test -p acorn-worker --locked：36 项常规检查通过，10 项外部环境检查在该命令中 ignored。新增浮点预设与样例／多解检查，扩展原始二进制 trim 覆盖，继续通过既有用户错误、JSON、预算、首败、完成数量与停止合同。浮点分组覆盖默认／显式容差、边界内外、零容差、格式及非有限值、非法参考和参数；非有限容差使用脚本层直接任务夹具验证，公共接纳解析器仍可能先拒绝不可表示的 JSON 数值。
+- 真实 Isolate 的 real_preset_acceptance 通过：C／Python 商题样例分别完成 8 例，sum-pair 两份不同合法输出均 AC，错误和非正数／非法格式输出为 WA。使用预先确认空闲的专用 ID 220／221 串行运行；执行器完成公共清理。该检查验证实际脚本、用户程序与隔离执行，不代表 Kafka／MySQL 整体链路。
+- 真实 MySQL 的 checker_presets_and_quotient_seed、published_queries_and_fixed_version_creation、invalid_task_data_and_foreign_keys 各 1 项通过。实际从正式 SQL 初始化独立库，验证两份脚本的字节一致性、商题参数与预算、8 例顺序及任务装配，保留旧版本和外键检查；原两数求和 104 例的顺序及字节另经差异核对保持一致。
+- workflow 的 published_queries_and_history_shapes 通过。实际 Kafka／MySQL 配合受控终态夹具验证两道题的公开查询、私有字段边界及原题版本／历史；此场景不执行真实 checker。
+- 新说明中的本地四文件命令实际返回 AC；SQL 维护示例作为手动操作说明，未对部署库执行源码更新。
+- 10 份 Markdown 通过 Prettier 检查；288 个本地链接（含 84 个锚点）有效，142 个原有标题保留，代码围栏闭合，主章节编号连续。15 组双语命令／配置块保持同步；任务清单为 5 项完成、1 项待办，35 项分解全部完成。git diff --check 通过。
+
+实际定向命令如下，数据库及 Kafka 环境沿用第 11.3 节的独立测试资源合同：
+
+```sh
+cargo test -p acorn-backend --locked --test database checker_presets_and_quotient_seed
+cargo test -p acorn-backend --locked --test database published_queries_and_fixed_version_creation
+cargo test -p acorn-backend --locked --test database invalid_task_data_and_foreign_keys
+cargo test -p acorn-backend --locked --test workflow published_queries_and_history_shapes
+ACORN_ISOLATE_BOX_ID=220 ACORN_CHECKER_BOX_ID=221 \
+  cargo test -p acorn-worker --locked --test executor real_preset_acceptance -- --ignored --nocapture --test-threads=1
+```
+
+### 13.3 检查修正
+
+首次整组 Worker 回归中，原有 deadline_stops_execution_and_reports_failure 的 300 ms 期限在运行进程启动前到达，JobDeadlineExceeded 归因成立，但“已经启动一次运行”的断言失败。该用例的期限改为 2 秒，以保留运行中停止及禁止后续用例的覆盖；随后 36 项常规检查通过。生产阶段的停止、期限与占用逻辑未作调整。
+
+### 13.4 交付边界
+
+PS05 及 7 项分解完成，PS06 保持未完成。已交付两种预设、两道正式种子题、两份商题提交和专用多解材料。新增数据、脚本和既有调用方经过定向验证；完整真实 Kafka → Worker／checker → MySQL、必要页面及其余验收由 PS06 汇总，不把受控终态或单独 Worker 的结果记作完整业务闭环。
+
+本轮未运行全部后端测试、前端构建／浏览器、外部模型或完整部署验收，未执行 Git 提交。

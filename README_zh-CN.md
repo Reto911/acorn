@@ -30,9 +30,9 @@ Acorn 是支持 C 和 Python 3 的单文件源码判题系统，提供浏览器�
 | [crates/protocol](crates/protocol/README.md) | Protobuf 消息及生成的 gRPC 客户端、服务端               |
 | [crates/kafka](crates/kafka/README.md)       | Kafka 配置默认值、通用校验和共享客户端策略              |
 | [web](web/README.md)                         | Vue 3、TypeScript、Element Plus 和 Monaco 浏览器界面    |
-| [sql](sql/README.md)                         | MySQL 建表脚本及内置两数求和题                          |
+| [sql](sql/README.md)                         | MySQL 建表脚本、内置两数求和与商题                      |
 | [config](config)                             | 后端和 Worker 的 TOML 配置示例                          |
-| [examples](examples)                         | 开发用户预置 SQL 和提交源码样例                         |
+| [examples](examples)                         | 开发用户预置 SQL、判题脚本材料和提交源码样例            |
 | [docs](docs/README.md)                       | 架构设计、接口合同和开发记录                            |
 
 ## 安装
@@ -121,7 +121,7 @@ mysql --host=127.0.0.1 --port=3306 --user=example_initializer --password --ssl-m
 mysql --host=127.0.0.1 --port=3306 --user=example_initializer --password --ssl-mode=DISABLED --database=appdb < sql/002-example-problem.sql
 ```
 
-这会创建结构版本 5、用户 1 和题号 1 的两数求和题，包含 trim checker 脚本、`{}` 参数、C/Python 限额与 104 个测试用例。后续启动直接复用该数据库。初始化针对空库，遇到首个 SQL 错误即停止；后端启动检查结构版本，允许空用户表启动并开放注册。手动初始化可省略开发用户脚本，部署脚本包含该步骤。正式程序不自动创建账号、导入旧库或自动升级。
+这会创建结构版本 5、用户 1、题号 1 两数求和（trim、104 例）和题号 2 整数商（浮点比较、8 例）。两题允许 C/Python，相同语言在两题的预算一致；商题的绝对和相对容差均为 1e-6。后续启动直接复用该数据库。初始化针对空库，遇到首个 SQL 错误即停止；后端启动检查结构版本，允许空用户表启动并开放注册。手动初始化可省略开发用户脚本，部署脚本包含该步骤。正式程序不自动创建账号、导入旧库或自动升级。
 
 脚本内容、账户职责和初始化中途失败的处理见[SQL 说明](sql/README.md)。
 
@@ -162,6 +162,8 @@ pnpm dev
 ### 提交第一份代码
 
 打开[题目列表](http://localhost:5173/problems)，阅读“两数求和（A + B）”并编辑 [C 样例](examples/submissions/a-plus-b.c)或 [Python 样例](examples/submissions/a-plus-b.py)。点击“登录 / 注册”，使用预置开发账号 `test` / `Acorn-Test-Only-123!` 登录，或注册后手动登录。登录后点击“提交代码”，查看结果及个人历史。匿名编辑仅保留在当前页面内存中，登录前刷新会丢失。
+
+题号 2“计算两个整数的商”可使用 [C 商题样例](examples/submissions/quotient.c)或 [Python 商题样例](examples/submissions/quotient.py)，展示不同合法数值格式。脚本编写材料、容差、多解示例和数据库更新方式见[判题脚本说明](examples/checkers/README.md)。
 
 从个人历史打开提交，在“本次提交源码”查看原始代码；点击审查意见中的“查看第 X–Y 行”定位对应源码行段。“返回答题”打开最新题面和当前草稿。源码加载、重试及显示方式见[前端说明](web/README.md#结果与历史)。
 

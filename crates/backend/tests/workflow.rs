@@ -176,12 +176,23 @@ async fn published_queries_and_history_shapes() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(list["limit"], 20);
     assert_eq!(list["offset"], 0);
-    assert_eq!(list["items"][0]["problem_id"], 1);
-    assert!(list["items"][0].get("statement").is_none());
+    let items = list["items"].as_array().unwrap();
+    assert_eq!(
+        items
+            .iter()
+            .map(|item| item["problem_id"].as_i64().unwrap())
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert!(items.iter().all(|item| item.get("statement").is_none()));
     let (_, _, detail) = call(&harness.app, "GET", "/api/v1/problems/1", None, None).await;
     assert_eq!(detail["languages"][0]["memory_kib"], 262144);
     assert_eq!(detail["review_mode"], "DISABLED");
     assert!(detail.get("cases").is_none());
+    let (_, _, quotient) = call(&harness.app, "GET", "/api/v1/problems/2", None, None).await;
+    assert_eq!(quotient["title"], "计算两个整数的商");
+    assert_eq!(quotient["languages"], detail["languages"]);
+    assert!(quotient.get("cases").is_none());
     for field in [
         "checker_source",
         "checker_script_id",
@@ -192,6 +203,7 @@ async fn published_queries_and_history_shapes() {
         "checker_memory_kib",
     ] {
         assert!(detail.get(field).is_none());
+        assert!(quotient.get(field).is_none());
     }
     harness.fixture.publish_next().await;
     let (_, _, latest) = call(&harness.app, "GET", "/api/v1/problems/1", None, None).await;

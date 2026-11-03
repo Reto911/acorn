@@ -143,7 +143,12 @@ async fn published_queries_and_fixed_version_creation() {
     let fixture = Fixture::new().await;
     let database = &fixture.database;
     let list = database.list_problems(20, 0).await.unwrap();
-    assert_eq!(list.len(), 1);
+    assert_eq!(
+        list.iter()
+            .map(|problem| problem.problem_id)
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
     let original = database.problem(1).await.unwrap().unwrap();
     assert_eq!(original.summary.version_no, 1);
     assert_eq!(
@@ -156,7 +161,7 @@ async fn published_queries_and_fixed_version_creation() {
     );
     assert_eq!(original.languages[0].limits.cpu_time_ms, 1000);
     assert_eq!(original.languages[0].limits.memory_kib, 256 * 1024);
-    assert!(database.problem_version(2, 1).await.unwrap().is_none());
+    assert!(database.problem_version(3, 1).await.unwrap().is_none());
     let submission_request = request("c");
     let created = database
         .create_submission(submission_request.clone())
@@ -205,7 +210,7 @@ async fn published_queries_and_fixed_version_creation() {
         INSERT INTO problem_version_languages SELECT problem_id, 2, language_id, cpu_time_ms, wall_time_ms, 1 FROM problem_version_languages WHERE problem_id = 1 AND version_no = 1 AND language_id = 'c';
         INSERT INTO test_cases VALUES (1, 2, 1, X'00FF010A', X'FF000A');
         UPDATE problems SET current_version_no = 2 WHERE id = 1;
-        INSERT INTO problems VALUES (2, NULL, 0);
+        INSERT INTO problems VALUES (3, NULL, 0);
         COMMIT;").execute(&mut connection).await.unwrap();
     let updated_source = b"print('{\"verdict\": \"WA\"}')\n";
     sqlx::query("UPDATE checker_scripts SET source = ? WHERE id = 1")
@@ -237,8 +242,8 @@ async fn published_queries_and_fixed_version_creation() {
         database.problem_version(1, 1).await.unwrap().unwrap(),
         original
     );
-    assert_eq!(database.list_problems(20, 0).await.unwrap().len(), 1);
-    assert!(database.problem(2).await.unwrap().is_none());
+    assert_eq!(database.list_problems(20, 0).await.unwrap().len(), 2);
+    assert!(database.problem(3).await.unwrap().is_none());
     let repeated = database
         .create_submission(submission_request)
         .await
@@ -293,11 +298,107 @@ async fn published_queries_and_fixed_version_creation() {
         Err(Error::LanguageNotAllowed)
     ));
     let mut unpublished = request("c");
-    unpublished.problem_id = 2;
+    unpublished.problem_id = 3;
     assert!(matches!(
         database.create_submission(unpublished).await,
         Err(Error::ProblemNotFound)
     ));
+    fixture.close().await;
+}
+
+/// Shipped scripts survive SQL escaping exactly and the quotient task uses its fixed seed data.
+#[tokio::test]
+async fn checker_presets_and_quotient_seed() {
+    let fixture = Fixture::new().await;
+    let mut connection = fixture.connection().await;
+    for (id, source) in [
+        (
+            1_i64,
+            include_bytes!("../../../examples/checkers/trim.py").as_slice(),
+        ),
+        (
+            2,
+            include_bytes!("../../../examples/checkers/float.py").as_slice(),
+        ),
+    ] {
+        let stored: Vec<u8> = sqlx::query_scalar("SELECT source FROM checker_scripts WHERE id = ?")
+            .bind(id)
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(stored, source);
+    }
+    let quotient = fixture.database.problem(2).await.unwrap().unwrap();
+    assert_eq!(quotient.summary.version_no, 1);
+    assert_eq!(quotient.summary.title, "计算两个整数的商");
+    assert_eq!(quotient.review_mode, ReviewMode::Disabled);
+    let original = fixture.database.problem(1).await.unwrap().unwrap();
+    assert_eq!(quotient.languages, original.languages);
+    let row = sqlx::query("SELECT checker_script_id, checker_cpu_time_ms, checker_wall_time_ms, checker_memory_kib FROM problem_versions WHERE problem_id = 2 AND version_no = 1")
+        .fetch_one(&mut connection).await.unwrap();
+    assert_eq!(row.try_get::<i64, _>("checker_script_id").unwrap(), 2);
+    for column in [
+        "checker_cpu_time_ms",
+        "checker_wall_time_ms",
+        "checker_memory_kib",
+    ] {
+        assert!(row.try_get::<Option<i64>, _>(column).unwrap().is_none());
+    }
+    let expected = [
+        (b"0 1\n".as_slice(), b"0\n".as_slice()),
+        (b"1 3\n", b"0.3333333333333333\n"),
+        (b"-1 3\n", b"-0.3333333333333333\n"),
+        (b"1 1000000\n", b"0.000001\n"),
+        (b"-1 1000000\n", b"-0.000001\n"),
+        (b"1000000 1\n", b"1000000\n"),
+        (b"-1000000 1\n", b"-1000000\n"),
+        (b"1000000 3\n", b"333333.3333333333\n"),
+    ];
+    for language in ["c", "python"] {
+        let mut submitted = request(language);
+        submitted.problem_id = 2;
+        let task = fixture
+            .database
+            .create_submission(submitted)
+            .await
+            .unwrap()
+            .task
+            .unwrap();
+        assert_eq!(
+            task.request.checker_source,
+            include_bytes!("../../../examples/checkers/float.py")
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&task.request.checker_config_json).unwrap(),
+            serde_json::json!({"abs_tol":1e-6,"rel_tol":1e-6})
+        );
+        assert_eq!(
+            task.request.checker_limits,
+            Some(proto::CheckerLimits {
+                cpu_time_ms: Some(2000),
+                wall_time_ms: Some(5000),
+                memory_kib: Some(262144)
+            })
+        );
+        assert_eq!(
+            task.request.run_limits.as_ref().unwrap(),
+            &quotient
+                .languages
+                .iter()
+                .find(|item| item.language_id == language)
+                .unwrap()
+                .limits
+        );
+        assert_eq!(task.request.cases.len(), 8);
+        for (case, (input, answer)) in task.request.cases.iter().zip(expected) {
+            assert_eq!(case.input, input);
+            assert_eq!(case.expected_output, answer);
+        }
+    }
+    let indices: Vec<i64> = sqlx::query_scalar("SELECT case_index FROM test_cases WHERE problem_id = 2 AND version_no = 1 ORDER BY case_index")
+        .fetch_all(&mut connection).await.unwrap();
+    assert_eq!(indices, (1..=8).collect::<Vec<_>>());
+    connection.close().await.unwrap();
     fixture.close().await;
 }
 
@@ -1090,8 +1191,8 @@ async fn invalid_task_data_and_foreign_keys() {
             .contains(r#"trailing = b"\t\n\v\f\r ""#)
     );
     sqlx::raw_sql("START TRANSACTION;
-        INSERT INTO problems (id, current_version_no, created_at_ms) VALUES (2, NULL, 0);
-        INSERT INTO problem_versions (problem_id, version_no, title, statement, checker_script_id, published_at_ms) VALUES (2, 1, 'Shared checker', 'Shared checker', 1, 0);
+        INSERT INTO problems (id, current_version_no, created_at_ms) VALUES (3, NULL, 0);
+        INSERT INTO problem_versions (problem_id, version_no, title, statement, checker_script_id, published_at_ms) VALUES (3, 1, 'Shared checker', 'Shared checker', 1, 0);
         COMMIT;")
         .execute(&mut connection).await.unwrap();
     assert_eq!(
@@ -1104,14 +1205,14 @@ async fn invalid_task_data_and_foreign_keys() {
         2
     );
     let config: String = sqlx::query_scalar(
-        "SELECT checker_config_json FROM problem_versions WHERE problem_id = 2 AND version_no = 1",
+        "SELECT checker_config_json FROM problem_versions WHERE problem_id = 3 AND version_no = 1",
     )
     .fetch_one(&mut connection)
     .await
     .unwrap();
     assert_eq!(config, "{}");
     for statement in [
-        "UPDATE problem_versions SET checker_script_id = 999 WHERE problem_id = 2",
+        "UPDATE problem_versions SET checker_script_id = 999 WHERE problem_id = 3",
         "DELETE FROM checker_scripts WHERE id = 1",
         "UPDATE checker_scripts SET id = 999 WHERE id = 1",
     ] {
@@ -1141,22 +1242,22 @@ async fn invalid_task_data_and_foreign_keys() {
     );
     for config in ["[]", "null", "1", "\"text\"", "", "{invalid}"] {
         assert!(
-            sqlx::query("UPDATE problem_versions SET checker_config_json = ? WHERE problem_id = 2")
+            sqlx::query("UPDATE problem_versions SET checker_config_json = ? WHERE problem_id = 3")
                 .bind(config)
                 .execute(&mut connection)
                 .await
                 .is_err()
         );
     }
-    sqlx::query("UPDATE problem_versions SET checker_config_json = ? WHERE problem_id = 2")
+    sqlx::query("UPDATE problem_versions SET checker_config_json = ? WHERE problem_id = 3")
         .bind(r#"{"parameter": {"enabled": true}}"#)
         .execute(&mut connection)
         .await
         .unwrap();
     for statement in [
-        "UPDATE problem_versions SET checker_cpu_time_ms = ? WHERE problem_id = 2",
-        "UPDATE problem_versions SET checker_wall_time_ms = ? WHERE problem_id = 2",
-        "UPDATE problem_versions SET checker_memory_kib = ? WHERE problem_id = 2",
+        "UPDATE problem_versions SET checker_cpu_time_ms = ? WHERE problem_id = 3",
+        "UPDATE problem_versions SET checker_wall_time_ms = ? WHERE problem_id = 3",
+        "UPDATE problem_versions SET checker_memory_kib = ? WHERE problem_id = 3",
     ] {
         for value in [Some(1_i64), None] {
             sqlx::query(statement)
@@ -1175,7 +1276,7 @@ async fn invalid_task_data_and_foreign_keys() {
             );
         }
     }
-    sqlx::query("DELETE FROM test_cases WHERE case_index = 2")
+    sqlx::query("DELETE FROM test_cases WHERE problem_id = 1 AND case_index = 2")
         .execute(&mut connection)
         .await
         .unwrap();

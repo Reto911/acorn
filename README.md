@@ -30,9 +30,9 @@ The backend serves the browser over HTTP JSON and publishes jobs and consumes Wo
 | [crates/protocol](crates/protocol/README.md) | Protobuf messages and generated gRPC clients and servers                     |
 | [crates/kafka](crates/kafka/README.md)       | Shared Kafka defaults, validation, and client configuration policy           |
 | [web](web/README.md)                         | Browser interface built with Vue 3, TypeScript, Element Plus, and Monaco     |
-| [sql](sql/README.md)                         | MySQL schema and the built-in A + B problem                                  |
+| [sql](sql/README.md)                         | MySQL schema, built-in A + B and quotient problems                           |
 | [config](config)                             | Example TOML configurations for the backend and Worker                       |
-| [examples](examples)                         | Development user seed SQL and sample submissions                             |
+| [examples](examples)                         | Development user seed, checker material and sample submissions               |
 | [docs](docs/README.md)                       | Architecture, interface contracts, and development records                   |
 
 ## Installation
@@ -121,7 +121,7 @@ mysql --host=127.0.0.1 --port=3306 --user=example_initializer --password --ssl-m
 mysql --host=127.0.0.1 --port=3306 --user=example_initializer --password --ssl-mode=DISABLED --database=appdb < sql/002-example-problem.sql
 ```
 
-This creates schema version 5, user 1, and the A + B problem with ID 1, a trim checker script with `{}` parameters, C/Python resource limits, and 104 test cases. Reuse this database on subsequent starts. Initialize an empty database and stop at the first SQL error. The backend validates the schema version at startup and accepts an empty users table for registration. The development seed is optional when initializing manually; the deployment script includes it. The application does not create accounts automatically, import old databases, or upgrade them automatically.
+This creates schema version 5, user 1, problem 1 (A + B, trim, 104 cases), and problem 2 (integer quotient, floating-point comparison, 8 cases). Both problems allow C/Python; each language has the same budget in both problems, and the quotient problem uses absolute and relative tolerances of 1e-6. Reuse this database on subsequent starts. Initialize an empty database and stop at the first SQL error. The backend validates the schema version at startup and accepts an empty users table for registration. The development seed is optional when initializing manually; the deployment script includes it. The application does not create accounts automatically, import old databases, or upgrade them automatically.
 
 See the [SQL guide](sql/README.md) for script contents, account responsibilities, and handling partial initialization.
 
@@ -162,6 +162,8 @@ Worker group observation may still be pending immediately after startup. A `503 
 ### Submit Your First Program
 
 Open the [problem list](http://localhost:5173/problems) to read the A + B problem (`两数求和（A + B）`) and edit the [C sample](examples/submissions/a-plus-b.c) or [Python sample](examples/submissions/a-plus-b.py). Use “登录 / 注册” to log in with the seeded development account `test` / `Acorn-Test-Only-123!`, or register and then log in manually. Click “提交代码” after login and view the result and personal history. Anonymous editing stays in page memory until login; refreshing before login loses that buffer.
+
+Problem 2, “计算两个整数的商”, accepts the [C quotient sample](examples/submissions/quotient.c) and [Python quotient sample](examples/submissions/quotient.py), which use different valid numeric formats. The [checker guide](examples/checkers/README.md) covers script material, tolerances, the multi-answer example, and database updates.
 
 Open a submission from personal history to view its original source under “本次提交源码”. A review's “查看第 X–Y 行” button locates the corresponding source range. “返回答题” opens the latest problem statement and your current draft. See the [frontend guide](web/README.md#结果与历史) for source loading, retry, and display behavior.
 

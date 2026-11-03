@@ -1,5 +1,5 @@
--- Built-in example problem retained in release distributions.
--- Four original cases plus 20 boundary and 80 fixed-seed random cases.
+-- Built-in A + B and quotient examples retained in release distributions.
+-- A + B keeps its 104 original cases; quotient has eight fixed cases.
 -- Run once after 001-initial-schema.sql against a newly initialized database.
 -- This is initial data, not a schema migration. It does not create a user.
 
@@ -9,7 +9,10 @@ SET SESSION sql_mode = 'STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION';
 START TRANSACTION;
 
 INSERT INTO checker_scripts (id, name, source)
-VALUES (1, 'trim_trailing_ascii_whitespace', 'import json
+VALUES
+    (1, 'trim_trailing_ascii_whitespace', '"""Compare raw output bytes after trimming trailing ASCII whitespace."""
+
+import json
 import sys
 from pathlib import Path
 
@@ -19,6 +22,55 @@ expected = Path(sys.argv[2]).read_bytes()
 
 verdict = "AC" if actual.rstrip(trailing) == expected.rstrip(trailing) else "WA"
 print(json.dumps({"verdict": verdict}))
+'),
+    (2, 'finite_float_tolerance', '"""Compare finite numeric tokens using absolute and relative tolerances."""
+
+import json
+import math
+import sys
+from pathlib import Path
+
+
+def main():
+    """Validate private data before judging user output through the four-file protocol."""
+    config = json.loads(Path(sys.argv[4]).read_text(encoding="utf-8"))
+    if config.keys() - {"abs_tol", "rel_tol"}:
+        raise ValueError("Unknown tolerance parameter")
+    abs_tol = config.get("abs_tol", 1e-6)
+    rel_tol = config.get("rel_tol", 1e-6)
+    for value in (abs_tol, rel_tol):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value < 0
+        ):
+            raise ValueError("Tolerances must be finite nonnegative numbers")
+    if rel_tol >= 1:
+        raise ValueError("Relative tolerance must be less than one")
+
+    expected = [float(token) for token in Path(sys.argv[2]).read_bytes().split()]
+    if not all(math.isfinite(value) for value in expected):
+        raise ValueError("Reference values must be finite")
+
+    try:
+        actual = [float(token) for token in Path(sys.argv[3]).read_bytes().split()]
+    except ValueError:
+        accepted = False
+    else:
+        accepted = (
+            len(actual) == len(expected)
+            and all(math.isfinite(value) for value in actual)
+            and all(
+                math.isclose(value, reference, abs_tol=abs_tol, rel_tol=rel_tol)
+                for value, reference in zip(actual, expected)
+            )
+        )
+    print(json.dumps({"verdict": "AC" if accepted else "WA"}))
+
+
+if __name__ == "__main__":
+    main()
 ');
 
 INSERT INTO problems (id, current_version_no, created_at_ms)
@@ -174,6 +226,71 @@ VALUES
     (1, 1, 103, X'2D363738323133303033203430373938313939320A', X'2D3237303233313031310A'),
     (1, 1, 104, X'383934313730313030203238323633343435390A', X'313137363830343535390A');
 
-UPDATE problems SET current_version_no = 1 WHERE id = 1;
+INSERT INTO problems (id, current_version_no, created_at_ms)
+VALUES (2, NULL, CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000 AS SIGNED));
+
+INSERT INTO problem_versions (
+    problem_id, version_no, title, statement, checker_script_id, checker_config_json,
+    published_at_ms
+)
+VALUES (
+    2,
+    1,
+    '计算两个整数的商',
+    '给定两个整数 a 和 b，输出它们的商 a / b。
+
+## 输入格式
+
+一行两个以空格分隔的整数 a 和 b，满足 -1000000 <= a <= 1000000，1 <= b <= 1000000。
+
+## 输出格式
+
+输出一个有限数值，表示 a / b。允许小数和科学记数法，忽略数值前后的 ASCII 空白，不单独限制小数位数。
+
+绝对容差 abs_tol 和相对容差 rel_tol 均为 1e-6。设实际输出为 actual，参考值为 expected，满足以下条件即通过：
+
+```text
+abs(actual - expected) <= max(abs_tol, rel_tol * max(abs(actual), abs(expected)))
+```
+
+输出必须恰好包含一个数值；无法解析的数值、NaN 或无穷大均不通过。
+
+## 样例输入
+
+```text
+1 3
+```
+
+## 样例输出
+
+```text
+0.333333333333
+```',
+    2,
+    '{"abs_tol":1e-6,"rel_tol":1e-6}',
+    CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000 AS SIGNED)
+);
+
+INSERT INTO problem_version_languages (
+    problem_id, version_no, language_id, cpu_time_ms, wall_time_ms, memory_kib
+)
+VALUES
+    (2, 1, 'c', 1000, 3000, 262144),
+    (2, 1, 'python', 2000, 5000, 262144);
+
+INSERT INTO test_cases (
+    problem_id, version_no, case_index, input, expected_output
+)
+VALUES
+    (2, 1, 1, X'3020310A', X'300A'),
+    (2, 1, 2, X'3120330A', X'302E333333333333333333333333333333330A'),
+    (2, 1, 3, X'2D3120330A', X'2D302E333333333333333333333333333333330A'),
+    (2, 1, 4, X'3120313030303030300A', X'302E3030303030310A'),
+    (2, 1, 5, X'2D3120313030303030300A', X'2D302E3030303030310A'),
+    (2, 1, 6, X'3130303030303020310A', X'313030303030300A'),
+    (2, 1, 7, X'2D3130303030303020310A', X'2D313030303030300A'),
+    (2, 1, 8, X'3130303030303020330A', X'3333333333332E333333333333333333330A');
+
+UPDATE problems SET current_version_no = 1 WHERE id IN (1, 2);
 
 COMMIT;

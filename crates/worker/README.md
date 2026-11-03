@@ -10,6 +10,8 @@ acorn-worker 是独立的 C/Python 判题进程，从 Kafka 消费任务并发�
 - 用户正常退出后，在独立环境执行任务携带的 Python checker。脚本以退出码 0 和唯一 JSON 对象返回 AC／WA；CE、RE、TLE、MLE、OLE 跳过 checker。两数求和题使用末尾 ASCII 空白 trim 脚本。
 - 执行前预留结果名额，终态按 FIFO 发布；发布确认并成功入队原任务位点请求后释放名额。
 
+正式种子提供两数求和的 trim 脚本和商题的浮点脚本；预设源码、容差、专用多解材料及数据库维护方式见[判题脚本说明](../../examples/checkers/README.md)。Worker 始终执行任务携带的数据库源码副本。
+
 语言 ID 为 `c` 和 `python`。Python 使用部署提供的解释器与标准库，支持单文件提交。
 
 ## 安装与沙箱准备
